@@ -27,10 +27,10 @@
      40.6458343
     ]
    ],
-   "created_at": "2026-09-24T10:19:26.849925+00:00",
+   "created_at": "2026-09-24T12:43:38.485196+00:00",
    "document_revision": 12,
    "schema_version": 1,
-   "session_id": "idzHKmJc5YyFUIo5BnkA0g",
+   "session_id": "bies__fBMPsH3dArNrZAvA",
    "steps": {
     "fencing": {
      "features": {
@@ -4487,6 +4487,7 @@
         "id": "production-area-2",
         "properties": {
          "area_acres": 0.44,
+         "aspect_available": true,
          "aspect_deg": 7.7,
          "aspect_factor": 0.136,
          "avg_slope_pct": 7.2,
@@ -4551,6 +4552,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 2 (suitability rank 1)",
          "layer": "production_area_candidate",
@@ -4558,8 +4562,10 @@
          "representative_elevation_m": 310.8,
          "shape_factor": 0.498,
          "slope_factor": 0.639,
+         "slope_median_pct": 4.0,
          "soil_carved_acres": 1.3200000524520874,
          "soil_carved_pct": 34.599998474121094,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 1,
@@ -5118,6 +5124,7 @@
         "id": "production-area-0",
         "properties": {
          "area_acres": 3.49,
+         "aspect_available": true,
          "aspect_deg": 337.2,
          "aspect_factor": 0.138,
          "avg_slope_pct": 8.0,
@@ -5242,6 +5249,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "northwest",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 0 (suitability rank 2)",
          "layer": "production_area_candidate",
@@ -5249,8 +5259,10 @@
          "representative_elevation_m": 310.6,
          "shape_factor": 0.532,
          "slope_factor": 0.602,
+         "slope_median_pct": 5.4,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -5433,6 +5445,7 @@
         "id": "production-area-4",
         "properties": {
          "area_acres": 0.42,
+         "aspect_available": true,
          "aspect_deg": 335.8,
          "aspect_factor": 0.161,
          "avg_slope_pct": 8.8,
@@ -5513,6 +5526,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "northwest",
+         "drainage_class": null,
+         "elevation_position": "upper field",
          "exclusion_crossings": [],
          "label": "Production area candidate 4 (suitability rank 3)",
          "layer": "production_area_candidate",
@@ -5520,8 +5536,10 @@
          "representative_elevation_m": 317.3,
          "shape_factor": 0.573,
          "slope_factor": 0.56,
+         "slope_median_pct": 6.5,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -5800,6 +5818,7 @@
         "id": "production-area-3",
         "properties": {
          "area_acres": 0.75,
+         "aspect_available": true,
          "aspect_deg": 16.3,
          "aspect_factor": 0.145,
          "avg_slope_pct": 8.7,
@@ -5872,6 +5891,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 3 (suitability rank 4)",
          "layer": "production_area_candidate",
@@ -5879,8 +5901,10 @@
          "representative_elevation_m": 314.1,
          "shape_factor": 0.419,
          "slope_factor": 0.565,
+         "slope_median_pct": 8.5,
          "soil_carved_acres": 1.3200000524520874,
          "soil_carved_pct": 34.599998474121094,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 1,
@@ -6185,6 +6209,7 @@
         "id": "production-area-1",
         "properties": {
          "area_acres": 0.61,
+         "aspect_available": true,
          "aspect_deg": 356.6,
          "aspect_factor": 0.231,
          "avg_slope_pct": 11.3,
@@ -6315,6 +6340,9 @@
           ],
           "type": "MultiPolygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "lower field",
          "exclusion_crossings": [],
          "label": "Production area candidate 1 (suitability rank 5)",
          "layer": "production_area_candidate",
@@ -6322,8 +6350,10 @@
          "representative_elevation_m": 308.1,
          "shape_factor": 0.346,
          "slope_factor": 0.435,
+         "slope_median_pct": 11.0,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -6621,6 +6651,7 @@
          "newly_served_acres": 2.286,
          "steep_ft": 0.0,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 87.5,
          "total_length_ft": 761.4,
          "total_served_acres": 2.65,
          "unserved_acres": 1.464
@@ -6684,6 +6715,7 @@
          "newly_served_acres": 0.179,
          "steep_ft": 0.0,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 87.5,
          "total_length_ft": 761.4,
          "total_served_acres": 2.65,
          "unserved_acres": 1.464
@@ -7918,11 +7950,18 @@
          "confidence": "low",
          "confidence_notes": "This identifies GENERAL tree-suitable land -- ground within the property's leftover, non-claimed area (the full boundary, first shrunk inward by a 5.0m boundary setback, minus every current OPTIMIZED (ceiling-trimmed) production-zone candidate, each buffered by a 5.0m clearance, plus the single SELECTED water-system zone, buffered by a 5.0m clearance, and single SELECTED road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own TREE_ROOT_ZONE_BUFFER_METERS buffer around real USGS 3DEP lidar canopy coverage -- this layer identifies NEW tree-suitable ground, not ground that's already wooded) that scores above a minimum suitability threshold on marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat corridor, or any other specific planting plan -- assigning that kind of function/purpose to this ground is deliberately left to report narrative, a separate later pass, and is NOT decided here. It is also NOT a species recommendation. tree_suitability_score (0-100) is a weighted composite of FOUR independently-stored 0-1 factors: hydric_overlap_factor (weight 0.4, the strongest -- real SSURGO hydric-soil geometry, the same shared mukey-selection logic production_suitability.py's own soil-carving already uses), slope_factor (weight 0.3, real DEM slope, INVERTED from production scoring -- steeper scores higher here, since erosion-prone, poor-cultivation ground is well-suited to tree cover), soil_marginality_factor (weight 0.2, real SSURGO Farmland Classification, INVERTED from how solar_suitability.py uses the same field -- prime/conditionally-prime farmland scores LOW here, everything else scores HIGH; necessarily a binary 0.0/1.0 factor, not a finer agricultural-capability gradient, since no finer SSURGO field is fetched anywhere in this pipeline), and stream_proximity_factor (weight 0.1, the smallest -- a distance-based bonus near real NHD-mapped streams, scored INDEPENDENTLY of hydric_overlap_factor: a location can be near a stream without itself sitting on hydric soil, or vice versa). Leftover land that's merely unclaimed but doesn't clear the minimum suitability threshold is deliberately NOT included as a candidate here -- see this module's MIN_TREE_SUITABILITY_SCORE for that reasoning. This is a topographic + soil + hydrology candidate zone, not a certainty -- ground-truth before committing to it. It also inherits the limitations of every layer it's built on (production_suitability.py, water_candidate_zones.py, road_corridors.py, and the SSURGO/NHD/DEM sources those already depend on).",
          "elevation_percentile_of_parcel": 52.6,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "hydric_data_available": true,
          "hydric_overlap_factor": 0.307,
          "label": "Tree zone candidate 1 (rank 1)",
          "layer": "tree_zone_candidate",
+         "marginal_benefits": [
+          "erosion control",
+          "nutrient deposition",
+          "stream protection"
+         ],
+         "position_in_parcel": "center",
          "rank": 1,
          "slope_factor": 0.365,
          "slope_median_pct": 20.4,
@@ -8020,7 +8059,7 @@
      "status": "committed"
     }
    },
-   "updated_at": "2026-09-24T10:19:28.943787+00:00"
+   "updated_at": "2026-09-24T12:43:40.788271+00:00"
   },
   "panel": {
    "fencing": [
@@ -8666,10 +8705,10 @@
      40.6458343
     ]
    ],
-   "created_at": "2026-09-24T10:19:22.848526+00:00",
+   "created_at": "2026-09-24T12:43:34.611678+00:00",
    "document_revision": 13,
    "schema_version": 1,
-   "session_id": "h4e1k9SRUypkIOB6Yag0nA",
+   "session_id": "yqV6Necp0LCPk9CVOeES6w",
    "steps": {
     "fencing": {
      "features": {
@@ -11851,6 +11890,7 @@
         "id": "production-area-2",
         "properties": {
          "area_acres": 0.44,
+         "aspect_available": true,
          "aspect_deg": 7.7,
          "aspect_factor": 0.136,
          "avg_slope_pct": 7.2,
@@ -11915,6 +11955,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 2 (suitability rank 1)",
          "layer": "production_area_candidate",
@@ -11922,8 +11965,10 @@
          "representative_elevation_m": 310.8,
          "shape_factor": 0.498,
          "slope_factor": 0.639,
+         "slope_median_pct": 4.0,
          "soil_carved_acres": 1.3200000524520874,
          "soil_carved_pct": 34.599998474121094,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 1,
@@ -12482,6 +12527,7 @@
         "id": "production-area-0",
         "properties": {
          "area_acres": 3.49,
+         "aspect_available": true,
          "aspect_deg": 337.2,
          "aspect_factor": 0.138,
          "avg_slope_pct": 8.0,
@@ -12606,6 +12652,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "northwest",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 0 (suitability rank 2)",
          "layer": "production_area_candidate",
@@ -12613,8 +12662,10 @@
          "representative_elevation_m": 310.6,
          "shape_factor": 0.532,
          "slope_factor": 0.602,
+         "slope_median_pct": 5.4,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -12797,6 +12848,7 @@
         "id": "production-area-4",
         "properties": {
          "area_acres": 0.42,
+         "aspect_available": true,
          "aspect_deg": 335.8,
          "aspect_factor": 0.161,
          "avg_slope_pct": 8.8,
@@ -12877,6 +12929,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "northwest",
+         "drainage_class": null,
+         "elevation_position": "upper field",
          "exclusion_crossings": [],
          "label": "Production area candidate 4 (suitability rank 3)",
          "layer": "production_area_candidate",
@@ -12884,8 +12939,10 @@
          "representative_elevation_m": 317.3,
          "shape_factor": 0.573,
          "slope_factor": 0.56,
+         "slope_median_pct": 6.5,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -13164,6 +13221,7 @@
         "id": "production-area-3",
         "properties": {
          "area_acres": 0.75,
+         "aspect_available": true,
          "aspect_deg": 16.3,
          "aspect_factor": 0.145,
          "avg_slope_pct": 8.7,
@@ -13236,6 +13294,9 @@
           ],
           "type": "Polygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "label": "Production area candidate 3 (suitability rank 4)",
          "layer": "production_area_candidate",
@@ -13243,8 +13304,10 @@
          "representative_elevation_m": 314.1,
          "shape_factor": 0.419,
          "slope_factor": 0.565,
+         "slope_median_pct": 8.5,
          "soil_carved_acres": 1.3200000524520874,
          "soil_carved_pct": 34.599998474121094,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 1,
@@ -13549,6 +13612,7 @@
         "id": "production-area-1",
         "properties": {
          "area_acres": 0.61,
+         "aspect_available": true,
          "aspect_deg": 356.6,
          "aspect_factor": 0.231,
          "avg_slope_pct": 11.3,
@@ -13679,6 +13743,9 @@
           ],
           "type": "MultiPolygon"
          },
+         "dominant_aspect": "north",
+         "drainage_class": null,
+         "elevation_position": "lower field",
          "exclusion_crossings": [],
          "label": "Production area candidate 1 (suitability rank 5)",
          "layer": "production_area_candidate",
@@ -13686,8 +13753,10 @@
          "representative_elevation_m": 308.1,
          "shape_factor": 0.346,
          "slope_factor": 0.435,
+         "slope_median_pct": 11.0,
          "soil_carved_acres": 0.7300000190734863,
          "soil_carved_pct": 9.899999618530273,
+         "soil_components": null,
          "soil_data_available": true,
          "soil_factor": 0.5,
          "source_patch_id": 0,
@@ -13985,6 +14054,7 @@
          "newly_served_acres": 2.286,
          "steep_ft": 0.0,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 86.1,
          "total_length_ft": 975.8,
          "total_served_acres": 2.774,
          "unserved_acres": 1.341
@@ -14040,6 +14110,7 @@
          "newly_served_acres": 0.124,
          "steep_ft": 0.0,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 86.1,
          "total_length_ft": 975.8,
          "total_served_acres": 2.774,
          "unserved_acres": 1.341
@@ -14103,6 +14174,7 @@
          "newly_served_acres": 0.179,
          "steep_ft": 0.0,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 86.1,
          "total_length_ft": 975.8,
          "total_served_acres": 2.774,
          "unserved_acres": 1.341
@@ -14178,6 +14250,7 @@
          "newly_served_acres": 0.0,
          "steep_ft": 49.2,
          "stop_reason": "cost_per_acre_exceeded",
+         "terrain_quality_score": 86.1,
          "total_length_ft": 975.8,
          "total_served_acres": 2.774,
          "unserved_acres": 1.341
@@ -14848,11 +14921,18 @@
          "confidence": "low",
          "confidence_notes": "This identifies GENERAL tree-suitable land -- ground within the property's leftover, non-claimed area (the full boundary, first shrunk inward by a 5.0m boundary setback, minus every current OPTIMIZED (ceiling-trimmed) production-zone candidate, each buffered by a 5.0m clearance, plus the single SELECTED water-system zone, buffered by a 5.0m clearance, and single SELECTED road corridor's own geometry, MINUS real, existing tree canopy (production_area.py's own TREE_ROOT_ZONE_BUFFER_METERS buffer around real USGS 3DEP lidar canopy coverage -- this layer identifies NEW tree-suitable ground, not ground that's already wooded) that scores above a minimum suitability threshold on marginality relative to production use. It is NOT a windbreak, riparian buffer, habitat corridor, or any other specific planting plan -- assigning that kind of function/purpose to this ground is deliberately left to report narrative, a separate later pass, and is NOT decided here. It is also NOT a species recommendation. tree_suitability_score (0-100) is a weighted composite of FOUR independently-stored 0-1 factors: hydric_overlap_factor (weight 0.4, the strongest -- real SSURGO hydric-soil geometry, the same shared mukey-selection logic production_suitability.py's own soil-carving already uses), slope_factor (weight 0.3, real DEM slope, INVERTED from production scoring -- steeper scores higher here, since erosion-prone, poor-cultivation ground is well-suited to tree cover), soil_marginality_factor (weight 0.2, real SSURGO Farmland Classification, INVERTED from how solar_suitability.py uses the same field -- prime/conditionally-prime farmland scores LOW here, everything else scores HIGH; necessarily a binary 0.0/1.0 factor, not a finer agricultural-capability gradient, since no finer SSURGO field is fetched anywhere in this pipeline), and stream_proximity_factor (weight 0.1, the smallest -- a distance-based bonus near real NHD-mapped streams, scored INDEPENDENTLY of hydric_overlap_factor: a location can be near a stream without itself sitting on hydric soil, or vice versa). Leftover land that's merely unclaimed but doesn't clear the minimum suitability threshold is deliberately NOT included as a candidate here -- see this module's MIN_TREE_SUITABILITY_SCORE for that reasoning. This is a topographic + soil + hydrology candidate zone, not a certainty -- ground-truth before committing to it. It also inherits the limitations of every layer it's built on (production_suitability.py, water_candidate_zones.py, road_corridors.py, and the SSURGO/NHD/DEM sources those already depend on).",
          "elevation_percentile_of_parcel": 57.2,
+         "elevation_position": "mid field",
          "exclusion_crossings": [],
          "hydric_data_available": true,
          "hydric_overlap_factor": 0.281,
          "label": "Tree zone candidate 3 (rank 1)",
          "layer": "tree_zone_candidate",
+         "marginal_benefits": [
+          "erosion control",
+          "nutrient deposition",
+          "stream protection"
+         ],
+         "position_in_parcel": "southeast",
          "rank": 1,
          "slope_factor": 0.409,
          "slope_median_pct": 22.2,
@@ -15017,6 +15097,9 @@
          "cross_type_overlaps": [
           {
            "fraction": 0.144,
+           "presented": true,
+           "rank": 1,
+           "survey_type": "excavated",
            "zone_id": 8
           }
          ],
@@ -15056,6 +15139,7 @@
          "pinch_width_m": 77.5,
          "presentation_order": 1,
          "presented": true,
+         "presented_reason": "rank",
          "primary_production_area_relationship": {
           "above_production_area": false,
           "distance_m": 20.9,
@@ -15138,11 +15222,16 @@
          "sparse_anchor": false,
          "status": "nominated",
          "still_narrowing_at_termination": false,
+         "suitability_display": {
+          "unit": "/100",
+          "value": 40
+         },
          "survey_type": "embankment",
          "truncated_by_boundary": false,
          "truncated_by_road": false,
          "twi_score_max": 1.0,
          "twi_score_mean": 0.187,
+         "water_delivery": "pump_required",
          "width_profile_max_m": 77.5,
          "width_profile_min_m": 77.5,
          "zone_acres": 0.2996,
@@ -15251,30 +15340,43 @@
          "cross_type_overlaps": [
           {
            "fraction": 0.069,
+           "presented": true,
+           "rank": 1,
+           "survey_type": "embankment",
            "zone_id": 0
           },
           {
            "fraction": 0.049,
+           "presented": true,
+           "rank": 4,
+           "survey_type": "embankment",
            "zone_id": 1
           },
           {
            "fraction": 0.138,
+           "presented": false,
            "zone_id": 2
           },
           {
            "fraction": 0.069,
+           "presented": true,
+           "rank": 2,
+           "survey_type": "embankment",
            "zone_id": 3
           },
           {
            "fraction": 0.158,
+           "presented": false,
            "zone_id": 4
           },
           {
            "fraction": 0.301,
+           "presented": false,
            "zone_id": 5
           },
           {
            "fraction": 0.034,
+           "presented": false,
            "zone_id": 6
           }
          ],
@@ -15305,6 +15407,7 @@
          "nominated_by": "suitability_surface",
          "presentation_order": 2,
          "presented": true,
+         "presented_reason": "rank",
          "primary_production_area_relationship": {
           "above_production_area": true,
           "distance_m": 62.8,
@@ -15372,10 +15475,15 @@
          "soil_coverage_fraction": 0.259,
          "sparse_anchor": false,
          "status": "nominated",
+         "suitability_display": {
+          "unit": "/100",
+          "value": 65
+         },
          "survey_type": "excavated",
          "truncated_by_road": true,
          "twi_score_max": 1.0,
          "twi_score_mean": 0.983,
+         "water_delivery": "gravity_feed",
          "zone_acres": 0.6295,
          "zone_id": 8
         },
@@ -15392,7 +15500,7 @@
      "status": "committed"
     }
    },
-   "updated_at": "2026-09-24T10:19:26.560963+00:00"
+   "updated_at": "2026-09-24T12:43:38.414355+00:00"
   },
   "panel": {
    "fencing": [
@@ -16165,7 +16273,7 @@
       {
        "dp": 1,
        "kind": "measured",
-       "label": "shared ground w/ an area not shown %",
+       "label": "shared ground w/ Embankment 4 %",
        "text": "4.9",
        "value": 4.9
       },

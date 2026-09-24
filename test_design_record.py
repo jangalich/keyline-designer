@@ -15,7 +15,8 @@ panel's order, with the panel's label and string.
     2. every row the record prints is the panel's, in order; the rows left out, and why
     3. names and provenance: suggested with a rank, drawn, placed with none; cautions
     4. committed empty, in words, end to end
-    5. nothing recomputed: the record reads the document and calls nothing
+    5. a document from before the parity change: its new rows omitted, per field, no error
+    6. nothing recomputed: the record reads the document and calls nothing
 """
 
 import copy
@@ -105,36 +106,33 @@ def _seq(rows):
     return out
 
 
-# THE PANEL ROWS THE DOCUMENT DOES NOT HOLD. Static by step and provenance
-# (design_record.PANEL_ROWS_NOT_IN_DOCUMENT), plus two that depend on the
-# design: a shared-ground row whose other survey area was not committed
-# (the document cannot name it), and a road's acres served when its
-# 0.001-rounded figure straddles the panel's rounding (_served_acres).
+# THE PANEL ROWS THE DOCUMENT DOES NOT HOLD. Since the parity change
+# (branch 14) every suggested feature carries what its panel displayed, so
+# what is left is design_record.PANEL_ROWS_NOT_IN_DOCUMENT -- the road's
+# average grade and crossings, computed onto no feature -- and a road's
+# acres served when its 0.001-rounded figure straddles the panel's rounding
+# (_served_acres).
 def _left_out(step_id, provenance, row, committed_names, served_determined):
     label = row[1]
     static = dr.PANEL_ROWS_NOT_IN_DOCUMENT.get((step_id, provenance), ())
     if label in static:
         return label
-    if step_id == "water" and label and label.startswith("shared ground w/ "):
-        name = label[len("shared ground w/ "):-2]
-        if name not in committed_names:
-            return "shared ground w/ <a survey area not committed> %"
     if step_id == "roads" and label == "acres served" and not served_determined:
         return "acres served (undetermined at 0.001)"
     return None
 
 
-EXPECTED_LEFT_OUT = {
-    "full": {
-        ("landform", "aspect"): 5, ("landform", "position"): 5, ("landform", "median slope %"): 5, ("landform", "soil"): 5,
-        ("landform", "drainage"): 5, ("water", "shared ground w/ <a survey area not committed> %"): 6,
-        ("roads", "/100 score"): 1, ("roads", "avg grade %"): 1, ("trees", "where in the parcel"): 1,
-    },
-}
-EXPECTED_LEFT_OUT["empty_water"] = {k: v for k, v in EXPECTED_LEFT_OUT["full"].items() if k[0] != "water"}
-EXPECTED_LEFT_OUT["empty_water"][("roads", "acres served (undetermined at 0.001)")] = 1
+def _expected_left_out(case):
+    """The average grade, always; acres served, where the stored rounding
+    straddles the panel's -- asserted as the fixture actually falls."""
+    expected = {("roads", "avg grade %"): 1}
+    if dr._served_acres(case["document"]["steps"]["roads"]["features"]["features"]) is None:
+        expected[("roads", "acres served (undetermined at 0.001)")] = 1
+    return expected
+
 
 TABLE = []
+LEFT_OUT = {}
 for session, case in FIXTURE.items():
     document = case["document"]
     record = {s["step_id"]: s for s in dr.build_design_record(document)["steps"]}
@@ -166,15 +164,16 @@ for session, case in FIXTURE.items():
             assert got == expected, (session, step_id, card["name"], got, expected)
             for kind_, label, text in got:
                 TABLE.append((session, step_id, card["name"], label if kind_ != "term" else "", text))
-    assert left_out == EXPECTED_LEFT_OUT[session], (session, left_out)
+    assert left_out == _expected_left_out(case), (session, left_out)
+    LEFT_OUT[session] = left_out
 
 width = max(len(r[2]) for r in TABLE)
 for session, step_id, name, label, text in TABLE:
     if session == "full":
         print(f"   {step_id:<10} {name:<{width}} {'' if text is None else text:>52}  {label}")
 print(f"   {len(TABLE)} rows across both sessions, each the panel's row, in the panel's order")
-for session, expected in EXPECTED_LEFT_OUT.items():
-    print(f"   left out ({session}): " + "; ".join(f"{step} {label} x{n}" for (step, label), n in sorted(expected.items())))
+for session, left in LEFT_OUT.items():
+    print(f"   left out ({session}): " + "; ".join(f"{step} {label} x{n}" for (step, label), n in sorted(left.items())))
 
 # ======================================================================
 # 3. Names, provenance and cautions
@@ -285,9 +284,94 @@ except ValueError as error:
 print("   all six empty: six statements; an uncommitted step raises")
 
 # ======================================================================
-# 5. Nothing recomputed
+# 5. A document from before the parity change
 # ======================================================================
-print("5. nothing recomputed: the record reads the document and calls nothing")
+print("5. a document committed before the parity change: the new rows omitted, per field, and no error")
+
+# The panel labels the parity fields supply, by step: each row goes when
+# its field is absent -- a labelled run's later lines with it, a heading's
+# terms with it.
+PARITY_LABELS = {
+    "landform": {"aspect", "position", "median slope %", "soil", "drainage"},
+    "water": {"/100 score", "water delivery"},
+    "roads": {"/100 score"},
+    "trees": {"where in the parcel", "position", "marginal benefits", "marginal benefit"},
+}
+
+
+def _without_parity(step_id, rows):
+    kept, skipping = [], False
+    for row in _seq(rows):
+        kind, label = row[0], row[1]
+        if kind in ("continuation", "term") and skipping:
+            continue
+        skipping = label in PARITY_LABELS.get(step_id, ()) or (
+            step_id == "water" and label is not None and label.startswith("shared ground w/ "))
+        if not skipping:
+            kept.append(row)
+    return kept
+
+
+def _strip_parity(document):
+    """The document as it would have been committed before branch 14: the
+    parity fields off every SUGGESTED feature, and the partner identity off
+    every shared-ground entry. Drawn features keep theirs -- they always
+    carried them."""
+    old = copy.deepcopy(document)
+    for step_id, fields in dr.PARITY_FIELDS.items():
+        entry = old["steps"][step_id]
+        for feature in entry["features"]["features"]:
+            if entry["provenance"][feature["id"]] != "generated":
+                continue
+            for field in fields:
+                feature["properties"].pop(field, None)
+            for overlap in feature["properties"].get("cross_type_overlaps") or []:
+                for key in ("presented", "survey_type", "rank"):
+                    overlap.pop(key, None)
+    return old
+
+
+omitted = 0
+for session, case in FIXTURE.items():
+    now = {s["step_id"]: s for s in dr.build_design_record(case["document"])["steps"]}
+    before = {s["step_id"]: s for s in dr.build_design_record(_strip_parity(case["document"]))["steps"]}
+    for step_id in design_document.STEP_ORDER:
+        if now[step_id]["empty"]:
+            assert before[step_id] == now[step_id]
+            continue
+        provenance = case["document"]["steps"][step_id]["provenance"]
+        for card_now, card_before in zip(now[step_id]["cards"], before[step_id]["cards"]):
+            assert card_now["id"] == card_before["id"] and card_now["name"] == card_before["name"]
+            if step_id in dr.PARITY_FIELDS and provenance.get(card_now["id"], "generated") == "generated":
+                expected = _without_parity(step_id, card_now["rows"])
+                omitted += len(_seq(card_now["rows"])) - len(expected)
+            else:
+                expected = _seq(card_now["rows"])
+            assert _seq(card_before["rows"]) == expected, (session, step_id, card_now["name"], _seq(card_before["rows"]), expected)
+assert omitted > 0
+
+# And main's own pre-branch-14 document (panel_parity_fixture.json, committed
+# by the code before the change), a finished six-step design: it builds, and
+# no suggested card carries a parity row.
+with open(os.path.join(HERE, "panel_parity_fixture.json"), encoding="utf-8") as handle:
+    PRE = json.load(handle)["pre_parity_document"]
+pre_record = {s["step_id"]: s for s in dr.build_design_record(PRE)["steps"]}
+for step_id, labels in PARITY_LABELS.items():
+    provenance = PRE["steps"][step_id]["provenance"]
+    for card in pre_record[step_id]["cards"]:
+        if provenance.get(card["id"], "generated") != "generated":
+            continue
+        printed = {label for _, label, _ in _seq(card["rows"])}
+        assert not (printed & labels), (step_id, card["name"], printed & labels)
+        assert not any(l and l.startswith("shared ground w/ ") for l in printed)
+print(f"   both fixture documents, parity fields stripped: {omitted} rows omitted, every other row unchanged; "
+      f"main's own pre-change document builds, {sum(len(s.get('cards', [])) for s in pre_record.values())} cards, "
+      "no parity row on a suggested card")
+
+# ======================================================================
+# 6. Nothing recomputed
+# ======================================================================
+print("6. nothing recomputed: the record reads the document and calls nothing")
 import production_area_ceiling  # noqa: E402
 import road_corridors  # noqa: E402
 import session_design  # noqa: E402
@@ -298,6 +382,7 @@ import tree_zone_candidates  # noqa: E402
 import water_survey_areas  # noqa: E402
 import wire_translation  # noqa: E402
 import fencing  # noqa: E402
+import display_scale  # noqa: E402
 
 # Every way the record could reach for what the document already holds: the
 # session and its cache, a generate, a rehydration, each KSOP module's own
@@ -310,6 +395,11 @@ WATCHED = [
     (road_corridors, "build_narrative_data"), (road_corridors, "identify_road_corridor_candidates"),
     (tree_zone_candidates, "identify_tree_zone_candidates"), (solar_suitability, "identify_solar_candidate_zones"),
     (fencing, "identify_fencing"), (fencing, "build_narrative_data"),
+    # AND THE THREE DERIVATIONS THE RECORD USED TO MAKE before the parity
+    # change put the displayed values on the feature: the record reads the
+    # stored water score, elevation word and benefits, and derives none.
+    (display_scale, "to_display_scale"), (production_area_ceiling, "_elevation_position"),
+    (tree_zone_candidates, "marginal_benefits"),
 ]
 calls = {}
 patches = []
@@ -333,7 +423,8 @@ finally:
 total = sum(mock.call_count for mock in calls.values())
 assert total == 0, {k: m.call_count for k, m in calls.items() if m.call_count}
 assert offline_harness.refused() == [], offline_harness.refused()
-print(f"   {len(calls)} entry points watched (session, cache, generate, {len(rehydrators)} rehydrators, KSOP modules): "
+print(f"   {len(calls)} entry points watched (session, cache, generate, {len(rehydrators)} rehydrators, KSOP modules, "
+      "the three old derivations): "
       f"{total} calls; {len(offline_harness.refused())} network requests")
 
 print("\ntest_design_record.py: all sections passed")

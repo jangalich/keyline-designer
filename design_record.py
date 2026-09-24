@@ -21,30 +21,26 @@ carries the FeatureCollection the client sent -- the server's own
 proposal Features for what the user selected, the drawn or placed
 Features as the client held them -- and the provenance of each. That is
 the whole of what this module reads. It takes no session context and no
-generate result. A panel row whose value the document does not hold is
-left out of the card, and nothing on the page says so: a reader who did
-not see the panel has nothing to miss. Which rows those are, step by
-step, is PANEL_ROWS_NOT_IN_DOCUMENT below. Saving the panel's rows into
-the document at commit is the complete answer and is a Design Document
-change for its own branch.
+generate result, so it cannot fail on an evicted cache.
 
-EXACT DERIVATIONS ONLY. Four panel values are not fields on the feature
-but are derived from fields that are, by the same function over the same
-stored values the server used when it built the panel row:
+THE DISPLAYED VALUES ARE ON THE FEATURE (branch 14). A suggested
+Feature's panel readings used to live only in the generate payload's
+`zones` table, so its panel rows could not reach the record. The payload
+assemblers now copy the values the panel displayed onto the Feature --
+landform's ground readings, water's display score and delivery answer
+and each shared-ground partner's identity, the road network's score,
+trees' place, elevation word and benefits -- the same fields a drawn
+Feature always carried. The record prints them AS STORED: nothing here
+converts, derives or re-ranks, because re-derivation is how a document
+and the panel it came from drift apart.
 
-    water   water delivery     the panel row water_survey_areas builds
-                               from primary_production_area_relationship
-                               (None -> no service relationship; above
-                               the block -> gravity feed; else pump
-                               required), its constants imported.
-            /100 score         display_scale.to_display_scale over the
-                               feature's own 0.0001-rounded mean.
-    trees   position           production_area_ceiling._elevation_position
-                               over the zone's own elevation percentile.
-            marginal benefits  tree_zone_candidates.marginal_benefits over
-                               the zone's own 0.001-rounded factors and
-                               data-available flags -- the patch the panel
-                               row was built from carries exactly these.
+DEGRADE PER FIELD. A document committed before branch 14 carries none of
+those fields (PARITY_FIELDS). Each row is left out when its field is
+absent -- the record still builds, never raises -- while a field present
+and null prints the panel's own em dash. A panel row no document can hold
+(PANEL_ROWS_NOT_IN_DOCUMENT: the road's average grade and crossings) is
+left out always. Nothing on the page says a row is missing: a reader who
+did not see the panel has nothing to miss.
 
 A FIGURE IS PRINTED ONLY WHEN IT IS PROVABLY THE PANEL'S. Most rows are
 exact: the panel formatted a value the committed Feature carries
@@ -106,9 +102,9 @@ from typing import Optional
 import design_document
 import display_scale
 import production_area_ceiling
+import road_corridors
 import solar_suitability
 import tree_zone_candidates
-import water_survey_areas
 from fencing import FENCE_TYPE_LABELS
 
 EM_DASH = "—"
@@ -199,6 +195,7 @@ LANDFORM_SCORE_TOP = _score_denominator(production_area_ceiling._SCALES)
 WATER_SCORE_TOP = display_scale.DISPLAY_SCALE_MAX
 TREES_SCORE_TOP = _score_denominator(tree_zone_candidates._SCALES)
 STRUCTURES_SCORE_TOP = _score_denominator(solar_suitability._SCALES)
+ROADS_SCORE_TOP = _score_denominator(road_corridors._TERRAIN_QUALITY_SCALE)
 
 
 def count_line(count: int, noun: str) -> dict:
@@ -230,16 +227,29 @@ def format_lon_lat(lon: float, lat: float) -> str:
 # The steps
 # ======================================================================
 
-# THE PANEL ROWS THE DOCUMENT CANNOT SUPPLY, by step and provenance --
-# each lives only in the step's generate result (the session cache) and
-# is left out of the card. Asserted against the fixture's captured panel
-# by test_design_record.py, so this table cannot drift from the code.
+# THE PANEL ROWS NO DOCUMENT HOLDS -- not computed onto any feature, so no
+# card can print them. Left out without comment. Asserted against the
+# fixture's captured panel by test_design_record.py.
 PANEL_ROWS_NOT_IN_DOCUMENT = {
-    ("landform", PROVENANCE_GENERATED): ("aspect", "position", "median slope %", "soil", "drainage"),
-    ("water", PROVENANCE_GENERATED): ("shared ground w/ <a survey area not committed> %",),
-    ("roads", PROVENANCE_GENERATED): ("/100 score", "avg grade %", "crosses production block ft", "crosses canopy ft",
+    # A length-weighted mean of the UNROUNDED branch grades; each branch is
+    # stored at 0.1, so the band is a full last digit wide and the panel's
+    # figure is never provable.
+    ("roads", PROVENANCE_GENERATED): ("avg grade %", "crosses production block ft", "crosses canopy ft",
                                       "crosses wet ground ft"),
-    ("trees", PROVENANCE_GENERATED): ("where in the parcel",),
+}
+
+# THE ROWS A DOCUMENT COMMITTED BEFORE THE PARITY CHANGE (branch 14) DOES NOT
+# HOLD: the displayed values the payload now copies onto a suggested feature
+# (production_zone_payload.PANEL_READING_FIELDS, step_orchestrator.
+# TREE_PANEL_READING_FIELDS and _water_feature_with_panel). A saved session
+# from before it still produces a record -- these rows are simply omitted,
+# per field, never an error.
+PARITY_FIELDS = {
+    "landform": ("dominant_aspect", "aspect_available", "elevation_position", "slope_median_pct", "soil_components",
+                 "drainage_class"),
+    "water": ("suitability_display", "water_delivery"),
+    "roads": ("terrain_quality_score",),
+    "trees": ("position_in_parcel", "elevation_position", "marginal_benefits"),
 }
 
 
@@ -254,6 +264,16 @@ PANEL_ROWS_NOT_IN_DOCUMENT = {
 # heading) and "caution" (a crossing a drawn shape carries). The builders
 # below are the frontend's (src/wizard/stepDefinitions.js, shell/
 # panelFormat.js, shell/DetailPanel.jsx), row for row.
+#
+# DEGRADE PER FIELD. Every detail row reads a stored field and is None --
+# no row -- when the feature does not carry the key at all: a document
+# committed before the field existed. A key that IS there holding null is a
+# different thing, the panel's own "not known", and prints the panel's em
+# dash exactly as the panel did. `_has(p, *keys)` is that distinction.
+
+
+def _has(properties: dict, *keys) -> bool:
+    return all(key in properties for key in keys)
 
 
 def _measured(value, label):
@@ -299,6 +319,7 @@ def _panel_body(tab_rows: list, detail_rows: list) -> list:
     """panelFormat.panelBody: the tab's rows, a break, the detail rows;
     runs of breaks collapse to one (a labelled one wins) and none leads or
     trails."""
+    tab_rows = [r for r in tab_rows if r is not None]
     rows = [r for r in detail_rows if r is not None]
     joined = tab_rows + ([_break()] if tab_rows and rows else []) + rows
     body = []
@@ -343,6 +364,16 @@ def _aspect_phrase(reading: dict) -> str:
     return f"{reading['dominant_aspect']} facing"
 
 
+def _measured_field(p: dict, key: str, dp: int, label: str):
+    """A measured row off one stored field, or no row when the feature does
+    not carry it."""
+    return _measured(to_fixed(p[key], dp), label) if key in p else None
+
+
+def _categorical_field(p: dict, key: str, label: str):
+    return _categorical(p[key], label) if key in p else None
+
+
 # ======================================================================
 # The steps
 # ======================================================================
@@ -371,14 +402,17 @@ def _score_label(top: int) -> str:
     return f"/{top} score"
 
 
-def _production_block_rows(reading: dict) -> list:
-    """stepDefinitions.productionBlockRows: the ground under a block."""
+def _production_block_rows(p: dict) -> list:
+    """stepDefinitions.productionBlockRows: the ground under a block -- off
+    the feature, suggested or drawn alike (a suggested block has carried
+    them since the parity change; a drawn one always has)."""
     return [
-        _categorical(_aspect_phrase(reading), "aspect"),
-        _categorical(reading.get("elevation_position"), "position"),
-        _measured(to_fixed(reading.get("slope_median_pct"), MEASURE_DP), "median slope %"),
-        *_labelled_run([entry.get("label") for entry in reading.get("soil_components") or []], "soil"),
-        _categorical(reading.get("drainage_class"), "drainage"),
+        _categorical(_aspect_phrase(p), "aspect") if _has(p, "dominant_aspect", "aspect_available") else None,
+        _categorical_field(p, "elevation_position", "position"),
+        _measured_field(p, "slope_median_pct", MEASURE_DP, "median slope %"),
+        *(_labelled_run([entry.get("label") for entry in p["soil_components"] or []], "soil")
+          if "soil_components" in p else []),
+        _categorical_field(p, "drainage_class", "drainage"),
     ]
 
 
@@ -387,15 +421,10 @@ def _landform(features: list, provenance: dict) -> dict:
     cards = []
     for feature in _by_rank(generated):
         p = feature["properties"]
-        # A SUGGESTED BLOCK'S CARD IS ITS TAB ROWS ALONE. Its panel read the
-        # ground rows (aspect, position, median slope, soil, drainage) off
-        # the generate's `zones` table, and the committed Feature carries
-        # none of them -- only aspect_deg and avg_slope_pct, which are
-        # different quantities. Left out, not recomputed.
         cards.append(_card(feature["id"], f"Block {p['rank']}", provenance_label(PROVENANCE_GENERATED, p["rank"]), [
             _measured(to_fixed(p["area_acres"], MEASURE_DP), "acres"),
             _measured(to_fixed(p["suitability_score"], MEASURE_DP), _score_label(LANDFORM_SCORE_TOP)),
-        ], []))
+        ], _production_block_rows(p)))
     # "DRAWN N" IN COMMIT ORDER, WHICH IS NOT ALWAYS THE PANEL'S N. The
     # panel numbers drawn tabs across every block the user drew, ticked or
     # not; the document keeps only the committed ones, so a block the user
@@ -405,10 +434,6 @@ def _landform(features: list, provenance: dict) -> dict:
     # figure beside it is the panel's. Not a bug -- see branch 13's review.
     for index, feature in enumerate(drawn):
         p = feature["properties"]
-        # A drawn block's ground rows ARE on its Feature: the server's
-        # reading, merged into properties before the commit, under the
-        # suggestion's own field names -- and so is the client's acreage
-        # and its cautions.
         cards.append(_card(feature["id"], f"Drawn {index + 1}", provenance_label(PROVENANCE_USER_ADDED), [
             _measured(to_fixed(p.get("acres"), MEASURE_DP), "acres"),
             _measured(to_fixed(p.get("score"), MEASURE_DP), _score_label(LANDFORM_SCORE_TOP)),
@@ -424,60 +449,52 @@ def _survey_zone_name(properties: dict) -> str:
     return f"{title} {rank if rank is not None else '?'}"
 
 
-def _water_delivery(properties: dict) -> str:
-    """The panel's water-delivery answer, as water_survey_areas builds the
-    row from the same field, underscores read as spaces (waterDeliveryPhrase)."""
-    primary = properties.get("primary_production_area_relationship")
-    if primary is None:
-        value = water_survey_areas.WATER_DELIVERY_NONE
-    elif primary["above_production_area"]:
-        value = water_survey_areas.WATER_DELIVERY_GRAVITY
-    else:
-        value = water_survey_areas.WATER_DELIVERY_PUMP
-    return value.replace("_", " ")
-
-
 def _overlap_row(value, label):
     return _drops_at_zero(value, _measured(to_fixed(value, MEASURE_DP), label))
+
+
+def _shared_ground_rows(p: dict) -> list:
+    """A row per cross-type overlap, NAMED BY THE PARTNER'S STORED IDENTITY
+    as the panel resolved it: the partner's survey type and rank when the
+    payload presented it, "an area not shown" when it did not. An entry
+    from before the parity change carries no `presented` and no row."""
+    rows = []
+    for entry in p.get("cross_type_overlaps") or []:
+        if "presented" not in entry:
+            continue
+        name = _survey_zone_name(entry) if entry["presented"] else "an area not shown"
+        rows.append(_overlap_row(float(entry["fraction"]) * 100, f"shared ground w/ {name} %"))
+    return rows
 
 
 def _water(features: list, provenance: dict) -> dict:
     generated, added = _split(features, provenance)
     if added:
         raise ValueError("the water step draws nothing; a user_added water feature is a malformed document")
-    by_zone = {f["properties"].get("zone_id"): f for f in generated}
     cards = []
     for feature in _by_rank(generated):
         p = feature["properties"]
         embankment = p.get("survey_type") == "embankment"
-        # SHARED GROUND IS NAMED BY THE OTHER AREA -- the panel names it off
-        # the generate's full proposal set. When the other area is committed
-        # too, its type and rank are in the document and the row is the
-        # panel's; when it is not, the document cannot name it and the row
-        # is left out.
-        shared = []
-        for entry in p.get("cross_type_overlaps") or []:
-            other = by_zone.get(entry.get("zone_id"))
-            if other is not None:
-                shared.append(_overlap_row(float(entry["fraction"]) * 100,
-                                           f"shared ground w/ {_survey_zone_name(other['properties'])} %"))
+        display = p.get("suitability_display")
+        delivery = p.get("water_delivery")
         cards.append(_card(feature["id"], _survey_zone_name(p), provenance_label(PROVENANCE_GENERATED, p.get("rank")), [
             _measured(to_fixed(p["zone_acres"], MEASURE_DP), "survey acres"),
-            # THE ONE CONVERSION POINT (display_scale.py), on the same
-            # 0.0001-rounded mean the panel row was converted from.
-            _measured(to_fixed(display_scale.to_display_scale(p["mean_suitability"]), WHOLE_DP), _score_label(WATER_SCORE_TOP)),
+            # THE DISPLAYED SCORE AS STORED, 0-100 and its own unit -- never
+            # the 0-1 mean_suitability beside it converted here.
+            _measured(to_fixed(display["value"], WHOLE_DP), f"{display['unit']} score") if display is not None else None,
         ], [
-            _categorical(_water_delivery(p), "water delivery"),
-            _measured(to_fixed(p.get("pinch_catchment_acres"), MEASURE_DP), "contributing acres at dam site") if embankment
-            else _measured(to_fixed(p.get("contributing_area_acres_at_wettest_cell"), MEASURE_DP), "contributing acres"),
-            _measured(to_fixed(p.get("slope_median_pct"), MEASURE_DP), "median slope %"),
-            _measured(to_fixed(p.get("pinch_binding_height_ft"), MEASURE_DP), "binding shoulder height ft") if embankment
-            else _measured(to_fixed(p.get("depression_depth_max_ft"), MEASURE_DP), "max depth ft"),
+            _categorical(delivery.replace("_", " ") if isinstance(delivery, str) else None, "water delivery")
+            if "water_delivery" in p else None,
+            _measured_field(p, "pinch_catchment_acres", MEASURE_DP, "contributing acres at dam site") if embankment
+            else _measured_field(p, "contributing_area_acres_at_wettest_cell", MEASURE_DP, "contributing acres"),
+            _measured_field(p, "slope_median_pct", MEASURE_DP, "median slope %"),
+            _measured_field(p, "pinch_binding_height_ft", MEASURE_DP, "binding shoulder height ft") if embankment
+            else _measured_field(p, "depression_depth_max_ft", MEASURE_DP, "max depth ft"),
             _break(),
-            _overlap_row(p.get("production_overlap_pct"), "production overlap %"),
-            _overlap_row(p.get("canopy_overlap_pct"), "canopy overlap %"),
-            _overlap_row(p.get("road_overlap_pct"), "road overlap %"),
-            *shared,
+            _overlap_row(p["production_overlap_pct"], "production overlap %") if "production_overlap_pct" in p else None,
+            _overlap_row(p["canopy_overlap_pct"], "canopy overlap %") if "canopy_overlap_pct" in p else None,
+            _overlap_row(p["road_overlap_pct"], "road overlap %") if "road_overlap_pct" in p else None,
+            *_shared_ground_rows(p),
         ]))
     return {"cards": cards, "count": count_line(len(cards), "water survey area")}
 
@@ -503,7 +520,10 @@ def _roads(features: list, provenance: dict) -> dict:
     # place among every access point the user tried, and the document does
     # not reliably hold that order. A label, not a figure.
     card = _card(first["network_id"], "Road network", provenance_label(PROVENANCE_GENERATED), [
-        *([_measured(served, "acres served")] if served is not None else []),
+        _measured(served, "acres served") if served is not None else None,
+        # The network's score, stored on every branch (network-level, like
+        # total_length_ft) at the panel's own value.
+        _measured_field(first, "terrain_quality_score", WHOLE_DP, _score_label(ROADS_SCORE_TOP)),
     ], [
         # EXACT: total_length_ft is road_corridors._feet(total metres), the
         # panel's access.total_length_ft by the same function.
@@ -519,27 +539,25 @@ def _roads(features: list, provenance: dict) -> dict:
     }
 
 
-def _benefit_rows(benefits) -> list:
+def _benefit_rows(p: dict) -> list:
     """stepDefinitions.marginalBenefitRows: a heading and one term per
-    benefit, nothing at all for none."""
-    earned = list(benefits or [])
+    benefit, nothing at all for none -- or for a feature that does not
+    carry the list."""
+    earned = list(p.get("marginal_benefits") or [])
     if not earned:
         return []
     return [_break(f"marginal benefit{_plural(len(earned))}")] + [_term(b) for b in earned]
 
 
-def _tree_zone_rows(reading: dict, position_in_parcel: bool) -> list:
-    """stepDefinitions.treeZoneRows, less `where in the parcel` when the
-    document does not hold it."""
-    rows = []
-    if position_in_parcel:
-        rows.append(_categorical(reading.get("position_in_parcel"), "where in the parcel"))
-    rows += [
-        _categorical(reading.get("elevation_position"), "position"),
-        _measured(to_fixed(_py_round(reading.get("slope_median_pct"), 1), MEASURE_DP), "median slope %"),
-        *_benefit_rows(reading.get("marginal_benefits")),
+def _tree_zone_rows(p: dict) -> list:
+    """stepDefinitions.treeZoneRows, every row off the feature."""
+    return [
+        _categorical_field(p, "position_in_parcel", "where in the parcel"),
+        _categorical_field(p, "elevation_position", "position"),
+        _measured(to_fixed(_py_round(p["slope_median_pct"], 1), MEASURE_DP), "median slope %")
+        if "slope_median_pct" in p else None,
+        *_benefit_rows(p),
     ]
-    return rows
 
 
 def _trees(features: list, provenance: dict) -> dict:
@@ -547,28 +565,18 @@ def _trees(features: list, provenance: dict) -> dict:
     cards = []
     for feature in _by_rank(generated):
         p = feature["properties"]
-        # A SUGGESTED ZONE'S PANEL READINGS, FROM ITS OWN FIELDS: the word
-        # for its elevation and its earned benefits by the server's own
-        # functions over the stored percentile, factors and flags -- the
-        # values the panel's row was built from. Its place in the parcel is
-        # not stored and is left out.
-        reading = {
-            "elevation_position": production_area_ceiling._elevation_position(p.get("elevation_percentile_of_parcel")),
-            "slope_median_pct": p.get("slope_median_pct"),
-            "marginal_benefits": tree_zone_candidates.marginal_benefits(p),
-        }
         cards.append(_card(feature["id"], f"Zone {p['rank']}", provenance_label(PROVENANCE_GENERATED, p["rank"]), [
             # The panel's zone.area_acres and zone.score are the server's
             # _round1() of these same two fields.
             _measured(to_fixed(_py_round(p["area_acres"], 1), MEASURE_DP), "acres"),
             _measured(to_fixed(_py_round(p["tree_suitability_score"], 1), MEASURE_DP), _score_label(TREES_SCORE_TOP)),
-        ], _tree_zone_rows(reading, position_in_parcel=False)))
+        ], _tree_zone_rows(p)))
     for index, feature in enumerate(drawn):  # commit order: see _landform's note on "Drawn N"
         p = feature["properties"]
         cards.append(_card(feature["id"], f"Drawn {index + 1}", provenance_label(PROVENANCE_USER_ADDED), [
             _measured(to_fixed(p.get("acres"), MEASURE_DP), "acres"),
             _measured(to_fixed(p.get("score"), MEASURE_DP), _score_label(TREES_SCORE_TOP)),
-        ], _tree_zone_rows(p, position_in_parcel=True), p.get("cautions")))
+        ], _tree_zone_rows(p), p.get("cautions")))
     return {"cards": cards, "count": count_line(len(cards), "tree zone")}
 
 
