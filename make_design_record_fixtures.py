@@ -26,9 +26,10 @@ multiPolygonAreaAcres, which is what `properties.acres` holds on a drawn
 tab), and the reading fields the server's score_placed_feature returns
 merged into properties. A placed site is the verb's own Feature.
 
-THE PANEL'S STRINGS ARE JAVASCRIPT'S. Each committed feature's panel rows
-are read off the generate payload exactly where the frontend's tabs() and
-detail() read them (stepDefinitions.js), and formatted by Node's own
+THE PANEL'S STRINGS ARE JAVASCRIPT'S. Each committed feature's DATA PANEL
+-- header, tab rows, detail rows -- is read off the generate payload
+exactly where the frontend's tabs() and detail() read them
+(stepDefinitions.js), and every figure is formatted by Node's own
 Number.prototype.toFixed -- not by design_record.to_fixed, which is the
 thing under test. Node is needed to BUILD the fixture, never to run the
 test.
@@ -47,6 +48,7 @@ offline_harness.install()
 import design_document  # noqa: E402
 import fencing_step_fixture as F  # noqa: E402
 import step_orchestrator  # noqa: E402
+import wire_translation  # noqa: E402
 
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "design_record_fixture.json")
 
@@ -102,81 +104,256 @@ def drawn_feature(session, step_id: str, feature_id: str, ring, reading_fields=N
 
 
 # --- the panel, read where the frontend reads it -------------------------
+#
+# Each committed feature's DATA PANEL, as DetailPanel.jsx assembles it:
+# the header (headerFor: the tab's name), then panelBody(tab rows, detail
+# rows) -- the tab's rows with their denominators, a break, the step's
+# detail() rows -- then the caution run. Values are read off the generate
+# PAYLOAD (the session's data), never off the committed document; figures
+# carry (raw value, dp) and are formatted by Node below. Every label and
+# every label template used here is asserted to appear verbatim in the
+# frontend's stepDefinitions.js, so a port that drifted from the source
+# fails at build time.
+
+FRONTEND_STEPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "keyline-designer-frontend",
+                              "src", "wizard", "stepDefinitions.js")
+with open(FRONTEND_STEPS, encoding="utf-8") as _handle:
+    _FRONTEND_SOURCE = _handle.read()
+EM_DASH = "\u2014"
 
 
-def _row(label, value, dp):
-    return {"label": label, "value": value, "dp": dp}
+def _in_source(*literals):
+    for literal in literals:
+        assert literal in _FRONTEND_SOURCE, f"panel label {literal!r} is not in stepDefinitions.js"
+
+
+def M(value, label, dp=1):
+    return {"kind": "measured", "value": value, "dp": dp, "label": label}
+
+
+def C(value, label):
+    return {"kind": "categorical", "text": value if value is not None else EM_DASH, "label": label}
+
+
+def T(value):
+    return {"kind": "term", "text": value, "label": None}
+
+
+def B(label=None):
+    return {"kind": "break", "label": label}
+
+
+def drops_at_zero(value, row):
+    if value is None:
+        return row
+    return None if float(value) == 0 else row
+
+
+def labelled_run(values, label):
+    values = list(values or [])
+    if not values:
+        return [C(EM_DASH, label)]
+    return [C(values[0], label)] + [{"kind": "continuation", "text": v, "label": None} for v in values[1:]]
+
+
+def panel_body(tab, rows):
+    rows = [r for r in rows if r is not None]
+    joined = tab + ([B()] if tab and rows else []) + rows
+    body = []
+    for row in joined:
+        if row["kind"] != "break":
+            body.append(row)
+        elif body and body[-1]["kind"] != "break":
+            body.append(row)
+        elif body and row["label"] and not body[-1]["label"]:
+            body[-1] = row
+    while body and body[-1]["kind"] == "break":
+        body.pop()
+    return body
+
+
+def denominator(scales, quantity=None):
+    entry = (scales or {}).get(quantity) if quantity else None
+    top = ((scales or {}).get("range") or [None, None])[1]
+    if top is None and entry:
+        top = (entry.get("range") or [None, None])[1] if entry.get("range") else entry.get("max")
+    return None if top is None else int(math.floor(float(top) + 0.5))
+
+
+def score_label(top):
+    return "score" if top is None else f"/{top} score"
+
+
+def aspect_phrase(reading):
+    return f"{reading['dominant_aspect']} facing" if reading.get("aspect_available") and reading.get("dominant_aspect") else EM_DASH
+
+
+def plural(n):
+    return "" if n == 1 else "s"
+
+
+def production_block_rows(r):
+    _in_source("'aspect'", "'position'", "'median slope %'", "'soil'", "'drainage'", "facing`")
+    return [C(aspect_phrase(r), "aspect"), C(r.get("elevation_position"), "position"),
+            M(r.get("slope_median_pct"), "median slope %"),
+            *labelled_run([e["label"] for e in r.get("soil_components") or []], "soil"),
+            C(r.get("drainage_class"), "drainage")]
 
 
 def landform_panel(payload, committed, drawn):
     zones = {z["feature_id"]: z for z in payload["zones"]}
-    tabs = []
+    top = denominator(payload.get("scales"))
+    _in_source("`Block ${zone.rank}`", "`Drawn ${index + 1}`", "label: 'acres'", "label: 'score', denominator")
+    cards = []
     for f in committed:
         z = zones[f["id"]]
-        tabs.append({"id": f["id"], "name": f"Block {z['rank']}",
-                     "rows": [_row("acres", z["area_acres"], 1), _row("score", z["score"], 1)]})
+        cards.append({"id": f["id"], "name": f"Block {z['rank']}", "rows": panel_body(
+            [M(z["area_acres"], "acres"), M(z["score"], score_label(top))], production_block_rows(z))})
     for index, f in enumerate(drawn):
-        tabs.append({"id": f["id"], "name": f"Drawn {index + 1}",
-                     "rows": [_row("acres", f["properties"]["acres"], 1), _row("score", f["properties"]["score"], 1)]})
-    return tabs
+        p = f["properties"]
+        cards.append({"id": f["id"], "name": f"Drawn {index + 1}", "rows": panel_body(
+            [M(p["acres"], "acres"), M(p.get("score"), score_label(top))], production_block_rows(p))})
+    return cards
 
 
 def water_panel(payload, committed):
     zones = {z["feature_id"]: z for z in payload["zones"]}
-    tabs = []
+    features = [f for f in payload["survey_zones"]["features"] if f["properties"]["layer"] in wire_translation.LAYER_SURVEY_ZONES]
+    by_zone = {f["properties"].get("zone_id"): f for f in features}
+    top = denominator(payload.get("scales"), "suitability")
+    _in_source("'water delivery'", "'contributing acres at dam site'", "'contributing acres'", "'median slope %'",
+               "'binding shoulder height ft'", "'max depth ft'", "'production overlap %'", "'canopy overlap %'",
+               "'road overlap %'", "`shared ground w/ ${name} %`", "qualifier: 'survey'", "replace(/_/g, ' ')")
+
+    def name(p):
+        t = p.get("survey_type")
+        return f"{t[:1].upper() + t[1:] if t else 'Zone'} {p.get('rank', '?')}"
+
+    def overlap(value, label):
+        return drops_at_zero(value, M(value, label))
+
+    cards = []
     for f in committed:
         p = f["properties"]
-        suitability = next(r for r in zones[f["id"]]["panel"] if r["key"] == "suitability")
-        name = f"{p['survey_type'][:1].upper()}{p['survey_type'][1:]} {p['rank']}"
-        tabs.append({"id": f["id"], "name": name,
-                     "rows": [_row("acres", p["zone_acres"], 1), _row("score", suitability["value"], 0)]})
-    return tabs
+        panel = {r["key"]: r for r in zones[f["id"]]["panel"]}
+        emb = p["survey_type"] == "embankment"
+        delivery = panel.get("water_delivery", {}).get("value")
+        cards.append({"id": f["id"], "name": name(p), "rows": panel_body(
+            [M(p["zone_acres"], "survey acres"), M(panel["suitability"]["value"], score_label(top), 0)],
+            [C(delivery.replace("_", " ") if isinstance(delivery, str) else EM_DASH, "water delivery"),
+             M(p.get("pinch_catchment_acres"), "contributing acres at dam site") if emb
+             else M(p.get("contributing_area_acres_at_wettest_cell"), "contributing acres"),
+             M(p.get("slope_median_pct"), "median slope %"),
+             M(p.get("pinch_binding_height_ft"), "binding shoulder height ft") if emb
+             else M(p.get("depression_depth_max_ft"), "max depth ft"),
+             B(),
+             overlap(p.get("production_overlap_pct"), "production overlap %"),
+             overlap(p.get("canopy_overlap_pct"), "canopy overlap %"),
+             overlap(p.get("road_overlap_pct"), "road overlap %"),
+             *[overlap(e["fraction"] * 100, f"shared ground w/ {name(by_zone[e['zone_id']]['properties']) if e['zone_id'] in by_zone else 'an area not shown'} %")
+               for e in p.get("cross_type_overlaps") or []]])})
+    return cards
+
+
+TERRAIN_QUALITY_KEY = "terrain_quality_score"
 
 
 def roads_panel(payload, network_id):
     network = next(n for n in payload["networks"] if n["network_id"] == network_id)
-    return [{"id": network_id, "name": "network", "rows": [
-        _row("length ft", network["access"]["total_length_ft"], 0),
-        _row("avg grade %", network["determination"]["avg_grade_pct"], 1),
-        _row("max grade %", network["determination"]["max_grade_pct"], 1),
-        _row("acres served", network["access"]["served_acres"], 1),
-    ]}]
+    index = [n["network_id"] for n in payload["networks"]].index(network_id) + 1
+    access, determination, crossings = network["access"], network["determination"], network.get("crossings") or {}
+    top = denominator(network.get("scales"), TERRAIN_QUALITY_KEY)
+    _in_source("'acres served'", "'length ft'", "'avg grade %'", "'max grade %'", "'crosses production block ft'",
+               "'crosses canopy ft'", "'crosses wet ground ft'", "`Road Network ${index}`")
+    return [{"id": network_id, "name": f"Road Network {index}", "rows": panel_body(
+        [M(access["served_acres"], "acres served"), M((network.get("quality") or {}).get("terrain_quality_score"), score_label(top), 0)],
+        [M(access["total_length_ft"], "length ft", 0), M(determination["avg_grade_pct"], "avg grade %"),
+         M(determination["max_grade_pct"], "max grade %"), B(),
+         drops_at_zero(crossings.get("crosses_block_ft"), M(crossings.get("crosses_block_ft"), "crosses production block ft", 0)),
+         drops_at_zero(crossings.get("crosses_canopy_ft"), M(crossings.get("crosses_canopy_ft"), "crosses canopy ft", 0)),
+         drops_at_zero(crossings.get("crosses_floodplain_ft"), M(crossings.get("crosses_floodplain_ft"), "crosses wet ground ft", 0))])}]
+
+
+def tree_zone_rows(r):
+    _in_source("'where in the parcel'", "`marginal benefit${plural(earned.length)}`")
+    earned = r.get("marginal_benefits") or []
+    return [C(r.get("position_in_parcel"), "where in the parcel"), C(r.get("elevation_position"), "position"),
+            M(r.get("slope_median_pct"), "median slope %"),
+            *([B(f"marginal benefit{plural(len(earned))}")] + [T(b) for b in earned] if earned else [])]
 
 
 def trees_panel(payload, committed, drawn):
     zones = {z["feature_id"]: z for z in payload["zones"]}
-    tabs = []
+    top = denominator(payload.get("scales"))
+    _in_source("`Zone ${zone.rank}`")
+    cards = []
     for f in committed:
         z = zones[f["id"]]
-        tabs.append({"id": f["id"], "name": f"Zone {z['rank']}",
-                     "rows": [_row("acres", z["area_acres"], 1), _row("score", z["score"], 1)]})
+        cards.append({"id": f["id"], "name": f"Zone {z['rank']}", "rows": panel_body(
+            [M(z["area_acres"], "acres"), M(z["score"], score_label(top))], tree_zone_rows(z))})
     for index, f in enumerate(drawn):
-        tabs.append({"id": f["id"], "name": f"Drawn {index + 1}",
-                     "rows": [_row("acres", f["properties"]["acres"], 1), _row("score", f["properties"].get("score"), 1)]})
-    return tabs
+        p = f["properties"]
+        cards.append({"id": f["id"], "name": f"Drawn {index + 1}", "rows": panel_body(
+            [M(p["acres"], "acres"), M(p.get("score"), score_label(top))], tree_zone_rows(p))})
+    return cards
+
+
+# stepDefinitions.GATE_STATEMENTS, each sentence asserted present in the source.
+_GATES = (
+    (r"^outside_existing_canopy$", lambda: "sits under existing tree canopy"),
+    (r"^outside_water_candidate_zone$", lambda: "sits on the committed water ground"),
+    (r"^outside_tree_zone_candidate_buffer$", lambda: "sits inside a committed tree zone’s clearance"),
+    (r"^within_road_proximity_buffer$", lambda: "is farther from a road than the siting rule allows"),
+    (r"^outside_hydric_soil$", lambda: "sits on wet (hydric) soil, which drains badly"),
+    (r"^outside_floodplain$", lambda: "sits in the mapped floodplain"),
+    (r"^max_slope<=(\d+(?:\.\d+)?)pct$", lambda pct: f"averages more than {pct}% slope"),
+    (r"^suitability_score>=(\d+(?:\.\d+)?)$", lambda floor: f"scores below the floor of {floor}"),
+)
+
+
+def gate_statement(name):
+    import re
+    for pattern, words in _GATES:
+        match = re.match(pattern, str(name))
+        if match:
+            sentence = words(*match.groups())
+            _in_source(sentence.split(" ")[0] + " " + sentence.split(" ")[1])
+            return sentence
+    _in_source("fails the rule the server calls ${name}")
+    return f"fails the rule the server calls {name}"
 
 
 def structures_panel(payload, committed, placed):
-    tabs = []
-    for f in committed:
-        p = f["properties"]
-        tabs.append({"id": f["id"], "name": f"Site {p['rank']}",
-                     "rows": [_row("distance", p["distance_to_road_ft"], 0), _row("score", p["suitability_score"], 1)]})
-    for index, f in enumerate(placed):
-        p = f["properties"]
-        tabs.append({"id": f["id"], "name": f"Placed {index + 1} · would rank {p['rank']}",
-                     "rows": [_row("distance", p["distance_to_road_ft"], 0), _row("score", p["suitability_score"], 1)]})
-    return tabs, payload["summary"]["road_proximity_source"]
+    top = denominator(payload["summary"].get("scales"))
+    road_label = {"selected_road_corridor": "ft to road", "real_mapped_road": "ft to farm road"}.get(
+        payload["summary"].get("road_proximity_source"), "ft to road")
+    _in_source("'avg slope %'", "'solar rating'", "`siting rule${plural(broken.length)} broken`", "would rank ${rank",
+               "selected_road_corridor: 'ft to road'", "real_mapped_road: 'ft to farm road'")
+
+    def rows(p):
+        broken = p.get("constraints_violated") or []
+        return panel_body([M(p.get("distance_to_road_ft"), road_label, 0), M(p.get("suitability_score"), score_label(top))], [
+            C(aspect_phrase(p), "aspect"), C(p.get("elevation_position"), "position"), M(p.get("avg_slope_pct"), "avg slope %"),
+            C(p.get("solar_rating"), "solar rating"),
+            *([B(f"siting rule{plural(len(broken))} broken")] + [T(gate_statement(n)) for n in broken] if broken else [])])
+
+    cards = [{"id": f["id"], "name": f"Site {f['properties']['rank']}", "rows": rows(f["properties"])} for f in committed]
+    cards += [{"id": f["id"], "name": f"Placed {i + 1} · would rank {f['properties']['rank']}", "rows": rows(f["properties"]),
+               "gates_raw": f["properties"].get("constraints_violated") or []} for i, f in enumerate(placed)]
+    return cards
 
 
 def fencing_panel(payload, types):
-    return [{"id": block["fence_type"], "name": block["label"], "rows": [_row("feet", block["total_length_ft"], 0)]}
-            for block in payload["fence_types"] if block["candidate"] and block["fence_type"] in types]
+    # FENCING HAS NO DATA PANEL (detail: null); its tab row is all it shows.
+    _in_source("detail: null", "label: 'feet'")
+    return [{"id": b["fence_type"], "name": b["label"], "rows": [M(b["total_length_ft"], "feet", 0)]}
+            for b in payload["fence_types"] if b["candidate"] and b["fence_type"] in types]
 
 
 def js_format(panel: dict) -> dict:
-    """Every row's string through Node's toFixed (the panel's measure())."""
-    rows = [row for tabs in panel.values() if isinstance(tabs, list) for tab in tabs for row in tab["rows"]]
+    """Every measured row's string through Node's toFixed (the panel's measure())."""
+    rows = [row for cards in panel.values() if isinstance(cards, list) for card in cards for row in card["rows"]
+            if row["kind"] == "measured"]
     script = ("const rows = JSON.parse(require('fs').readFileSync(0, 'utf8'));"
               "process.stdout.write(JSON.stringify(rows.map(([v, dp]) => v == null ? '\\u2014' : Number(v).toFixed(dp))))")
     out = subprocess.run(["node", "-e", script], input=json.dumps([[r["value"], r["dp"]] for r in rows]),
@@ -221,7 +398,7 @@ def build(empty_water: bool) -> dict:
     site = payload["structure_sites"]["features"][:1]
     placed = s.score(PLACED_SITE)
     s.commit("structures", site + [placed], {**{f["id"]: "generated" for f in site}, placed["id"]: "user_added"})
-    panel["structures"], panel["road_proximity_source"] = structures_panel(payload, site, [placed])
+    panel["structures"] = structures_panel(payload, site, [placed])
 
     payload = s.generate("fencing")
     types = [b["fence_type"] for b in payload["fence_types"] if b["candidate"]]

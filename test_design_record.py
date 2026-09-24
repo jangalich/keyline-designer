@@ -5,14 +5,15 @@ THE DESIGN RECORD AGAINST THE PANEL, OFFLINE.
 
 design_record_fixture.json holds two fully committed Design Documents made
 through the real orchestrator (make_design_record_fixtures.py) and, beside
-each, the strings the step panels showed -- read off the generate payloads
-where the frontend reads them and formatted by Node's own toFixed. This
-file builds the record from each DOCUMENT ALONE and holds every figure it
-prints to the panel's string for the same feature and row.
+each, every committed feature's DATA PANEL -- header, tab rows, detail
+rows -- read off the generate payloads where the frontend reads them and
+formatted by Node's own toFixed. This file builds the record from each
+DOCUMENT ALONE and holds every row it prints to the panel's row, in the
+panel's order, with the panel's label and string.
 
     1. toFixed, reproduced -- on the values where JavaScript and Python differ
-    2. every printed figure equals the panel's; the ones left out, and why
-    3. names and provenance: suggested with a rank, drawn, placed with none
+    2. every row the record prints is the panel's, in order; the rows left out, and why
+    3. names and provenance: suggested with a rank, drawn, placed with none; cautions
     4. committed empty, in words, end to end
     5. nothing recomputed: the record reads the document and calls nothing
 """
@@ -65,8 +66,8 @@ for value, dp, expected in JS_NON_TIES:
 tie_site = {"id": "s", "type": "Feature", "geometry": None,
             "properties": {"rank": 1, "distance_to_road_ft": 2.5, "suitability_score": 2.25,
                            "road_proximity_source": "selected_road_corridor"}}
-tie_row = dr._structures([tie_site], {"s": "generated"})["rows"][0]
-assert (tie_row["score"], tie_row["distance"]) == ("2.3", "3"), tie_row
+tie_rows = dr._structures([tie_site], {"s": "generated"})["cards"][0]["rows"]
+assert [r["value"] for r in tie_rows[:2]] == ["3", "2.3"], tie_rows
 
 # Where Node is present, a sweep: every 0.005 step from -5 to 105 at 0, 1
 # and 2 places -- 66,000 values, the ties among them included. Node builds
@@ -86,105 +87,148 @@ print(f"   {len(JS_TIES)} ties where Python differs, {len(JS_NON_TIES)} non-ties
       + (f"{swept:,} values swept against Node" if swept else "Node absent, sweep skipped"))
 
 # ======================================================================
-# 2. Every printed figure is the panel's
+# 2. The panel's rows
 # ======================================================================
-print("2. every printed figure equals the panel's; the ones left out, and why")
+print("2. every row the record prints is the panel's, in order; the rows left out, and why")
 
-# Record column key -> the panel row's label, per step.
-ROW_KEYS = {
-    "landform": {"acres": "acres", "score": "score"},
-    "water": {"acres": "acres", "score": "score"},
-    "trees": {"acres": "acres", "score": "score"},
-    "structures": {"distance": "distance", "score": "score"},
-    "fencing": {"feet": "feet"},
-}
-# THE ROWS THE RECORD DOES NOT PRINT, and each is a reason in design_record:
-# the road network's average grade is never provable from 0.1-rounded
-# branches, and the empty-water session's acres served is stored as 2.650 --
-# a tie at the panel's one decimal, where the panel printed 2.7 and the
-# stored figure cannot say which way the true value fell.
-EXPECTED_OMITTED = {
-    "full": {("roads", "avg grade %")},
-    "empty_water": {("roads", "avg grade %"), ("roads", "acres served")},
-}
 
-table = []
-for session, case in FIXTURE.items():
-    record = dr.build_design_record(case["document"])
-    steps = {s["step_id"]: s for s in record["steps"]}
-    omitted = set()
-    for step_id, keys in ROW_KEYS.items():
-        panel_tabs = {tab["id"]: tab for tab in case["panel"][step_id]}
-        step = steps[step_id]
-        if step["empty"]:
-            assert not panel_tabs, f"{session}: {step_id} committed empty but the panel had tabs"
+def _seq(rows):
+    """A card's rows as (kind, label, string), the hairlines dropped and a
+    labelled break kept as its heading."""
+    out = []
+    for row in rows:
+        if row["kind"] == "break":
+            if row["label"]:
+                out.append(("heading", row["label"], None))
             continue
-        assert {row["id"] for row in step["rows"]} == set(panel_tabs), (session, step_id)
-        for row in step["rows"]:
-            panel = {r["label"]: r["text"] for r in panel_tabs[row["id"]]["rows"]}
-            for key, label in keys.items():
-                assert row[key] == panel[label], (session, step_id, row["id"], key, row[key], panel[label])
-                table.append((session, step_id, row["name"], label, row[key], panel[label]))
-    # Roads: label-keyed rows, some provably absent.
-    roads_panel = {r["label"]: r["text"] for r in case["panel"]["roads"][0]["rows"]}
-    printed = {row["label"]: row["value"] for row in steps["roads"]["rows"]}
-    for label, text in roads_panel.items():
-        if label in printed:
-            assert printed[label] == text, (session, label, printed[label], text)
-            table.append((session, "roads", "network", label, printed[label], text))
-        else:
-            omitted.add(("roads", label))
-    assert omitted == EXPECTED_OMITTED[session], (session, omitted)
-    stored = case["document"]["steps"]["roads"]["features"]["features"][0]["properties"]["total_served_acres"]
-    if ("roads", "acres served") in omitted:
-        assert dr._served_acres(case["document"]["steps"]["roads"]["features"]["features"]) is None
-        assert round(stored, 1) != float(roads_panel["acres served"]), "the omitted figure is one a naive record gets wrong"
+        out.append((row["kind"], row["label"], row.get("text", row.get("value"))))
+    return out
 
-# THE TABLE: every figure the record prints, beside the panel's.
-width = max(len(r[2]) for r in table)
-for session, step_id, name, label, ours, theirs in table:
-    print(f"   {session:<11} {step_id:<10} {name:<{width}} {label:<12} record {ours:>6}   panel {theirs:>6}")
-print(f"   {len(table)} figures, every one the panel's; omitted: "
-      + "; ".join(f"{s}: {', '.join(sorted(l for _, l in EXPECTED_OMITTED[s]))}" for s in EXPECTED_OMITTED))
+
+# THE PANEL ROWS THE DOCUMENT DOES NOT HOLD. Static by step and provenance
+# (design_record.PANEL_ROWS_NOT_IN_DOCUMENT), plus two that depend on the
+# design: a shared-ground row whose other survey area was not committed
+# (the document cannot name it), and a road's acres served when its
+# 0.001-rounded figure straddles the panel's rounding (_served_acres).
+def _left_out(step_id, provenance, row, committed_names, served_determined):
+    label = row[1]
+    static = dr.PANEL_ROWS_NOT_IN_DOCUMENT.get((step_id, provenance), ())
+    if label in static:
+        return label
+    if step_id == "water" and label and label.startswith("shared ground w/ "):
+        name = label[len("shared ground w/ "):-2]
+        if name not in committed_names:
+            return "shared ground w/ <a survey area not committed> %"
+    if step_id == "roads" and label == "acres served" and not served_determined:
+        return "acres served (undetermined at 0.001)"
+    return None
+
+
+EXPECTED_LEFT_OUT = {
+    "full": {
+        ("landform", "aspect"): 5, ("landform", "position"): 5, ("landform", "median slope %"): 5, ("landform", "soil"): 5,
+        ("landform", "drainage"): 5, ("water", "shared ground w/ <a survey area not committed> %"): 6,
+        ("roads", "/100 score"): 1, ("roads", "avg grade %"): 1, ("trees", "where in the parcel"): 1,
+    },
+}
+EXPECTED_LEFT_OUT["empty_water"] = {k: v for k, v in EXPECTED_LEFT_OUT["full"].items() if k[0] != "water"}
+EXPECTED_LEFT_OUT["empty_water"][("roads", "acres served (undetermined at 0.001)")] = 1
+
+TABLE = []
+for session, case in FIXTURE.items():
+    document = case["document"]
+    record = {s["step_id"]: s for s in dr.build_design_record(document)["steps"]}
+    left_out = {}
+    for step_id in design_document.STEP_ORDER:
+        panel_cards = {card["id"]: card for card in case["panel"][step_id]}
+        step = record[step_id]
+        if step["empty"]:
+            assert not panel_cards, f"{session}: {step_id} committed empty but the panel had cards"
+            continue
+        assert [c["id"] for c in step["cards"]] == [c["id"] for c in case["panel"][step_id]], (session, step_id)
+        committed_names = {c["name"] for c in step["cards"]}
+        provenance = document["steps"][step_id]["provenance"]
+        for card in step["cards"]:
+            panel = panel_cards[card["id"]]
+            kind = "generated" if step_id in ("roads", "fencing") else provenance[card["id"]]
+            served_ok = step_id != "roads" or dr._served_acres(document["steps"]["roads"]["features"]["features"]) is not None
+            expected, skipping = [], False
+            for row in _seq(panel["rows"]):
+                if row[0] == "continuation" and skipping:
+                    continue   # a labelled run's later lines go with its first
+                reason = _left_out(step_id, kind, row, committed_names, served_ok)
+                skipping = reason is not None
+                if reason:
+                    left_out[(step_id, reason)] = left_out.get((step_id, reason), 0) + 1
+                    continue
+                expected.append(row)
+            got = _seq(card["rows"])
+            assert got == expected, (session, step_id, card["name"], got, expected)
+            for kind_, label, text in got:
+                TABLE.append((session, step_id, card["name"], label if kind_ != "term" else "", text))
+    assert left_out == EXPECTED_LEFT_OUT[session], (session, left_out)
+
+width = max(len(r[2]) for r in TABLE)
+for session, step_id, name, label, text in TABLE:
+    if session == "full":
+        print(f"   {step_id:<10} {name:<{width}} {'' if text is None else text:>52}  {label}")
+print(f"   {len(TABLE)} rows across both sessions, each the panel's row, in the panel's order")
+for session, expected in EXPECTED_LEFT_OUT.items():
+    print(f"   left out ({session}): " + "; ".join(f"{step} {label} x{n}" for (step, label), n in sorted(expected.items())))
 
 # ======================================================================
-# 3. Names and provenance
+# 3. Names, provenance and cautions
 # ======================================================================
-print("3. names and provenance: suggested with a rank, drawn, placed with none")
-record = dr.build_design_record(FIXTURE["full"]["document"])
-steps = {s["step_id"]: s for s in record["steps"]}
-provenance = {step_id: FIXTURE["full"]["document"]["steps"][step_id]["provenance"] for step_id in design_document.STEP_ORDER}
+print("3. names and provenance: suggested with a rank, drawn, placed with none; cautions")
+record = {s["step_id"]: s for s in dr.build_design_record(FIXTURE["full"]["document"])["steps"]}
+document = FIXTURE["full"]["document"]
 for step_id in ("landform", "water", "trees", "structures"):
-    panel_names = {tab["id"]: tab["name"] for tab in FIXTURE["full"]["panel"][step_id]}
-    for row in steps[step_id]["rows"]:
-        kind = provenance[step_id][row["id"]]
+    panel_names = {card["id"]: card["name"] for card in FIXTURE["full"]["panel"][step_id]}
+    for card in record[step_id]["cards"]:
+        kind = document["steps"][step_id]["provenance"][card["id"]]
         if kind == "generated":
-            rank = next(f for f in FIXTURE["full"]["document"]["steps"][step_id]["features"]["features"]
-                        if f["id"] == row["id"])["properties"]["rank"]
-            assert row["source"] == f"Suggested · rank {rank}", row
-            assert row["name"] == panel_names[row["id"]], (row["name"], panel_names[row["id"]])
+            rank = next(f for f in document["steps"][step_id]["features"]["features"] if f["id"] == card["id"])["properties"]["rank"]
+            assert card["source"] == f"Suggested · rank {rank}", card
+            assert card["name"] == panel_names[card["id"]], (card["name"], panel_names[card["id"]])
         else:
             # A USER-ADDED FEATURE CARRIES NO RANK ANYWHERE IN THE RECORD. A
             # drawn zone never was ranked; a placed site was given one by the
-            # tool ("would rank N" on the panel), and the record leaves it out:
-            # it is the tool's view of the user's decision, not the decision.
-            assert row["source"] == ("Placed" if step_id == "structures" else "Drawn"), row
-            assert "rank" not in row["name"] and "rank" not in row["source"], row
-            assert panel_names[row["id"]].startswith(row["name"]), (row["name"], panel_names[row["id"]])
-assert any("would rank" in tab["name"] for tab in FIXTURE["full"]["panel"]["structures"]), "the fixture must carry a placed site"
-assert all(r["source"] == "Suggested" for r in steps["fencing"]["rows"]) and steps["roads"]["network_source"] == "Suggested"
-assert steps["roads"]["access_point"]["source"] == "Placed"
-assert steps["roads"]["access_point"]["text"] == "40.64330° N, 79.98369° W"
-assert [s["step_id"] for s in record["steps"]] == list(design_document.STEP_ORDER)
-assert steps["structures"]["columns"][2]["label"] == "ft to road"
+            # tool (the panel's header "Placed 1 · would rank N"), and the
+            # record leaves it out: the tool's view of the user's decision.
+            assert card["source"] == ("Placed" if step_id == "structures" else "Drawn"), card
+            assert "rank" not in card["name"] and "rank" not in card["source"], card
+            assert panel_names[card["id"]].startswith(card["name"]), (card["name"], panel_names[card["id"]])
+assert any("would rank" in c["name"] for c in FIXTURE["full"]["panel"]["structures"]), "the fixture must carry a placed site"
+assert record["roads"]["cards"][0]["name"] == "Road network" and FIXTURE["full"]["panel"]["roads"][0]["name"] == "Road Network 1"
+assert all(c["source"] == "Suggested" for c in record["fencing"]["cards"] + record["roads"]["cards"])
+assert record["roads"]["access_point"] == {"text": "40.64330° N, 79.98369° W", "source": "Placed",
+                                           "lon_lat": list(document["steps"]["roads"]["features"]["features"][0]["properties"]["access_point"])}
+assert [s["step_id"] for s in dr.build_design_record(document)["steps"]] == list(design_document.STEP_ORDER)
+# The placed site's broken siting rules, as the panel set them.
+placed = next(c for c in record["structures"]["cards"] if c["source"] == "Placed")
+assert ("heading", "siting rules broken", None) in _seq(placed["rows"])
 # An unknown provenance is a malformed document, not a third kind.
 try:
-    dr._landform(steps and FIXTURE["full"]["document"]["steps"]["landform"]["features"]["features"], {})
+    dr._landform(document["steps"]["landform"]["features"]["features"], {})
     raise AssertionError("a feature with no provenance must raise")
 except ValueError:
     pass
-print("   generated: 'Suggested · rank N' and the panel's name; drawn: 'Drawn'; placed: 'Placed', no rank; "
-      f"order {', '.join(s['title'] for s in record['steps'])}")
+# CAUTIONS: the fixture's drawn shapes carry none (the client computes them
+# against its own exclusion layers when the ring closes), so the rule is held
+# on a drawn block given three: a share, an acreage, and a zero that drops.
+drawn = copy.deepcopy(next(f for f in document["steps"]["landform"]["features"]["features"]
+                           if document["steps"]["landform"]["provenance"][f["id"]] == "user_added"))
+drawn["properties"]["cautions"] = [
+    {"type": "hydric", "label": "wet (hydric) soil", "acres": 0.125, "pct": 42.5, "overlapLabel": "wet ground overlap %"},
+    {"type": "slope", "label": "slope over the limit", "acres": 0.25},
+    {"type": "roads", "label": "existing farm road", "acres": 0},
+]
+rows = dr._landform([drawn], {drawn["id"]: "user_added"})["cards"][0]["rows"]
+assert [(r["kind"], r["value"], r["label"]) for r in rows[-2:]] == [
+    ("caution", "43", "wet ground overlap %"), ("caution", "0.3", "acres — slope over the limit")], rows[-2:]
+assert not any("farm road" in (r["label"] or "") for r in rows)
+print("   generated: 'Suggested · rank N' and the panel's header; drawn: 'Drawn'; placed: 'Placed', no rank; "
+      "cautions: share toFixed(0), acres toFixed(1), a zero dropped")
 
 # ======================================================================
 # 4. Committed empty
@@ -193,24 +237,25 @@ print("4. committed empty, in words, end to end")
 
 
 def record_text(record: dict) -> str:
-    """The record as plain text -- phase 1's rendering, the page's content."""
+    """The record as plain text -- a card per feature, as the page sets it."""
     lines = []
     for step in record["steps"]:
         lines.append(step["title"].upper())
         if step["empty"]:
             lines.append(f"  {step['statement']}")
-        elif step["step_id"] == "roads":
-            lines.append(f"  Access point  {step['access_point']['text']}  ({step['access_point']['source']})")
-            lines.append(f"  Road network  ({step['network_source']})")
-            lines.extend(f"    {row['label']:<14}{row['value']:>8}" for row in step["rows"])
-        else:
-            columns = step["columns"]
-            widths = [max(len(c["label"]), *(len(r[c["key"]]) for r in step["rows"])) for c in columns]
-            lines.append("  " + "  ".join(c["label"].rjust(w) if c["numeric"] else c["label"].ljust(w) for c, w in zip(columns, widths)))
-            for row in step["rows"]:
-                lines.append("  " + "  ".join(row[c["key"]].rjust(w) if c["numeric"] else row[c["key"]].ljust(w)
-                                              for c, w in zip(columns, widths)))
-            lines.append(f"  {step['count']['text']}")
+            continue
+        if step["step_id"] == "roads":
+            lines.append(f"  Access point {step['access_point']['text']}, placed.")
+        for card in step["cards"]:
+            lines.append(f"  {card['name']}  ({card['source']})")
+            for kind, label, text in _seq(card["rows"]):
+                if kind == "heading":
+                    lines.append(f"      {label}")
+                elif kind in ("term", "continuation"):
+                    lines.append(f"      {'':>10}  {text}")
+                else:
+                    lines.append(f"      {text:>10}  {label}")
+        lines.append(f"  {step['count']['text']}")
     return "\n".join(lines)
 
 
@@ -219,12 +264,11 @@ water = empty_record["steps"][1]
 entry = FIXTURE["empty_water"]["document"]["steps"]["water"]
 assert entry["status"] == "committed" and entry["features"]["features"] == [], entry
 assert water == {"step_id": "water", "title": "Water", "empty": True, "statement": dr.EMPTY_STATEMENTS["water"]}, water
-assert "rows" not in water and "columns" not in water
 text = record_text(empty_record)
 assert "No water survey areas committed. The design carries no water zone." in text
 print("\n".join("   | " + line for line in text.splitlines()))
 
-# Every step, committed empty: six statements, no table. And "not committed"
+# Every step, committed empty: six statements, no card. And "not committed"
 # is not "committed empty": an unfinished design raises rather than render.
 all_empty = copy.deepcopy(FIXTURE["full"]["document"])
 for step_id in design_document.STEP_ORDER:

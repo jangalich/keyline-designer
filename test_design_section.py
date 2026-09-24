@@ -303,7 +303,7 @@ print(f"   {underlay['pixels'][0]} x {underlay['pixels'][1]} px JPEG, {underlay[
 # ======================================================================
 # 6. The pages
 # ======================================================================
-print("6. the pages: two, no overflow, decimal alignment, the record's words")
+print("6. the pages: the map and the record, no overflow, decimal alignment, the record's words")
 
 
 def _walk(box):
@@ -320,25 +320,31 @@ RENDERS = {}
 for name, section in (("design", FULL), ("design-no-imagery", BARE), ("design-committed-empty", EMPTY)):
     html, document, pdf = render(section, name)
     RENDERS[name] = (html, document, pdf)
-    assert len(document.pages) == 3, (name, len(document.pages))  # the cover, then the section's two pages
+    # The cover, the map page, then the record: a card per committed
+    # feature, the step's data panel, which runs to two pages on this design.
+    assert len(document.pages) == 4, (name, len(document.pages))
     assert report_layout.overflowing_boxes(document) == [], (name, report_layout.overflowing_boxes(document))
     assert set(HEX.findall(html)) <= set(TOKENS.values())
     assert html.count("VIII</span> · Design") == 2
-    record_text = _pages_text(document, [2])
+    record_text = _pages_text(document, range(2, len(document.pages)))
     squashed = "".join(record_text.split()).lower()
     assert "total" not in squashed, "no total row, no summed column"
     for step in design_record.STEP_TITLES.values():
         assert step in record_text, (name, step)
 
 # Committed empty, rendered: the sentence stands where the table would.
-empty_text = _pages_text(RENDERS["design-committed-empty"][1], [2])
+empty_text = _pages_text(RENDERS["design-committed-empty"][1], range(2, 4))
 assert "No water survey areas committed. The design carries no water zone." in empty_text
-assert "Survey area" not in empty_text and "Survey area" in _pages_text(RENDERS["design"][1], [2])
-# Provenance in the record's words; the placed site carries no rank.
-full_text = _pages_text(RENDERS["design"][1], [2])
+full_text = _pages_text(RENDERS["design"][1], range(2, 4))
+_squash = lambda text: "".join(text.split())  # a label may wrap inside its card
+for panel_only in ("Embankment 1", "water delivery", "binding shoulder height ft"):
+    assert _squash(panel_only) not in _squash(empty_text) and _squash(panel_only) in _squash(full_text), panel_only
+# Provenance in the record's words; the placed site carries no rank; the panel's own labels and headings.
 assert "Suggested · rank 1" in full_text and "Drawn" in full_text and "Placed" in full_text
 assert "would rank" not in full_text
 assert "6 production blocks committed." in full_text and "Access point 40.64330° N, 79.98369° W, placed." in full_text
+for label in ("/100 score", "median slope %", "marginal benefits", "siting rules broken", "survey acres", "max grade %"):
+    assert _squash(label) in _squash(full_text), label
 
 
 def _numeric_cells(table_box):
@@ -349,32 +355,48 @@ def _numeric_cells(table_box):
             yield child, text, glyphs
 
 
-# DECIMAL ALIGNMENT: in every column of every record table, each figure's
-# right edge is the column's and each carries the column's decimals, in the
-# data face at one advance -- so the points line up down the column; and
-# the tables' last columns share one right edge down the page.
-advances, last_edges = set(), set()
+# DECIMAL ALIGNMENT, AS THE PANEL SETS IT: in every card the figures share
+# one right edge, in the data face at one advance; a figure carries the
+# same decimals under the same label in every card of a step (water's
+# score is whole, the panel's SUITABILITY_DP; the others' one place); and
+# the cards' figure
+# columns fall on three edges across the page, one per column of cards.
+advances, edges, decimals_by_label = set(), {}, {}
 document = RENDERS["design"][1]
-tables = [b for b in _walk(document.pages[2]._page_box) if type(b).__name__ == "TableBox"]
-assert len(tables) == 6, len(tables)
-for table in tables:
-    columns = {}
-    for cell, text, glyphs in _numeric_cells(table):
-        column = round(cell.position_x + cell.width, 2)
-        text_right = round(max(g.position_x + g.width for g in glyphs), 2)
-        advances.add(round(sum(g.width for g in glyphs) / len(text), 2))
-        decimals = len(text) - text.index(".") - 1 if "." in text else 0
-        entry = columns.setdefault(column, {"rights": set(), "decimals": set()})
-        entry["rights"].add(text_right)
-        entry["decimals"].add(decimals)
-    for column, entry in columns.items():
-        assert len(entry["rights"]) == 1, (column, entry)      # right-aligned: one glyph edge per column
-        assert len(entry["decimals"]) == 1, (column, entry)    # one decimal count: the points line up
-    last_edges.add(max(next(iter(e["rights"])) for e in columns.values()))
+cards = 0
+def _step_tables(page_box):
+    """(step id, table box) for every record card's table on the page."""
+    for box in _walk(page_box):
+        classes = (getattr(box, "element", None) is not None and box.element.get("class") or "").split()
+        if "record-step" in classes and type(box).__name__ == "BlockBox":
+            step = next(c[len("record-step--"):] for c in classes if c.startswith("record-step--"))
+            for table in (b for b in _walk(box) if type(b).__name__ == "TableBox"):
+                yield step, table
+
+
+for page_index in range(2, len(document.pages)):
+    for step, table in _step_tables(document.pages[page_index]._page_box):
+        rights = set()
+        for row in (b for b in _walk(table) if type(b).__name__ == "TableRowBox"):
+            tds = [c for c in _walk(row) if type(c).__name__ == "TableCellBox"]
+            if len(tds) != 2 or "num" not in (tds[0].element.get("class") or ""):
+                continue
+            text = "".join(tds[0].element.itertext()).strip()
+            glyphs = [b for b in _walk(tds[0]) if type(b).__name__ == "TextBox"]
+            rights.add(round(max(g.position_x + g.width for g in glyphs), 2))
+            advances.add(round(sum(g.width for g in glyphs) / len(text), 2))
+            label = "".join(tds[1].element.itertext()).strip()
+            decimals_by_label.setdefault((step, label), set()).add(len(text) - text.index(".") - 1 if "." in text else 0)
+        if rights:
+            assert len(rights) == 1, rights       # one figure edge per card
+            edges.setdefault(page_index, set()).add(rights.pop())
+            cards += 1
+assert cards == 16, cards
 assert len(advances) == 1, advances
-assert len(last_edges) == 1, last_edges
-print(f"   3 renders x 2 pages, no overflow; 6 tables, one advance {advances.pop()} pt, every column one decimal count, "
-      "one right edge for the last columns; no total")
+assert all(len(d) == 1 for d in decimals_by_label.values()), {k: v for k, v in decimals_by_label.items() if len(v) > 1}
+assert all(len(e) <= 3 for e in edges.values()), edges
+print(f"   3 renders x 3 pages, no overflow; {cards} cards, one advance {advances.pop()} pt, one figure edge per card, "
+      f"{len(decimals_by_label)} labels each at one decimal count, three card columns; no total")
 
 # ======================================================================
 # 7. Vector over raster, from the PDF

@@ -69,9 +69,10 @@ the record's own names. Rationale belongs in the record, not on the map,
 which has to stay readable at arm's length.
 
 THE RECORD is design_record.build_design_record(document): the document
-alone, as the panel showed it, no footnote about what the document does
-not hold. Tables in STEP_ORDER, provenance stated, a step committed empty
-said in words, and no totals row -- a count, never a sum.
+alone, as each step's DATA PANEL showed it, no footnote about what the
+document does not hold. A card per committed feature -- the panel's
+header, its provenance, the panel's rows in the panel's order -- in
+STEP_ORDER; a step committed empty said in words; a count, never a sum.
 """
 
 from dataclasses import dataclass
@@ -202,17 +203,16 @@ DRAWN_MAP_NOUNS = {"landform": "block", "trees": "zone"}
 
 
 def map_labels(record: dict) -> dict:
-    """{feature id: the label the map sets on it}."""
+    """{feature id: the label the map sets on it} -- the record card's
+    name, a drawn shape's qualified."""
     labels = {}
     for step in record["steps"]:
-        for row in step.get("rows") or []:
-            if "id" not in row:
-                continue
-            name = row["name"]
+        for card in step.get("cards") or []:
+            name = card["name"]
             noun = DRAWN_MAP_NOUNS.get(step["step_id"])
-            if noun and row["source"] == "Drawn":
+            if noun and card["source"] == "Drawn":
                 name = name.replace("Drawn ", f"Drawn {noun} ", 1)
-            labels[row["id"]] = name
+            labels[card["id"]] = name
     return labels
 
 
@@ -347,49 +347,38 @@ def build_imagery_line(inputs: DesignInputs, underlay: Optional[dict]) -> list:
 # ======================================================================
 
 
-def _table(step: dict) -> dict:
-    """One committed step's table in data_table's shape: the name down the
-    left, Source as a prose column, the figures right-aligned."""
-    columns = step["columns"]
-    return {
-        "corner": columns[0]["label"],
-        "columns": [c["label"] for c in columns[1:]],
-        "text_columns": [c["label"] for c in columns[1:] if not c["numeric"]],
-        "rows": [
-            {"label": row[columns[0]["key"]],
-             "cells": [{"value": row[c["key"]], "kind": "text"} if not c["numeric"] else row[c["key"]] for c in columns[1:]]}
-            for row in step["rows"]
-        ],
-        "variant": "record",
-    }
-
-
-def _roads_table(step: dict) -> dict:
-    figures = step["rows"]
-    return {
-        "corner": "Road",
-        "columns": ["Source"] + [row["label"] for row in figures],
-        "text_columns": ["Source"],
-        "rows": [{"label": "Network", "cells": [{"value": step["network_source"], "kind": "text"}] + [row["value"] for row in figures]}],
-        "variant": "record",
-    }
+def _card(card: dict) -> dict:
+    """One committed feature as the page sets it: the panel's header, the
+    provenance, and the panel's rows -- a figure in the data face,
+    right-aligned, before its label; a word the same way in the prose
+    face; a heading or a hairline where the panel breaks."""
+    rows = []
+    for row in card["rows"]:
+        kind = row["kind"]
+        if kind == "break":
+            rows.append({"kind": "heading" if row["label"] else "rule", "label": row["label"]})
+        elif kind == "term":
+            rows.append({"kind": "term", "value": row["value"]})
+        else:
+            rows.append({"kind": kind, "value": row["value"], "label": row["label"] or ""})
+    return {"name": card["name"], "source": card["source"], "rows": rows}
 
 
 def build_record(record: dict) -> list:
-    """One block per step, in STEP_ORDER: a heading, then a table and its
-    count, the road's access point, or the committed-empty statement."""
+    """One block per step, in STEP_ORDER: a heading, then a card per
+    committed feature and the step's count, or the sentence a step
+    committed empty carries. The road carries its access point."""
     blocks = []
     for step in record["steps"]:
         block = {"step_id": step["step_id"], "title": step["title"], "empty": step["empty"]}
         if step["empty"]:
             block["statement"] = step["statement"]
-        elif step["step_id"] == "roads":
-            block["table"] = _roads_table(step)
-            access = step["access_point"]
-            block["note"] = ["Access point ", {"value": access["text"]}, ", placed."]
         else:
-            block["table"] = _table(step)
-            block["note"] = [{"value": str(step["count"]["n"])}, f" {step['count']['noun']} committed."]
+            block["cards"] = [_card(card) for card in step["cards"]]
+            if step["step_id"] == "roads":
+                block["note"] = ["Access point ", {"value": step["access_point"]["text"]}, ", placed."]
+            else:
+                block["note"] = [{"value": str(step["count"]["n"])}, f" {step['count']['noun']} committed."]
         blocks.append(block)
     return blocks
 
