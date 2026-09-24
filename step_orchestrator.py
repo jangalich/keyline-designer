@@ -1718,9 +1718,13 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     # this collection, so the collection's order IS the order someone reads
     # the zones in, and shipping the presented set in pipeline id order would
     # have computed a presentation order and then not used it.
+    row_by_zone_id = {row["id"]: row for row in narrative["zones"]}
+    presented = set(presentation["presented_zone_ids"])
     presented_features = []
     for zone_id in presentation["presented_zone_ids"]:
-        presented_features.append(envelope_by_zone_id[zone_id])
+        presented_features.append(
+            _water_feature_with_panel(envelope_by_zone_id[zone_id], row_by_zone_id[zone_id], envelope_by_zone_id, presented)
+        )
         presented_features.extend(members_by_zone_id.get(zone_id, ()))
 
     # WHAT WAS WITHHELD, BY NAME. The counts in `summary` are the pipeline's
@@ -1790,6 +1794,49 @@ def build_water_payload(result: dict, assembled: dict) -> dict:
     }
 
 
+def _water_feature_with_panel(feature: dict, row: dict, envelope_by_zone_id: dict, presented: set) -> dict:
+    """
+    ONE presented survey-zone envelope, carrying what its panel displayed.
+
+    THE PANEL READS THREE THINGS THE FEATURE DID NOT CARRY, and a commit
+    stores the Feature, so the Design Document could not see them:
+
+      suitability_display  the panel's `suitability` row -- {value, unit},
+                           the 0-100 DISPLAY reading and its "/100". Named
+                           and shaped so it cannot be mistaken for the
+                           stored 0-1 mean_suitability beside it
+                           (display_scale.py's rule): a converted value
+                           carries its scale at its point of use.
+      water_delivery       the panel's `water_delivery` row's value, the
+                           server's own word ("gravity_feed", ...).
+      cross_type_overlaps  each entry gains its partner's IDENTITY as the
+                           panel resolved it: `survey_type` and `rank` when
+                           the partner is one of the zones this payload
+                           presents (the panel names it "Excavated 2"), or
+                           `presented: False` when it is not (the panel
+                           says "an area not shown"). Identity, not the
+                           rendered string, the way every other name is.
+
+    All three are copied from what the panel is handed -- the zone's own
+    panel rows and this payload's presented set -- never derived again.
+    New objects throughout; the cached result's feature is not touched.
+    """
+    panel = {entry["key"]: entry for entry in row["panel"]}
+    properties = dict(feature["properties"])
+    properties["suitability_display"] = {"value": panel["suitability"]["value"], "unit": panel["suitability"]["unit"]}
+    properties["water_delivery"] = panel["water_delivery"]["value"]
+    overlaps = []
+    for entry in properties.get("cross_type_overlaps") or []:
+        partner = envelope_by_zone_id.get(entry["zone_id"]) if entry["zone_id"] in presented else None
+        if partner is None:
+            overlaps.append({**entry, "presented": False})
+        else:
+            overlaps.append({**entry, "presented": True, "survey_type": partner["properties"]["survey_type"],
+                             "rank": partner["properties"]["rank"]})
+    properties["cross_type_overlaps"] = overlaps
+    return {**feature, "properties": properties}
+
+
 def build_roads_payload(proposals: dict, assembled: dict) -> dict:
     """
     The roads step's wire payload: EVERY candidate network, merged into one
@@ -1847,7 +1894,15 @@ def build_roads_payload(proposals: dict, assembled: dict) -> dict:
             network_id=key,
             access_point=access_point,
         )
-        features.extend(collection["features"])
+        # THE NETWORK'S /100 SCORE, ON EVERY BRANCH. The panel reads it off
+        # this network's `quality` block below; the committed Features never
+        # carried it. Network-level, like total_length_ft -- the same value
+        # on each branch -- copied from the block the panel reads.
+        score = narrative["quality"]["terrain_quality_score"]
+        features.extend(
+            {**feature, "properties": {**feature["properties"], "terrain_quality_score": score}}
+            for feature in collection["features"]
+        )
         networks.append(
             {
                 "network_id": key,
@@ -1866,6 +1921,12 @@ def build_roads_payload(proposals: dict, assembled: dict) -> dict:
             "slots_remaining": max(max_networks - len(networks), 0),
         },
     }
+
+
+# The rows the trees panel shows that a suggested zone's Feature did not
+# carry (the frontend's treeZoneRows): where in the parcel, the elevation
+# word and the benefits the zone earned.
+TREE_PANEL_READING_FIELDS = ("position_in_parcel", "elevation_position", "marginal_benefits")
 
 
 def build_trees_payload(result: dict, assembled: dict) -> dict:
@@ -1933,8 +1994,9 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     computation to include. It is a diagnostic of THIS generate, not a
     gate: drawing outside it is legal and its cautions are the crossings.
 
-    NOTHING IS ADDED TO THE FEATURES, and the one thing that used to be is
-    the reason this paragraph is still here. Tree candidates once shipped
+    NO GEOMETRY IS ADDED TO THE FEATURES -- only the three panel readings
+    above (TREE_PANEL_READING_FIELDS) -- and the one display geometry that
+    used to be is the reason this paragraph is still here. Tree candidates once shipped
     `display_only_smoothed_outline`, on the argument that a tree zone is a
     union of 5 m DEM cells and its staircase should be smoothed the way
     production's is. That argument does not survive contact with what the
@@ -1969,8 +2031,28 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
         feature["properties"]["rank"]: feature["id"]
         for feature in result["zones_geojson"]["features"]
     }
+    # THE PANEL'S READINGS, ON THE FEATURE TOO -- the landform assembler's
+    # reason exactly (production_zone_payload.PANEL_READING_FIELDS): the
+    # panel reads these three off the `zones` row, a DRAWN zone's Feature
+    # already carries them from the same _zone_row(), and a suggested one
+    # did not, so a commit could not store them. Copied from the row the
+    # panel reads, onto new Feature objects.
+    row_by_rank = {row["rank"]: row for row in narrative["zones"]}
+    tree_zones = {
+        **result["zones_geojson"],
+        "features": [
+            {
+                **feature,
+                "properties": {
+                    **feature["properties"],
+                    **{field: row_by_rank[feature["properties"]["rank"]][field] for field in TREE_PANEL_READING_FIELDS},
+                },
+            }
+            for feature in result["zones_geojson"]["features"]
+        ],
+    }
     return {
-        "tree_zones": result["zones_geojson"],
+        "tree_zones": tree_zones,
         "zones": [
             {**row, "feature_id": feature_id_by_rank[row["rank"]]}
             for row in narrative["zones"]
