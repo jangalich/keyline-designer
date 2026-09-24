@@ -233,8 +233,18 @@ assert limits_caption == ("NRCS's rating by dominant components, each interpreta
                           "under a field as under a stand. Windthrow hazard is moderate on 10.0 ac, water table depth the feature on 9.9 ac "
                           "of them, the shallow seasonal water table the Water section maps; Climate's winter wind prevails from the west."), limits_caption
 sources = [_text(line) for line in SECTION["sources"]]
+# THE RETRIEVAL DATE IS THE SESSION'S, NOT A CONSTANT. It is the date the
+# Design Document was created -- the day the layers were fetched -- which
+# for a live fixture session is the day the test runs. Asserting a literal
+# date here passed only on the day it was written; the shape is what is
+# under test: a date is present, it is the document's creation date, and
+# it is set the way every other section sets one.
+RETRIEVED_ON = date.fromisoformat(DOCUMENT["created_at"][:10])
+assert INPUTS.retrieved_on == RETRIEVED_ON, (INPUTS.retrieved_on, DOCUMENT["created_at"])
+RETRIEVED = landform_section.format_retrieved_on(RETRIEVED_ON)
+assert re.fullmatch(r"[1-9]\d? (January|February|March|April|May|June|July|August|September|October|November|December) \d{4}", RETRIEVED), RETRIEVED
 assert len(sources) == 4 and sources[0] == ("USGS 3DEP lidar height above ground, PA_WesternPA_2_2019-hag-2m-5-4, 2019, 2 m resampled to "
-                                            "5 m, via Microsoft Planetary Computer, retrieved 23 September 2026.")
+                                            f"5 m, via Microsoft Planetary Computer, retrieved {RETRIEVED}.")
 assert sources[1] == "USDA Forest Service FIA BIGMAP forest type group 2018, plots 2014–2018, 30 m."
 assert sources[2] == "USDA NRCS SSURGO, soil survey PA003, version of 9/5/2025: coforprod; cointerp, the four woodland interpretations tabled."
 assert sources[3].startswith("USGS 3DEP elevation")
@@ -398,7 +408,8 @@ assert [_text(e["parts"]) for e in tcc["map"]["legend"]] == ["Canopy, NLCD cover
 tcc_layers = tsn.build_map_layers(TCC_INPUTS, tcc["derived"], report_map.parcel_contours(TCC_INPUTS.dem, parcel))
 assert [l["id"] for l in tcc_layers][:1] == ["canopy"] and tcc_layers[0]["screen_dot_pt"] == tsn.SCREEN_DOT_SINGLE_PT == 1.3
 assert _text(tcc["sources"][0]) == ("USDA Forest Service NLCD Tree Canopy Cover v2025-6, 2025, 30 m, via the IIPP image service, retrieved "
-                                    "23 September 2026.")
+                                    f"{landform_section.format_retrieved_on(TCC_INPUTS.retrieved_on)}.")
+assert TCC_INPUTS.retrieved_on == date.fromisoformat(TCC_DOCUMENT["created_at"][:10])
 assert tcc["methods"][0]["source"] == "USDA Forest Service NLCD Tree Canopy Cover" and "year pinned" in tcc["methods"][0]["method"]
 assert tcc["map"]["meters_per_unit"] == m["meters_per_unit"] and tcc["map"]["frame"] == m["frame"]
 tcc_html, tcc_document = _render(TCC_INPUTS)
