@@ -236,6 +236,10 @@ def layer(
     hatch_angle_deg: float = 45.0,
     label_halo: bool = False,
     casing_opacity: float = 1.0,
+    pattern: Optional[dict] = None,
+    pattern_opacity: float = 1.0,
+    marker_size_pt: Optional[float] = None,
+    marker_halo_pt: Optional[float] = None,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -273,15 +277,38 @@ def layer(
     `labels` like a polygon layer: set inside each shape at its pole, in
     the layer's `fill` token, knocked out, dropped when the shape cannot
     hold it.
+
+    THE LAYOUT MAP'S TILED MARKS (branch 16), off by default like the rest.
+    A "pattern" layer is a polygon filled with an SVG <pattern> in
+    userSpaceOnUse -- a tile FIXED ON THE PAGE, not on the ground, which is
+    how the interactive map's paint servers are fixed on the screen. The
+    tile is `pattern`, one of
+
+        {"type": "hatch", "tile_pt", "weight_pt", "rise": "up" | "down",
+         "screen": {"token", "opacity"} | None}
+        {"type": "dots", "tile_pt", "grid", "radius_pt",
+         "screen": {"token", "opacity"} | None}
+
+    drawn in the `fill` token, the screen (a full-tile rect under the marks)
+    in its own token. `pattern_opacity` scales the screen and the marks
+    together, as the interactive map's fill-opacity does. `stroke`, when
+    named, is the polygon's edge at `stroke_width` and `stroke_opacity`; a
+    hatch names none, because its edge is where the hatching stops.
+    `marker="pin"` is the interactive map's teardrop, `marker_size_pt` tall,
+    its tip on the point, on a page-coloured halo; `marker="disc"` is a
+    filled circle `marker_size_pt` across, ringed `marker_halo_pt` wide in
+    the page colour inside that size.
     """
-    if kind not in ("polygon", "line", "point", "screen", "hatch"):
-        raise ValueError(f"layer kind must be polygon, line, point, screen or hatch, got {kind!r}")
+    if kind not in ("polygon", "line", "point", "screen", "hatch", "pattern"):
+        raise ValueError(f"layer kind must be polygon, line, point, screen, hatch or pattern, got {kind!r}")
+    if kind == "pattern" and (fill is None or not pattern or pattern.get("type") not in ("hatch", "dots")):
+        raise ValueError("a pattern layer names its token and a hatch or dots tile")
     if kind == "hatch" and fill is None:
         raise ValueError("a hatch layer names the token its lines are drawn in")
     if kind == "screen" and fill is None:
         raise ValueError("a screen layer names the token its dots are drawn in")
-    if marker not in ("asterisk", "dot", "glyph"):
-        raise ValueError(f"marker must be asterisk, dot or glyph, got {marker!r}")
+    if marker not in ("asterisk", "dot", "glyph", "pin", "disc"):
+        raise ValueError(f"marker must be asterisk, dot, glyph, pin or disc, got {marker!r}")
     if labels is not None:
         if len(labels) != len(geometries):
             raise ValueError("labels must be one per geometry")
@@ -304,6 +331,10 @@ def layer(
         "hatch_angle_deg": float(hatch_angle_deg),
         "label_halo": bool(label_halo),
         "casing_opacity": float(casing_opacity),
+        "pattern": dict(pattern) if pattern else None,
+        "pattern_opacity": float(pattern_opacity),
+        "marker_size_pt": marker_size_pt,
+        "marker_halo_pt": marker_halo_pt,
     }
 
 
@@ -694,7 +725,51 @@ def _glyph(cx: float, cy: float, fill: str, halo: str) -> str:
             f'<path d="{d}" fill="{fill}" stroke="none"/>')
 
 
+# THE PIN SILHOUETTE (branch 16): assets/icons/farm_location_pin.svg's
+# teardrop in its 24-unit viewBox, the path the interactive map draws
+# verbatim (ProductionHatchPattern.PIN_GLYPH_PATH). The tip is at (12, 22)
+# and is set on the point, so the pin points at the site.
+PIN_PATH = "M12 2C8.13401 2 5 5.13401 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13401 15.866 2 12 2Z"
+PIN_VIEWBOX = 24.0
+PIN_TIP = (12.0, 22.0)
+PIN_HALO_UNITS = 4.0      # the halo's stroke in viewBox units, half of it outside the body (SITE_PIN_HALO_WIDTH)
+PIN_HEAD_CENTRE_Y = 9.0   # the head's centre in viewBox units, where a label is placed around
+PIN_HEAD_HALF_W = 7.0     # the head's half-width in viewBox units
+
+
+def _pin(x: float, y: float, size: float, fill: str, halo: str) -> str:
+    """The teardrop, `size` tall, its tip on (x, y), on a halo stroke."""
+    k = size / PIN_VIEWBOX
+    transform = f"translate({_fmt(x - PIN_TIP[0] * k)} {_fmt(y - PIN_TIP[1] * k)}) scale({k:.4f})"
+    return (f'<g transform="{transform}">'
+            f'<path d="{PIN_PATH}" fill="none" stroke="{halo}" stroke-width="{_fmt(PIN_HALO_UNITS)}" stroke-linejoin="round"/>'
+            f'<path d="{PIN_PATH}" fill="{fill}" stroke="none"/></g>')
+
+
+def _disc(x: float, y: float, size: float, ring: float, fill: str, halo: str) -> str:
+    """A filled circle `size` across overall, its outer `ring` the halo --
+    a CSS border-box circle, which is how the access point's 18 px is
+    measured on screen."""
+    outer = size / 2
+    return (f'<circle cx="{_fmt(x)}" cy="{_fmt(y)}" r="{_fmt(outer)}" fill="{halo}" stroke="none"/>'
+            f'<circle cx="{_fmt(x)}" cy="{_fmt(y)}" r="{_fmt(outer - ring)}" fill="{fill}" stroke="none"/>')
+
+
+def _marker_anchor(spec: dict, x: float, y: float) -> tuple:
+    """(x, y, r) of the box a point's label is placed around: the marker
+    itself, or for a pin its head, which sits above the point."""
+    if spec.get("marker") == "pin":
+        k = spec["marker_size_pt"] / PIN_VIEWBOX
+        return x, y - (PIN_TIP[1] - PIN_HEAD_CENTRE_Y) * k, (PIN_HEAD_HALF_W + PIN_HALO_UNITS / 2) * k
+    return x, y, _marker_radius(spec)
+
+
 def _marker(spec: dict, x: float, y: float, stroke: str, tokens: dict) -> str:
+    if spec.get("marker") == "pin":
+        return _pin(x, y, spec["marker_size_pt"], stroke, _colour(tokens, "halo" if "halo" in tokens else "page"))
+    if spec.get("marker") == "disc":
+        return _disc(x, y, spec["marker_size_pt"], spec["marker_halo_pt"] or 0.0, stroke,
+                     _colour(tokens, "halo" if "halo" in tokens else "page"))
     if spec.get("marker") == "dot":
         return _dot(x, y, DOT_RADIUS_PT, stroke, _colour(tokens, "page"))
     if spec.get("marker") == "glyph":
@@ -703,6 +778,10 @@ def _marker(spec: dict, x: float, y: float, stroke: str, tokens: dict) -> str:
 
 
 def _marker_radius(spec: dict) -> float:
+    if spec.get("marker") == "disc":
+        return spec["marker_size_pt"] / 2
+    if spec.get("marker") == "pin":
+        return spec["marker_size_pt"] / 2
     if spec.get("marker") == "glyph":
         return GLYPH_HALF_PT + DOT_HALO_PT
     return DOT_RADIUS_PT + DOT_HALO_PT if spec.get("marker") == "dot" else ASTERISK_RADIUS_PT
@@ -806,6 +885,67 @@ def _hatch_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None
     return pieces + _tint_labels(spec, projection, tokens, sink)
 
 
+def _pattern_tile(spec: dict, tokens: dict) -> str:
+    """The <pattern> a pattern layer fills with, in userSpaceOnUse: fixed on
+    the page, so every shape on the map shares one grid, as every zone on
+    the interactive map shares the screen's. The screen first, so the marks
+    sit on it.
+
+    THE HATCH TILE is the interactive map's rulingPath(): one diagonal
+    corner to corner and a stub past each of the two corners it misses, so
+    the rules join across tile edges into continuous lines. "up" rises to
+    the right ("/"), "down" falls ("\\"), the mirror in y the whole of the
+    difference. THE DOT TILE is stippleTile(): a grid x grid lattice, one
+    dot at the centre of each cell."""
+    tile = spec["pattern"]
+    size = tile["tile_pt"]
+    colour = _colour(tokens, spec["fill"])
+    body = []
+    screen = tile.get("screen")
+    if screen:
+        body.append(f'<rect x="0" y="0" width="{_fmt(size)}" height="{_fmt(size)}" '
+                    f'fill="{_colour(tokens, screen["token"])}" fill-opacity="{_fmt(screen["opacity"])}"/>')
+    if tile["type"] == "hatch":
+        reach = tile["weight_pt"]
+
+        def y(value):
+            return size - value if tile.get("rise", "up") == "down" else value
+
+        d = (f"M0 {_fmt(y(size))} L{_fmt(size)} {_fmt(y(0))} "
+             f"M{_fmt(-reach)} {_fmt(y(reach))} L{_fmt(reach)} {_fmt(y(-reach))} "
+             f"M{_fmt(size - reach)} {_fmt(y(size + reach))} L{_fmt(size + reach)} {_fmt(y(size - reach))}")
+        body.append(f'<path d="{d}" fill="none" stroke="{colour}" stroke-width="{_fmt(tile["weight_pt"])}" '
+                    f'stroke-linecap="square"/>')
+    else:
+        cell = size / tile["grid"]
+        radius = _fmt(tile["radius_pt"])
+        body += [f'<circle cx="{_fmt((col + 0.5) * cell)}" cy="{_fmt((row + 0.5) * cell)}" r="{radius}" fill="{colour}"/>'
+                 for row in range(tile["grid"]) for col in range(tile["grid"])]
+    return (f'<pattern id="pattern-{escape(spec["id"])}" patternUnits="userSpaceOnUse" x="0" y="0" '
+            f'width="{_fmt(size)}" height="{_fmt(size)}">' + "".join(body) + "</pattern>")
+
+
+def _pattern_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None) -> list:
+    """A pattern layer: its tile in a <defs>, each shape filled with it at
+    `pattern_opacity`, and the shape's edge when the layer names one."""
+    pieces = ["<defs>" + _pattern_tile(spec, tokens) + "</defs>"]
+    edge = spec["stroke"]
+    for geometry in spec["geometries"]:
+        if geometry is None or geometry.is_empty:
+            continue
+        d = _geometry_path(geometry, projection)
+        if not d:
+            continue
+        pieces.append(f'<path d="{d}" fill="url(#pattern-{escape(spec["id"])})" '
+                      f'fill-opacity="{_fmt(spec["pattern_opacity"])}" fill-rule="evenodd" stroke="none"/>')
+        if edge:
+            faint = spec.get("stroke_opacity", 1.0)
+            faint = f' stroke-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
+            pieces.append(f'<path d="{d}" fill="none" stroke="{_colour(tokens, edge)}" '
+                          f'stroke-width="{_fmt(spec["stroke_width"])}" stroke-linejoin="round"{faint}/>')
+    return pieces + _tint_labels(spec, projection, tokens, sink)
+
+
 def _defer_area_label(sink: list, geometry, placement, label: str, fill: str, layer_id: str, projection) -> None:
     """A shape's label for _place_labels(): inside at its pole when it
     fits there, otherwise BESIDE the pole like a point's -- on a map whose
@@ -865,6 +1005,12 @@ def _casing_svg(spec: dict, projection, tokens: dict) -> str:
     width = spec["stroke_width"] + 2 * casing
     faint = spec.get("casing_opacity", 1.0)
     faint = f' stroke-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
+    # A DASHED LINE'S CASING IS DASHED ON THE LINE'S OWN ARRAY (branch 16),
+    # as the interactive map's LineLayer draws it: a solid casing under a
+    # dashed line reads as a page-coloured line with beads of ink on it.
+    if spec.get("dash"):
+        faint += f' stroke-dasharray="{spec["dash"]}"'
+
     for geometry in spec["geometries"]:
         if geometry is None or geometry.is_empty:
             continue
@@ -883,6 +1029,8 @@ def _layer_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None
     fill = _colour(tokens, spec["fill"])
     if spec["kind"] == "hatch":
         return f'<g id="layer-{escape(spec["id"])}">' + "".join(_hatch_svg(spec, projection, tokens, sink)) + "</g>"
+    if spec["kind"] == "pattern":
+        return f'<g id="layer-{escape(spec["id"])}">' + "".join(_pattern_svg(spec, projection, tokens, sink)) + "</g>"
     if spec["kind"] == "screen":
         return (f'<g id="layer-{escape(spec["id"])}">' + _casing_svg(spec, projection, tokens)
                 + "".join(_screen_svg(spec, projection, fill)) + "".join(_tint_labels(spec, projection, tokens, sink)) + "</g>")
@@ -917,17 +1065,19 @@ def _layer_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None
             continue
         if spec["kind"] == "point":
             points = list(geometry.geoms) if isinstance(geometry, MultiPoint) else [geometry]
+            colour = stroke
             for point in points:
                 x, y = projection.xy(point.x, point.y)
-                pieces.append(_marker(spec, x, y, stroke, tokens))
+                pieces.append(_marker(spec, x, y, colour, tokens))
                 if label and sink is not None:
-                    sink.append({"kind": "point", "x": x, "y": y, "r": _marker_radius(spec), "text": label, "fill": stroke,
+                    ax, ay, ar = _marker_anchor(spec, x, y)
+                    sink.append({"kind": "point", "x": ax, "y": ay, "r": ar, "text": label, "fill": colour,
                                  "layer": spec["id"]})
                 elif label:
                     # Beside and a little above the marker, so the text clears a line running through it.
                     pieces.append(_text(
                         x + _marker_radius(spec) + POINT_LABEL_GAP_PT, y - _marker_radius(spec) * 0.6, label,
-                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="start",
+                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=colour, anchor="start",
                         halo=_colour(tokens, "page") if spec.get("label_halo") else None,
                     ))
             continue
@@ -1132,6 +1282,23 @@ def _swatch(spec: dict, tokens: dict) -> str:
             k += spacing * math.sqrt(2)
         body = (f'<clipPath id="swatch-clip-{escape(spec["id"])}"><rect x="0" y="0" width="{_fmt(w)}" height="{_fmt(h)}"/></clipPath>'
                 f'<g clip-path="url(#swatch-clip-{escape(spec["id"])})">' + "".join(lines) + "</g>")
+    elif spec["kind"] == "pattern":
+        # The same tile, the same opacity, the same edge, across the swatch.
+        tile = _pattern_tile(spec, tokens).replace('id="pattern-', 'id="swatch-pattern-', 1)
+        edge = ""
+        if spec["stroke"]:
+            faint = spec.get("stroke_opacity", 1.0)
+            faint = f' stroke-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
+            edge = (f' stroke="{stroke}" stroke-width="{_fmt(min(spec["stroke_width"], 1.0))}"{faint}')
+        body = (f"<defs>{tile}</defs>"
+                f'<rect x="0.5" y="0.5" width="{_fmt(w - 1)}" height="{_fmt(h - 1)}" '
+                f'fill="url(#swatch-pattern-{escape(spec["id"])})" fill-opacity="{_fmt(spec["pattern_opacity"])}"'
+                + (edge or ' stroke="none"') + "/>")
+    elif spec["kind"] == "point" and spec.get("marker") in ("pin", "disc"):
+        # The marker at the swatch's height, not its map size.
+        scaled = dict(spec, marker_size_pt=h, marker_halo_pt=(spec["marker_halo_pt"] or 0.0) * h / spec["marker_size_pt"])
+        tip = h / 2 + (PIN_TIP[1] - PIN_VIEWBOX / 2) * h / PIN_VIEWBOX if spec["marker"] == "pin" else h / 2
+        body = _marker(scaled, w / 2, tip, stroke, tokens)
     elif spec["kind"] == "line":
         opacity = spec.get("stroke_opacity", 1.0)
         faint = f' stroke-opacity="{_fmt(opacity)}"' if opacity < 1.0 else ""
@@ -1205,7 +1372,7 @@ def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME, fit
         elif spec["kind"] == "line":
             _, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
             placed.append(placement is not None)
-        elif spec["kind"] in ("polygon", "hatch", "screen"):
+        elif spec["kind"] in ("polygon", "hatch", "screen", "pattern"):
             placed.append(_labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT) is not None)
         else:
             placed.append(False)
@@ -1226,9 +1393,27 @@ def legend_entries(layers: list, tokens: dict) -> list:
     return entries
 
 
+def _graded_edge(boundary_polygon_utm, edge: dict, projection, tokens: dict) -> str:
+    """render_map's `edge`: disjoint rings outside the parcel, each band's
+    width in points converted to the ground's metres at the map's scale."""
+    colour = _colour(tokens, edge["token"])
+    pieces = ['<g id="parcel-edge">']
+    inner, reach = boundary_polygon_utm, 0.0
+    for width_pt, opacity in edge["steps"]:
+        reach += width_pt
+        outer = boundary_polygon_utm.buffer(reach * projection.meters_per_unit, join_style="round")
+        ring = outer.difference(inner)
+        if not ring.is_empty:
+            pieces.append(f'<path d="{_geometry_path(ring, projection)}" fill="{colour}" fill-opacity="{_fmt(opacity)}" '
+                          f'fill-rule="evenodd" stroke="none"/>')
+        inner = outer
+    return "".join(pieces) + "</g>"
+
+
 def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME, note: Optional[dict] = None,
                *, fit: bool = True, underlay: Optional[dict] = None, wash: Optional[dict] = None,
-               halo: bool = False, labels_on_top: bool = False) -> dict:
+               halo: bool = False, labels_on_top: bool = False, boundary_style: Optional[dict] = None,
+               edge: Optional[dict] = None) -> dict:
     """
     The map, and its measurements:
 
@@ -1272,6 +1457,22 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
                 the layers and the boundary, point labels moved clear of
                 the others (_place_labels) -- so no label is drawn under a
                 later layer. The placed boxes come back as 'label_boxes'.
+
+    AND BRANCH 16'S, off by default too:
+
+      boundary_style
+                {'stroke': token or None, 'width': pt, 'casing': bool} --
+                the boundary drawn in that token and weight, cased in the
+                page colour only if asked; a None stroke draws no boundary
+                line at all. `halo` then cases the furniture alone.
+      edge      {'token': name, 'steps': [(width_pt, opacity), ...]} -- a
+                GRADED EDGE outside the parcel, over the wash: nested bands,
+                the first `width_pt` wide against the boundary, each next
+                one reaching `width_pt` further out, each at its own
+                opacity. Disjoint rings (buffer minus the buffer inside
+                it), so each band prints at exactly its stated opacity and
+                nothing compounds. Built with shapely, not an SVG filter:
+                WeasyPrint ignores feGaussianBlur and feDropShadow.
     """
     if fit:
         frame = fitted_frame(boundary_polygon_utm, frame)
@@ -1302,6 +1503,8 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
                 f'<path id="off-parcel-wash" d="{_geometry_path(outside, projection)}" fill="{_colour(tokens, wash["token"])}" '
                 f'fill-opacity="{_fmt(wash["opacity"])}" fill-rule="evenodd" stroke="none"/>'
             )
+    if edge:
+        parts.append(_graded_edge(boundary_polygon_utm, edge, projection, tokens))
     pending = [] if labels_on_top else None
     for spec in layers:
         parts.append(_layer_svg(spec, projection, tokens, pending))
@@ -1315,15 +1518,19 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
             for i, line in enumerate(lines)
         ) + "</g>")
     boundary_d = _geometry_path(boundary_polygon_utm, projection)
-    if halo:
+    if boundary_style is None:
+        boundary_style = {"stroke": "ink", "width": BOUNDARY_STROKE_PT, "casing": halo}
+    boundary_width = boundary_style.get("width", BOUNDARY_STROKE_PT)
+    if boundary_style.get("stroke") and boundary_style.get("casing"):
         parts.append(
             f'<path id="parcel-boundary-casing" d="{boundary_d}" fill="none" stroke="{page}" '
-            f'stroke-width="{_fmt(BOUNDARY_STROKE_PT + 2 * FURNITURE_CASING_PT)}" stroke-linejoin="round"/>'
+            f'stroke-width="{_fmt(boundary_width + 2 * FURNITURE_CASING_PT)}" stroke-linejoin="round"/>'
         )
-    parts.append(
-        f'<path id="parcel-boundary" d="{boundary_d}" fill="none" stroke="{ink}" '
-        f'stroke-width="{_fmt(BOUNDARY_STROKE_PT)}" stroke-linejoin="round"/>'
-    )
+    if boundary_style.get("stroke"):
+        parts.append(
+            f'<path id="parcel-boundary" d="{boundary_d}" fill="none" stroke="{_colour(tokens, boundary_style["stroke"])}" '
+            f'stroke-width="{_fmt(boundary_width)}" stroke-linejoin="round"/>'
+        )
     label_boxes = []
     if pending is not None:
         labels_svg, label_boxes = _place_labels(pending, page)
@@ -1348,6 +1555,6 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         "label_boxes": label_boxes,
         "labels_placed": {
             spec["id"]: label_placements(boundary_polygon_utm, spec, frame, fit=False)
-            for spec in layers if spec["kind"] in ("line", "polygon", "hatch", "screen") and spec.get("labels")
+            for spec in layers if spec["kind"] in ("line", "polygon", "hatch", "screen", "pattern") and spec.get("labels")
         },
     }
