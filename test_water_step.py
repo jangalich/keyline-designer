@@ -598,8 +598,22 @@ with Harness() as h:
     assert len(ZONES) == _presentation["presented_count"], (
         "the collection carries exactly the presented zones"
     )
-    assert len(ZONES) <= water_survey_areas.WATER_ZONE_PRESENTATION_COUNT, (
-        "and never more than the cap, whatever the parcel produced"
+    # THE CAP IS BOTH SLOT KINDS TOGETHER: the rank rule's four plus the
+    # additive clear-ground slots, which append and never displace. A
+    # run that fills every slot ships six, and the presented set may be
+    # non-contiguous in rank -- both are the rule working, not a leak.
+    assert len(ZONES) <= (
+        water_survey_areas.WATER_ZONE_PRESENTATION_COUNT
+        + water_survey_areas.WATER_ZONE_CLEAR_GROUND_SLOTS
+    ), "and never more than the two caps together, whatever the parcel produced"
+    assert (
+        _presentation["clear_ground_count"]
+        == len(ZONES) - min(
+            water_survey_areas.WATER_ZONE_PRESENTATION_COUNT, summary["zone_count"]
+        )
+    ), (
+        "and every zone past the rank rule's own cap is there on a clear-ground slot -- the "
+        "narrowing ships exactly the two slot kinds and nothing else"
     )
     assert summary["zone_count"] == len(ZONES) + _presentation["withheld_count"], (
         "the survivor total is still the survivor total: what shipped plus what was withheld"
@@ -844,13 +858,40 @@ with Harness() as h:
             f"{panel_summary[f'{survey_type}_zone_count']}"
         )
         assert count >= len(of_type), "and it is never smaller than what shipped"
-        # WHAT SHIPPED OF A TYPE IS ITS TOP RANKS, contiguously from 1: the
-        # per-type base takes ranks 1-2 and any backfill continues in rank
-        # order, so a gap here would mean presentation had skipped a
-        # better-ranked zone for a worse one.
-        assert sorted(f["properties"]["rank"] for f in of_type) == list(
-            range(1, len(of_type) + 1)
-        ), f"{survey_type}: the presented zones of a type are its top ranks, with no gap"
+        # WHAT SHIPPED OF A TYPE ON A RANK SLOT IS ITS TOP RANKS,
+        # contiguously from 1: the per-type base takes ranks 1-2 and any
+        # backfill continues in rank order, so a gap AMONG THE RANK SLOTS
+        # would mean presentation had skipped a better-ranked zone for a
+        # worse one.
+        _rank_slot = [
+            f for f in of_type
+            if f["properties"]["presented_reason"] == water_survey_areas.PRESENTED_REASON_RANK
+        ]
+        assert sorted(f["properties"]["rank"] for f in _rank_slot) == list(
+            range(1, len(_rank_slot) + 1)
+        ), f"{survey_type}: the rank-slot zones of a type are its top ranks, with no gap"
+        # AND THE CLEAR-GROUND ADDITIONS MAY SIT ANYWHERE BELOW THEM --
+        # THE GAP IS THE RULE WORKING. The additive slots take the
+        # best-ranked zone clear of committed production ground, which on
+        # a parcel whose best sites sit on production ground is rank 7,
+        # not rank 5. Asserted as "below the rank slots" and nothing
+        # tighter: requiring contiguity here is exactly the swap rule
+        # this design refused.
+        _clear_slot = [f for f in of_type if f not in _rank_slot]
+        for feature in _clear_slot:
+            assert feature["properties"]["rank"] > len(_rank_slot), (
+                f"{survey_type}: a clear-ground addition is a zone the rank slots did NOT take, "
+                f"so its rank is past them -- got {feature['properties']['rank']} with "
+                f"{len(_rank_slot)} rank slot(s) filled"
+            )
+            assert (
+                feature["properties"]["production_overlap_pct"] is not None
+                and feature["properties"]["production_overlap_pct"]
+                <= water_survey_areas.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT
+            ), (
+                f"{survey_type}: and it qualified on the measurement the slot claims -- "
+                f"{feature['properties']['production_overlap_pct']}% production overlap"
+            )
 
     # THE PANEL ROWS reach the wire on every tabular row, shaped so a
     # renderer can draw a row it has never heard of.

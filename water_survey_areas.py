@@ -1536,6 +1536,13 @@ CROSS_TYPE_OVERLAP_NOTE_FRACTION = 0.5
 # is a CAP, NEVER A QUOTA: three survivors present as three, and
 # nothing is padded to reach four.
 #
+# AND THEN, ADDITIVELY, UP TO WATER_ZONE_CLEAR_GROUND_SLOTS MORE -- the
+# best-ranked zones this rule did not take that are clear of committed
+# production ground. Those slots APPEND; they never displace, reorder
+# or penalise any of the four above, and the presented set may end up
+# non-contiguous in rank as a result. The constants below this block
+# carry that rule and the reasoning for its threshold.
+#
 # HISTORY, because this is the second attempt and the first one was
 # deleted for cause. A TOP_N of 3 with a per-type guarantee and swap
 # logic shipped for one pass and was removed entirely -- constant,
@@ -1581,6 +1588,108 @@ assert (
     f"({WATER_ZONE_PRESENTATION_PER_TYPE} x {len(SURVEY_TYPES)} != {WATER_ZONE_PRESENTATION_COUNT}) "
     "-- otherwise the 'top N of each type' half of the rule and the total silently disagree"
 )
+
+# THE CLEAR-GROUND SLOTS: TWO ADDITIVE SLOTS FOR SITES OFF COMMITTED
+# PRODUCTION GROUND. ADDITIVE IS THE WHOLE DESIGN -- the four slots
+# above are filled first and are never touched by this; these slots
+# APPEND. Nothing is displaced, no zone is penalised, no tiebreak is
+# decided, and the four the rank rule chose stay exactly as it chose
+# them, in exactly that order.
+#
+# THE PROBLEM THIS SOLVES. Production overlap is measured and reported
+# on every zone and is DELIBERATELY NOT SCORED (see
+# _production_overlap_pct()), so the rank rule is indifferent to it. On
+# a parcel where the best ground for a pond is also the ground the
+# production layer selected, the top two of a type can BOTH sit on
+# committed production -- the second reference parcel presents
+# embankment zones overlapping production at 92.8% and 84.6% while
+# several zones clear of it rank below them -- and a reader who sees
+# four slots and no others sees nothing they could build without
+# redrawing a production boundary first.
+#
+# WHY THIS IS A PRESENTATION RULE AND NOT A SCORING ONE, restated here
+# because the cheap fix is the wrong one and will look tempting again.
+# Production overlap is a property of A DECISION THE USER ALREADY MADE
+# AND CAN REVISE, not a property of the water site: fold it into the
+# blend and a zone's SCORE changes when a production boundary is
+# redrawn, which makes the suitability number a reading of the plan
+# rather than of the ground. Presentation may depend on the plan --
+# what to lead with is a question about the reader's situation -- and
+# scoring may not. The swap-based alternative (demote an overlapping
+# zone, promote a clear one into its slot) was considered and refused
+# for the same reason the deleted TOP_N cap was: it makes the presented
+# set a judgement about which zone is better rather than a reading
+# order, and it hides the rank-1 site the user may well still want.
+#
+# THE CONSEQUENCE, IMPLEMENTED DELIBERATELY: THE PRESENTED SET CAN BE
+# NON-CONTIGUOUS IN RANK -- 1, 2, 3, 4, 7, 8 is a correct outcome, not
+# a bug to close. Nothing is hidden by the gap (every survivor is in
+# the payload, the panel and the GeoJSON, as always) and nothing was
+# displaced to make it. A set that had to be contiguous would BE the
+# swap rule.
+#
+# A CAP, NEVER A QUOTA, exactly like the four above: if no unpresented
+# zone qualifies, the slots stay empty and the run presents four. The
+# rule never pads.
+#
+# CONFIGURABLE.
+WATER_ZONE_CLEAR_GROUND_SLOTS = 2
+
+# THE THRESHOLD A ZONE MUST BE AT OR BELOW TO TAKE A CLEAR-GROUND SLOT,
+# as a percent of its own envelope (the SAME measurement
+# production_overlap_pct already carries -- see below).
+#
+# SET TO 0.0, AND THE CHOICE IS BETWEEN TWO HONEST CLAIMS. A slot that
+# admits 10% makes the claim "essentially clear"; a slot that admits
+# 0.0 makes the claim "clear". These zones are being appended for ONE
+# reason -- so the reader has a site they can build without reopening a
+# production decision -- and 10% of a 5-acre envelope is half an acre
+# of committed cropland, which is exactly the conversation the slot
+# exists to let them avoid. A threshold that still requires a boundary
+# redraw does not answer the question it was added for.
+#
+# 0.0 IS NOT A KNIFE EDGE, which is the objection it invites.
+# production_overlap_pct is rounded to one decimal, so 0.0 means "below
+# 0.05% of the envelope" -- a sliver tolerance already, and one wide
+# enough to absorb the geometry noise a strict zero-area test would
+# trip on.
+#
+# WHAT THE EVIDENCE COST, MEASURED. On the two networked reference
+# boundaries this branch ran, NO zone measures anywhere between the two
+# candidate thresholds -- the overlaps are 100/92.7/99/86.3/30/0/0 and
+# 48.9/89.6 on one, 92.8/86.1/39.9/92.1/0/0 and 47.9/82.2 on the other
+# -- so 0.0 and 10.0 fill exactly the same slots with exactly the same
+# zones there, and the stricter threshold costs nothing observed while
+# making the stronger claim. The parcel the rule was WRITTEN for (the
+# session-store boundary whose top two embankment zones overlap at
+# 92.8% and 84.6%) was reported to carry one site at 1.1% that 10.0
+# would admit and 0.0 refuses, beside sites at exactly 0.0% that both
+# admit: there too the slots fill either way, and the only difference
+# is whether a site needing half an acre of cropland back is presented
+# as clear ground. It is not.
+#
+# NONE DOES NOT QUALIFY, and this is the established sentinel reading,
+# not a special case: None means the production layer was NEVER CHECKED
+# (_production_overlap_pct()), and a slot whose entire purpose is to
+# assert "this one is clear" cannot be filled from an unmeasured zone.
+# The live entry point always supplies production areas
+# (identify_water_survey_areas() derives them when a caller does not),
+# so None is the
+# synthetic-fixture case -- where there is also no production ground
+# for the leading four to be sitting on, and so nothing for these slots
+# to remedy.
+#
+# CONFIGURABLE.
+WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT = 0.0
+
+# WHY a presented zone is in the set, carried on the zone as
+# `presented_reason`. Two values, because there are two slot kinds:
+# RANK covers the four the rank rule filled (base and backfill alike --
+# a backfilled zone is still there on its rank), CLEAR_GROUND covers
+# the additive slots. AN INTERNAL RECORD, NOT A DISPLAY VALUE: see
+# PANEL_EXCLUDED_KEYS for why it is deliberately off the panel.
+PRESENTED_REASON_RANK = "rank"
+PRESENTED_REASON_CLEAR_GROUND = "clear_ground"
 
 # Zone lifecycle status values (the established status/reason export
 # pattern): every zone is one or the other, and a dropped zone always
@@ -5229,24 +5338,48 @@ def assign_presentation_order(zones: list[dict]) -> dict:
     """
     THE PRESENTATION MARK, assigned IN PLACE to every zone handed in
     (see WATER_ZONE_PRESENTATION_COUNT's note for the rule and the
-    history of the cap this replaces): `presented` (bool) and
+    history of the cap this replaces): `presented` (bool),
     `presentation_order` (1-based int on a presented zone, None on an
-    unpresented one). NOTHING IS REMOVED FROM ANY SET BY THIS FUNCTION
-    -- it writes two keys and returns a summary; the caller's list is
-    the same list, in the same order, with the same members.
+    unpresented one) and `presented_reason` (PRESENTED_REASON_RANK /
+    PRESENTED_REASON_CLEAR_GROUND on a presented zone, None otherwise).
+    NOTHING IS REMOVED FROM ANY SET BY THIS FUNCTION -- it writes three
+    keys and returns a summary; the caller's list is the same list, in
+    the same order, with the same members.
 
-    Requires `rank` already assigned (rank_survey_zones_per_type()), and
-    reads NOTHING ELSE off a zone: presentation is a function of the
-    per-type ranks and the counts, so it cannot drift away from the
-    ranking it presents.
+    TWO KINDS OF SLOT, filled in this order and never in competition:
+
+      1. THE RANK SLOTS (WATER_ZONE_PRESENTATION_COUNT of them): the
+         top per-type slice interleaved by type, then backfill from
+         whichever type has leftovers.
+      2. THE CLEAR-GROUND SLOTS (WATER_ZONE_CLEAR_GROUND_SLOTS of
+         them), ADDITIVE: the best-ranked zones the rank slots did NOT
+         take whose production_overlap_pct is measured and at or below
+         WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT, one per type by rank
+         and then backfilled from the other type if a type has no
+         qualifier.
+
+    Step 2 CANNOT CHANGE STEP 1'S ANSWER: it runs over what step 1 left
+    and only appends, so the first WATER_ZONE_PRESENTATION_COUNT
+    entries of the returned order are exactly the entries this function
+    produced before the clear-ground slots existed. That is the
+    property the whole design rests on, and the call order here is what
+    makes it checkable rather than asserted.
+
+    Requires `rank` already assigned (rank_survey_zones_per_type()) and
+    `production_overlap_pct` already measured. It reads NOTHING ELSE
+    off a zone: presentation is a function of the per-type ranks, the
+    counts, and the one overlap the additive slots are defined in terms
+    of, so it cannot drift away from the ranking it presents.
 
     Returns the RULE-APPLIED SUMMARY -- the survivor count per type, the
-    presented count per type split into base and backfill, and
-    `rule_applied`, a plain reading of what happened on THIS run ("2
-    embankment + 1 excavated + 1 embankment backfill"). It is returned
-    rather than derived downstream because a run must be able to explain
-    its own presented set without a reader reconstructing the rule from
-    the marks.
+    presented count per type split into base, backfill and clear-ground,
+    the clear-ground slot accounting (including WHY the slots went
+    unfilled when they did), and `rule_applied`, a plain reading of what
+    happened on THIS run ("2 embankment + 1 excavated + 1 embankment
+    backfill + 1 embankment clear-ground"). It is returned rather than
+    derived downstream because a run must be able to explain its own
+    presented set without a reader reconstructing the rule from the
+    marks.
     """
     by_type = {
         survey_type: sorted(
@@ -5291,6 +5424,49 @@ def assign_presentation_order(zones: list[dict]) -> dict:
         backfilled = remaining[:open_slots]
         ordered.extend(backfilled)
 
+    # THE CLEAR-GROUND SLOTS (WATER_ZONE_CLEAR_GROUND_SLOTS): ADDITIVE,
+    # APPENDED, AND WITHOUT ANY EFFECT ON WHAT IS ABOVE. `ordered` is
+    # complete as far as rank is concerned at this point and is only
+    # extended below -- no entry is removed, reordered or re-scored, so
+    # a run's first four are the same four whether or not a zone
+    # qualifies here.
+    #
+    # WHO QUALIFIES: a zone the rank slots did not take whose
+    # production overlap was MEASURED (None is "never checked", and a
+    # slot that claims "clear" cannot be filled from an unmeasured
+    # zone) and is at or below the threshold.
+    rank_taken = {id(zone) for zone in ordered}
+    clear_ground_eligible = {
+        survey_type: [
+            zone
+            for zone in by_type[survey_type]
+            if id(zone) not in rank_taken
+            and zone["production_overlap_pct"] is not None
+            and zone["production_overlap_pct"] <= WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT
+        ]
+        for survey_type in SURVEY_TYPES
+    }
+    # ONE PER TYPE BY RANK, THEN BACKFILLED FROM THE OTHER TYPE -- said
+    # as a round-robin over the types rather than as "one each, then
+    # top up", because the round-robin IS that rule and stays that rule
+    # if the slot count is ever retuned: round 0 takes each type's best
+    # qualifier, and a type with no qualifier at all simply contributes
+    # nothing to any round, which leaves its slot to the next type that
+    # does. Interleaved for the same reason the base is (a set that
+    # reads as one type's list reads as a recommendation of that type).
+    clear_ground: list[dict] = []
+    for round_index in range(WATER_ZONE_CLEAR_GROUND_SLOTS):
+        for survey_type in SURVEY_TYPES:
+            if len(clear_ground) >= WATER_ZONE_CLEAR_GROUND_SLOTS:
+                break
+            typed = clear_ground_eligible[survey_type]
+            if round_index < len(typed):
+                clear_ground.append(typed[round_index])
+        if len(clear_ground) >= WATER_ZONE_CLEAR_GROUND_SLOTS:
+            break
+    clear_ground_ids = {id(zone) for zone in clear_ground}
+    ordered.extend(clear_ground)
+
     # Written over EVERY zone handed in, so an unpresented survivor
     # carries the explicit False/None rather than a missing key: absent
     # is not a value, and a consumer must never have to distinguish
@@ -5298,9 +5474,15 @@ def assign_presentation_order(zones: list[dict]) -> dict:
     for zone in zones:
         zone["presented"] = False
         zone["presentation_order"] = None
+        zone["presented_reason"] = None
     for order, zone in enumerate(ordered, start=1):
         zone["presented"] = True
         zone["presentation_order"] = order
+        zone["presented_reason"] = (
+            PRESENTED_REASON_CLEAR_GROUND
+            if id(zone) in clear_ground_ids
+            else PRESENTED_REASON_RANK
+        )
 
     base_counts = {
         survey_type: len(base[survey_type]) for survey_type in SURVEY_TYPES
@@ -5308,6 +5490,12 @@ def assign_presentation_order(zones: list[dict]) -> dict:
     backfill_counts = {
         survey_type: sum(
             1 for zone in backfilled if zone["survey_type"] == survey_type
+        )
+        for survey_type in SURVEY_TYPES
+    }
+    clear_ground_counts = {
+        survey_type: sum(
+            1 for zone in clear_ground if zone["survey_type"] == survey_type
         )
         for survey_type in SURVEY_TYPES
     }
@@ -5321,9 +5509,46 @@ def assign_presentation_order(zones: list[dict]) -> dict:
         for survey_type in SURVEY_TYPES
         if backfill_counts[survey_type]
     ]
+    parts += [
+        f"{clear_ground_counts[survey_type]} {survey_type} clear-ground"
+        for survey_type in SURVEY_TYPES
+        if clear_ground_counts[survey_type]
+    ]
+    # WHY THE SLOTS WENT UNFILLED, as a value rather than as the
+    # absence of one -- the unfilled case is a finding ("this parcel
+    # offers no unpresented site clear of production ground"), and a
+    # reader who sees four zones must be able to tell that from a
+    # reader who sees four because the rule never ran. None when the
+    # slots filled; the reason names which half failed.
+    clear_ground_unfilled_reason = None
+    if len(clear_ground) < WATER_ZONE_CLEAR_GROUND_SLOTS:
+        measured = any(
+            zone["production_overlap_pct"] is not None for zone in zones
+        )
+        if not zones:
+            clear_ground_unfilled_reason = "no surviving zones"
+        elif not measured:
+            clear_ground_unfilled_reason = (
+                "production overlap was never checked on this run -- no zone can be claimed clear"
+            )
+        elif not any(clear_ground_eligible.values()):
+            clear_ground_unfilled_reason = (
+                "no unpresented survivor of either type is at or below "
+                f"{WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT}% production overlap"
+            )
+        else:
+            clear_ground_unfilled_reason = (
+                "fewer qualifying unpresented survivors than clear-ground slots"
+            )
     return {
         "presentation_count": WATER_ZONE_PRESENTATION_COUNT,
         "per_type_count": WATER_ZONE_PRESENTATION_PER_TYPE,
+        # THE ADDITIVE SLOTS, carried beside the rank cap rather than
+        # folded into it: `presentation_count` stays the rank rule's
+        # own cap (every consumer reading it means that), and the total
+        # a run may present is presentation_count + clear_ground_slots.
+        "clear_ground_slots": WATER_ZONE_CLEAR_GROUND_SLOTS,
+        "clear_ground_max_overlap_pct": WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT,
         # WHAT WAS CONSIDERED, beside what is shown -- the whole point
         # of reporting the rule rather than just the marks.
         "survivor_counts": {
@@ -5331,12 +5556,34 @@ def assign_presentation_order(zones: list[dict]) -> dict:
         },
         "presented_count": len(ordered),
         "presented_counts": {
-            survey_type: base_counts[survey_type] + backfill_counts[survey_type]
+            survey_type: base_counts[survey_type]
+            + backfill_counts[survey_type]
+            + clear_ground_counts[survey_type]
             for survey_type in SURVEY_TYPES
         },
         "base_counts": base_counts,
         "backfill_counts": backfill_counts,
         "backfill_applied": bool(backfilled),
+        "clear_ground_counts": clear_ground_counts,
+        "clear_ground_count": len(clear_ground),
+        "clear_ground_applied": bool(clear_ground),
+        "clear_ground_unfilled": len(clear_ground) < WATER_ZONE_CLEAR_GROUND_SLOTS,
+        "clear_ground_unfilled_reason": clear_ground_unfilled_reason,
+        # EACH ADDITION BY NAME, WITH THE NUMBER IT QUALIFIED ON. A
+        # slot that asserts "clear of production ground" has to show
+        # the measurement it asserts that on, and the rank says where
+        # in its type the addition came from -- which is how a reader
+        # sees the gap (presented 1,2,3,4 then 7) as the rule working
+        # rather than as a missing zone.
+        "clear_ground_zones": [
+            {
+                "zone_id": zone["id"],
+                "survey_type": zone["survey_type"],
+                "rank": zone["rank"],
+                "production_overlap_pct": zone["production_overlap_pct"],
+            }
+            for zone in clear_ground
+        ],
         "presented_zone_ids": [zone["id"] for zone in ordered],
         "rule_applied": " + ".join(parts) if parts else "no surviving zones",
     }
@@ -5771,6 +6018,7 @@ def compute_water_survey_areas(
             zone["rank"] = None
             zone["presented"] = False
             zone["presentation_order"] = None
+            zone["presented_reason"] = None
             zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         elif id(zone) in over_ceiling_set:
@@ -5791,6 +6039,7 @@ def compute_water_survey_areas(
             # read the same two keys every other zone carries.
             zone["presented"] = False
             zone["presentation_order"] = None
+            zone["presented_reason"] = None
             zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         elif id(zone) in duplicate_set:
@@ -5800,6 +6049,7 @@ def compute_water_survey_areas(
             zone["rank"] = None
             zone["presented"] = False
             zone["presentation_order"] = None
+            zone["presented_reason"] = None
             zone["cross_type_overlaps"] = []
             dropped_zones.append(zone)
         elif zone["zone_acres"] < MIN_SURVEY_REGION_AREA_ACRES:
@@ -5808,6 +6058,7 @@ def compute_water_survey_areas(
             zone["rank"] = None
             zone["presented"] = False
             zone["presentation_order"] = None
+            zone["presented_reason"] = None
             zone["cross_type_overlaps"] = []
             zone["below_min_area"] = True
             if FLAG_BELOW_MIN_AREA not in zone["flags"]:
@@ -5968,6 +6219,17 @@ def _zone_feature_properties(zone: dict) -> dict:
         # rank within type across ALL survivors, presented or not.
         "presented": zone["presented"],
         "presentation_order": zone["presentation_order"],
+        # WHICH KIND OF SLOT this zone is in -- the rank rule's four or
+        # one of the additive clear-ground slots
+        # (PRESENTED_REASON_RANK / PRESENTED_REASON_CLEAR_GROUND, None
+        # on an unpresented or dropped zone). An INTERNAL RECORD for
+        # the diagnostic and the export: it is here, and in
+        # narrative_data, and deliberately NOT on the panel
+        # (PANEL_EXCLUDED_KEYS says why). It is also what makes a
+        # NON-CONTIGUOUS presented set legible -- a reader seeing ranks
+        # 1,2,3,4,7 on the wire can tell the 7 is an addition rather
+        # than evidence that 5 and 6 went missing.
+        "presented_reason": zone["presented_reason"],
         # The cross-type agreement report (fractions of THIS zone's
         # envelope overlapped by surviving zones of the other type).
         "cross_type_overlaps": list(zone["cross_type_overlaps"]),
@@ -6348,6 +6610,21 @@ PANEL_EXCLUDED_KEYS = (
     # act on.
     "presented",
     "presentation_order",
+    # AND `presented_reason` WITH THEM, DECIDED THE SAME WAY AND FOR AN
+    # EXTRA REASON OF ITS OWN -- recorded here so a later hand does not
+    # read its absence from the panel as an oversight and "fix" it.
+    # RANK IS NOT DISPLAYED as a cutoff anywhere the reader can see:
+    # the panel's `rank` row says "2 of 7", which is this zone's place
+    # in its type, never "the presented set stops at four". So a reader
+    # looking at six zone tabs sees six zones and no boundary between
+    # them, and needs no explanation of why two of them are there. A
+    # row saying "clear-ground slot" would CREATE that boundary --
+    # introducing a distinction the display does not otherwise make,
+    # and inviting the reading that those two zones are a lesser class
+    # of answer, which is exactly what an ADDITIVE rule was chosen to
+    # avoid. It rides the feature properties and narrative_data (where
+    # the diagnostic and the export read it) and stops there.
+    "presented_reason",
 )
 """Keys that are NOT panel rows, asserted absent from build_zone_panel()'s
 output and from its source. Named as a constant rather than left implicit
@@ -6796,6 +7073,11 @@ def build_narrative_data(result: dict) -> dict:
             # which is which without recounting the rule.
             "presented": zone["presented"],
             "presentation_order": zone["presentation_order"],
+            # WHY this zone is presented (rank slot vs clear-ground
+            # slot), carried so the report CAN distinguish the two if a
+            # later branch wants to. It changes no prose today, and it
+            # is not a panel row -- see PANEL_EXCLUDED_KEYS.
+            "presented_reason": zone["presented_reason"],
             "zone_acres": round(zone["zone_acres"], 1),
             "mean_suitability": zone["mean_suitability"],
             "max_suitability": zone["max_suitability"],

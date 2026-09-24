@@ -688,6 +688,7 @@ _sparse_feature = wsa._zone_feature_properties(
         # optional one: a zone the pipeline forgot to mark must fail
         # loudly here rather than serialize as a quiet False.
         "presented": True, "presentation_order": 1,
+        "presented_reason": wsa.PRESENTED_REASON_RANK,
         "cross_type_overlaps": [], "canopy_overlap_pct": None, "road_overlap_pct": None,
         "production_overlap_pct": None, "primary_production_area_relationship": None,
         "production_area_relationships": [], "has_service_relationship": False,
