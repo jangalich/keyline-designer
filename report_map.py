@@ -137,6 +137,16 @@ FRAME_WIDTH_PT = 489.6
 FRAME_HEIGHT_PT = 340.0
 FRAME = (FRAME_WIDTH_PT, FRAME_HEIGHT_PT)
 
+# THE LAYOUT MAP'S FRAME (branch 13), and it is NOT ON THE SHARED SCALE.
+# Every inventory section draws the parcel in FRAME, fitted, at one scale,
+# so a reader can lay Landform over Water over Soils. The layout map is the
+# deliverable -- the design, on its land, to take to the field -- and it
+# takes the full content width and most of the page's height instead,
+# drawn at whatever scale that gives, which its own scale bar states. This
+# is deliberate: do not "fix" it into line with FRAME. It is drawn with
+# fit=False, so the width is never cut either.
+LAYOUT_FRAME = (FRAME_WIDTH_PT, 520.0)
+
 # Inside the frame: the margin around the parcel extent, and the band along
 # the bottom reserved for the scale bar so it is never drawn over the
 # parcel. The legend lives below the frame, not in this band.
@@ -161,10 +171,12 @@ BOUNDARY_STROKE_PT = 1.1
 CONTOUR_STROKE_PT = 0.45
 INDEX_CONTOUR_STROKE_PT = 0.95
 FRAME_STROKE_PT = 0.5
+FURNITURE_CASING_PT = 1.2  # the page-coloured casing each side of the boundary and furniture, when halo=True
 ASTERISK_RADIUS_PT = 3.2
 DOT_RADIUS_PT = 2.4
 DOT_HALO_PT = 1.1          # a page-coloured ring so a dot on a line reads as a point, not a thickening
 POINT_LABEL_GAP_PT = 3.0
+GLYPH_HALF_PT = 3.4        # the building glyph's half-width (branch 13's layout map)
 
 # Type, in points. The prose face for names, the data face for figures.
 FONT_PROSE = "Source Serif 4"
@@ -219,6 +231,11 @@ def layer(
     marker: str = "asterisk",
     stroke_opacity: float = 1.0,
     screen_dot_pt: float = 1.2,
+    casing_pt: float = 0.0,
+    hatch_spacing_pt: float = 3.2,
+    hatch_angle_deg: float = 45.0,
+    label_halo: bool = False,
+    casing_opacity: float = 1.0,
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -238,16 +255,34 @@ def layer(
     "screen" layer is a polygon drawn as a dot screen in the `fill`
     token, dots `screen_dot_pt` across on the SCREEN_SPACING_PT grid (see
     the module docstring); `stroke` and `fill_opacity` do not apply to it.
+
+    THE LAYOUT MAP'S OPTIONS (branch 13), each off by default so every
+    other section's SVG is byte for byte what it was. `casing_pt` draws
+    every mark of the layer first in the page colour, that many points
+    wider on each side -- a halo casing, which is what keeps a mark legible
+    over photography, where no single ink wins against every patch of
+    ground. A "hatch" layer is a polygon filled with parallel lines in the
+    `fill` token, `hatch_spacing_pt` apart at `hatch_angle_deg`, each
+    `stroke_width` wide, with no outline unless `stroke` names one; like a
+    screen, the lines are GEOMETRY clipped to the polygon, not an SVG
+    pattern. `marker="glyph"` is a filled building glyph in the stroke
+    token. `label_halo` knocks a point layer's labels out of what they sit
+    on, the way a polygon label always is. `casing_opacity` below 1 sets a
+    casing back, for linework that is context rather than design. A hatch
+    or a screen may carry
+    `labels` like a polygon layer: set inside each shape at its pole, in
+    the layer's `fill` token, knocked out, dropped when the shape cannot
+    hold it.
     """
-    if kind not in ("polygon", "line", "point", "screen"):
-        raise ValueError(f"layer kind must be polygon, line, point or screen, got {kind!r}")
+    if kind not in ("polygon", "line", "point", "screen", "hatch"):
+        raise ValueError(f"layer kind must be polygon, line, point, screen or hatch, got {kind!r}")
+    if kind == "hatch" and fill is None:
+        raise ValueError("a hatch layer names the token its lines are drawn in")
     if kind == "screen" and fill is None:
         raise ValueError("a screen layer names the token its dots are drawn in")
-    if marker not in ("asterisk", "dot"):
-        raise ValueError(f"marker must be asterisk or dot, got {marker!r}")
+    if marker not in ("asterisk", "dot", "glyph"):
+        raise ValueError(f"marker must be asterisk, dot or glyph, got {marker!r}")
     if labels is not None:
-        if kind == "screen":
-            raise ValueError("a screen layer is a tint, not a labelled shape")
         if len(labels) != len(geometries):
             raise ValueError("labels must be one per geometry")
     return {
@@ -264,6 +299,11 @@ def layer(
         "marker": marker,
         "stroke_opacity": float(stroke_opacity),
         "screen_dot_pt": float(screen_dot_pt),
+        "casing_pt": float(casing_pt),
+        "hatch_spacing_pt": float(hatch_spacing_pt),
+        "hatch_angle_deg": float(hatch_angle_deg),
+        "label_halo": bool(label_halo),
+        "casing_opacity": float(casing_opacity),
     }
 
 
@@ -637,13 +677,34 @@ def _dot(cx: float, cy: float, radius: float, fill: str, halo: str) -> str:
     )
 
 
+def _glyph_path(cx: float, cy: float, half: float) -> str:
+    """A building: a square body under a pitched roof, `half` the body's
+    half-width, centred on the point."""
+    top = cy - half * 0.35
+    return (f"M{_fmt(cx - half)} {_fmt(cy + half)} L{_fmt(cx + half)} {_fmt(cy + half)} "
+            f"L{_fmt(cx + half)} {_fmt(top)} L{_fmt(cx)} {_fmt(top - half * 0.95)} "
+            f"L{_fmt(cx - half)} {_fmt(top)} Z")
+
+
+def _glyph(cx: float, cy: float, fill: str, halo: str) -> str:
+    """The structure convention on the layout map: a filled building glyph
+    with a page-coloured halo, so it holds over photography."""
+    d = _glyph_path(cx, cy, GLYPH_HALF_PT)
+    return (f'<path d="{d}" fill="{halo}" stroke="{halo}" stroke-width="{_fmt(2 * DOT_HALO_PT)}" stroke-linejoin="round"/>'
+            f'<path d="{d}" fill="{fill}" stroke="none"/>')
+
+
 def _marker(spec: dict, x: float, y: float, stroke: str, tokens: dict) -> str:
     if spec.get("marker") == "dot":
         return _dot(x, y, DOT_RADIUS_PT, stroke, _colour(tokens, "page"))
+    if spec.get("marker") == "glyph":
+        return _glyph(x, y, stroke, _colour(tokens, "page"))
     return _asterisk(x, y, ASTERISK_RADIUS_PT, stroke, spec["stroke_width"])
 
 
 def _marker_radius(spec: dict) -> float:
+    if spec.get("marker") == "glyph":
+        return GLYPH_HALF_PT + DOT_HALO_PT
     return DOT_RADIUS_PT + DOT_HALO_PT if spec.get("marker") == "dot" else ASTERISK_RADIUS_PT
 
 
@@ -702,16 +763,136 @@ def _screen_svg(spec: dict, projection, fill: str) -> list:
     return pieces
 
 
-def _layer_svg(spec: dict, projection, tokens: dict) -> str:
+def _hatch_lines(geometry, projection, spacing_pt: float, angle_deg: float) -> list:
+    """The hatch lines over one polygon, in the geometry's metres: parallel
+    lines `spacing_pt` apart on the page at `angle_deg` from the x axis,
+    on a grid anchored at the CRS origin so neighbouring polygons' hatches
+    line up, each clipped to the polygon."""
+    spacing_m = spacing_pt * projection.meters_per_unit
+    theta = math.radians(angle_deg)
+    # Unit normal to the lines; line k is every point p with p . n = k * spacing.
+    nx, ny = -math.sin(theta), math.cos(theta)
+    dx, dy = math.cos(theta), math.sin(theta)
+    minx, miny, maxx, maxy = geometry.bounds
+    along = [x * nx + y * ny for x, y in ((minx, miny), (minx, maxy), (maxx, miny), (maxx, maxy))]
+    reach = math.hypot(maxx - minx, maxy - miny) + spacing_m
+    cx, cy = (minx + maxx) / 2, (miny + maxy) / 2
+    lines = []
+    for k in range(math.floor(min(along) / spacing_m), math.ceil(max(along) / spacing_m) + 1):
+        offset = k * spacing_m - (cx * nx + cy * ny)
+        px, py = cx + nx * offset, cy + ny * offset
+        segment = LineString([(px - dx * reach, py - dy * reach), (px + dx * reach, py + dy * reach)])
+        lines.extend(_linear_parts_list(geometry.intersection(segment)))
+    return lines
+
+
+def _hatch_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None) -> list:
+    fill = _colour(tokens, spec["fill"])
+    paths = []
+    for geometry in spec["geometries"]:
+        if geometry is None or geometry.is_empty:
+            continue
+        lines = _hatch_lines(geometry, projection, spec["hatch_spacing_pt"], spec["hatch_angle_deg"])
+        d = " ".join(p for p in (_line_path(line.coords, projection) for line in lines) if p)
+        if d:
+            paths.append(d)
+    pieces = []
+    width = spec["stroke_width"]
+    if spec.get("casing_pt"):
+        page = _colour(tokens, "page")
+        pieces += [f'<path d="{d}" fill="none" stroke="{page}" stroke-width="{_fmt(width + 2 * spec["casing_pt"])}" '
+                   f'stroke-linecap="butt"/>' for d in paths]
+    pieces += [f'<path d="{d}" fill="none" stroke="{fill}" stroke-width="{_fmt(width)}" stroke-linecap="butt"/>' for d in paths]
+    return pieces + _tint_labels(spec, projection, tokens, sink)
+
+
+def _defer_area_label(sink: list, geometry, placement, label: str, fill: str, layer_id: str, projection) -> None:
+    """A shape's label for _place_labels(): inside at its pole when it
+    fits there, otherwise BESIDE the pole like a point's -- on a map whose
+    job is to name what it draws, a narrow shape is named beside itself
+    rather than left anonymous."""
+    if placement:
+        sink.append({"kind": "area", "x": placement[0], "y": placement[1], "text": label, "fill": fill, "layer": layer_id})
+        return
+    pole = polygon_pole(geometry)
+    if pole is None:
+        return
+    x, y = projection.xy(pole[0], pole[1])
+    sink.append({"kind": "point", "x": x, "y": y, "r": 0.0, "text": label, "fill": fill, "layer": layer_id, "beside": True})
+
+
+def _tint_labels(spec: dict, projection, tokens: dict, sink: Optional[list] = None) -> list:
+    """A hatch's or a screen's labels, inside each shape as a polygon's
+    are, knocked out, in the tint's own token."""
+    fill = _colour(tokens, spec["fill"])
+    pieces = []
+    for geometry, label in zip(spec["geometries"], spec.get("labels") or []):
+        if not label or geometry is None or geometry.is_empty:
+            continue
+        placement = _labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT)
+        if sink is not None:
+            _defer_area_label(sink, geometry, placement, label, fill, spec["id"], projection)
+            continue
+        if placement:
+            lx, ly = placement
+            pieces.append(_text(lx, ly + LINE_LABEL_SIZE_PT * 0.35, label, font=FONT_DATA, size=LINE_LABEL_SIZE_PT,
+                                fill=fill, anchor="middle", halo=_colour(tokens, "page")))
+    return pieces
+
+
+def _casing_svg(spec: dict, projection, tokens: dict) -> str:
+    """A layer's halo casing: its strokes (or, for a screen, its dots) in
+    the page colour, `casing_pt` wider on every side, drawn beneath it. A
+    hatch cases its own lines; a point marker carries its own halo."""
+    casing = spec.get("casing_pt") or 0.0
+    if casing <= 0 or spec["kind"] in ("hatch", "point"):
+        return ""
+    page = _colour(tokens, "page")
+    pieces = []
+    if spec["kind"] == "screen":
+        dot = spec.get("screen_dot_pt", 1.2) + 2 * casing
+        for geometry in spec["geometries"]:
+            if geometry is None or geometry.is_empty:
+                continue
+            polygons = [geometry] if isinstance(geometry, Polygon) else [g for g in getattr(geometry, "geoms", []) if isinstance(g, Polygon)]
+            for polygon in polygons:
+                for d, offset in _screen_rows(polygon, projection):
+                    pieces.append(
+                        f'<path d="{d}" fill="none" stroke="{page}" stroke-width="{_fmt(dot)}" stroke-linecap="round" '
+                        f'stroke-dasharray="0 {_fmt(SCREEN_SPACING_PT)}" stroke-dashoffset="{_fmt(offset)}"/>'
+                    )
+        return "".join(pieces)
+    width = spec["stroke_width"] + 2 * casing
+    faint = spec.get("casing_opacity", 1.0)
+    faint = f' stroke-opacity="{_fmt(faint)}"' if faint < 1.0 else ""
+    for geometry in spec["geometries"]:
+        if geometry is None or geometry.is_empty:
+            continue
+        d = _geometry_path(geometry, projection)
+        if d:
+            pieces.append(f'<path d="{d}" fill="none" stroke="{page}" stroke-width="{_fmt(width)}" '
+                          f'stroke-linejoin="round" stroke-linecap="round"{faint}/>')
+    return "".join(pieces)
+
+
+def _layer_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None) -> str:
+    """One layer's <g>. With `sink` a list, the layer's polygon, tint and
+    point labels are appended to it instead of drawn (render_map's
+    labels_on_top), so every label can be set last and clear of the rest."""
     stroke = _colour(tokens, spec["stroke"])
     fill = _colour(tokens, spec["fill"])
+    if spec["kind"] == "hatch":
+        return f'<g id="layer-{escape(spec["id"])}">' + "".join(_hatch_svg(spec, projection, tokens, sink)) + "</g>"
     if spec["kind"] == "screen":
-        return f'<g id="layer-{escape(spec["id"])}">' + "".join(_screen_svg(spec, projection, fill)) + "</g>"
+        return (f'<g id="layer-{escape(spec["id"])}">' + _casing_svg(spec, projection, tokens)
+                + "".join(_screen_svg(spec, projection, fill)) + "".join(_tint_labels(spec, projection, tokens, sink)) + "</g>")
     dash = f' stroke-dasharray="{spec["dash"]}"' if spec.get("dash") else ""
     opacity = spec.get("stroke_opacity", 1.0)
     if opacity < 1.0:
         dash += f' stroke-opacity="{_fmt(opacity)}"'
     pieces = [f'<g id="layer-{escape(spec["id"])}">']
+    if spec.get("casing_pt"):
+        pieces.append(_casing_svg(spec, projection, tokens))
     labels = spec.get("labels") or [None] * len(spec["geometries"])
     for geometry, label in zip(spec["geometries"], labels):
         if geometry is None or geometry.is_empty:
@@ -739,11 +920,15 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
             for point in points:
                 x, y = projection.xy(point.x, point.y)
                 pieces.append(_marker(spec, x, y, stroke, tokens))
-                if label:
+                if label and sink is not None:
+                    sink.append({"kind": "point", "x": x, "y": y, "r": _marker_radius(spec), "text": label, "fill": stroke,
+                                 "layer": spec["id"]})
+                elif label:
                     # Beside and a little above the marker, so the text clears a line running through it.
                     pieces.append(_text(
                         x + _marker_radius(spec) + POINT_LABEL_GAP_PT, y - _marker_radius(spec) * 0.6, label,
                         font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="start",
+                        halo=_colour(tokens, "page") if spec.get("label_halo") else None,
                     ))
             continue
         d = _geometry_path(geometry, projection)
@@ -756,7 +941,9 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
             )
             if label:
                 placement = _labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT)
-                if placement:
+                if sink is not None:
+                    _defer_area_label(sink, geometry, placement, label, stroke, spec["id"], projection)
+                elif placement:
                     lx, ly = placement
                     pieces.append(_text(
                         lx, ly + LINE_LABEL_SIZE_PT * 0.35, label,
@@ -770,6 +957,55 @@ def _layer_svg(spec: dict, projection, tokens: dict) -> str:
             )
     pieces.append("</g>")
     return "".join(pieces)
+
+
+def _label_box(x: float, y: float, text: str, anchor: str) -> tuple:
+    """The box a label at (x, y) -- its baseline-centre reference, as
+    _place_labels() sets it -- covers, in SVG units."""
+    width = _label_width(text, LINE_LABEL_SIZE_PT)
+    left = x - width / 2 if anchor == "middle" else (x - width if anchor == "end" else x)
+    return (left - 1.0, y - LINE_LABEL_SIZE_PT * 0.5 - 1.0, left + width + 1.0, y + LINE_LABEL_SIZE_PT * 0.5 + 1.0)
+
+
+def _overlaps(a: tuple, b: tuple) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _place_labels(pending: list, halo: str) -> tuple:
+    """Every deferred label, set last: area labels at their poles, as
+    placed; then each point label at the first of four positions -- right,
+    left, below, above its marker -- whose box clears every label already
+    set and every other marker. A point label with no clear position is
+    set to the right regardless: a name beside its mark, crowded, is
+    better than a mark with no name. Returns (svg, [(text, box), ...])."""
+    markers = [(p["x"] - p["r"], p["y"] - p["r"], p["x"] + p["r"], p["y"] + p["r"]) for p in pending if p["kind"] == "point"]
+    placed = []
+    pieces = []
+    for item in [p for p in pending if p["kind"] == "area"]:
+        box_ = _label_box(item["x"], item["y"], item["text"], "middle")
+        placed.append((item["text"], box_))
+        pieces.append(_text(item["x"], item["y"] + LINE_LABEL_SIZE_PT * 0.35, item["text"], font=FONT_DATA,
+                            size=LINE_LABEL_SIZE_PT, fill=item["fill"], anchor="middle", halo=halo))
+    for item in [p for p in pending if p["kind"] == "point"]:
+        gap = item["r"] + POINT_LABEL_GAP_PT
+        x, y = item["x"], item["y"]
+        own = (x - item["r"], y - item["r"], x + item["r"], y + item["r"])
+        candidates = [
+            (x + gap, y, "start"), (x - gap, y, "end"),
+            (x, y + gap + LINE_LABEL_SIZE_PT * 0.5, "middle"), (x, y - gap - LINE_LABEL_SIZE_PT * 0.5, "middle"),
+        ]
+        chosen = candidates[0]
+        for cx, cy, anchor in candidates:
+            box_ = _label_box(cx, cy, item["text"], anchor)
+            if not any(_overlaps(box_, other) for _, other in placed) and \
+                    not any(_overlaps(box_, m) for m in markers if m != own):
+                chosen = (cx, cy, anchor)
+                break
+        cx, cy, anchor = chosen
+        placed.append((item["text"], _label_box(cx, cy, item["text"], anchor)))
+        pieces.append(_text(cx, cy + LINE_LABEL_SIZE_PT * 0.35, item["text"], font=FONT_DATA, size=LINE_LABEL_SIZE_PT,
+                            fill=item["fill"], anchor=anchor, halo=halo))
+    return '<g id="labels">' + "".join(pieces) + "</g>", placed
 
 
 def _text(x, y, content, *, font, size, fill, anchor="start", weight=None, transform=None, halo=None) -> str:
@@ -803,23 +1039,33 @@ def _text(x, y, content, *, font, size, fill, anchor="start", weight=None, trans
     return "".join(parts)
 
 
-def _north_arrow(frame, tokens) -> str:
+def _north_arrow(frame, tokens, halo: bool = False) -> str:
     width, _ = frame
     ink = tokens["ink"]
     cx = width - MARGIN_PT - 8.0
     top = MARGIN_PT + 4.0
     length = 20.0
+    casing = ""
+    if halo:
+        page = tokens["page"]
+        casing = (
+            f'<line x1="{_fmt(cx)}" y1="{_fmt(top + length)}" x2="{_fmt(cx)}" y2="{_fmt(top + 6)}" '
+            f'stroke="{page}" stroke-width="{_fmt(0.8 + 2 * FURNITURE_CASING_PT)}" stroke-linecap="round"/>'
+            f'<path d="M{_fmt(cx)} {_fmt(top)} L{_fmt(cx - 3.2)} {_fmt(top + 7.5)} L{_fmt(cx + 3.2)} {_fmt(top + 7.5)} Z" '
+            f'fill="{page}" stroke="{page}" stroke-width="{_fmt(2 * FURNITURE_CASING_PT)}" stroke-linejoin="round"/>'
+        )
     return (
-        f'<g id="north-arrow">'
+        f'<g id="north-arrow">' + casing +
         f'<line x1="{_fmt(cx)}" y1="{_fmt(top + length)}" x2="{_fmt(cx)}" y2="{_fmt(top + 6)}" '
         f'stroke="{ink}" stroke-width="0.8"/>'
         f'<path d="M{_fmt(cx)} {_fmt(top)} L{_fmt(cx - 3.2)} {_fmt(top + 7.5)} L{_fmt(cx + 3.2)} {_fmt(top + 7.5)} Z" fill="{ink}"/>'
-        + _text(cx, top + length + NORTH_SIZE_PT + 1.5, "N", font=FONT_PROSE, size=NORTH_SIZE_PT, fill=ink, anchor="middle")
+        + _text(cx, top + length + NORTH_SIZE_PT + 1.5, "N", font=FONT_PROSE, size=NORTH_SIZE_PT, fill=ink, anchor="middle",
+                halo=tokens["page"] if halo else None)
         + "</g>"
     )
 
 
-def _scale_bar(frame, projection, tokens) -> tuple:
+def _scale_bar(frame, projection, tokens, halo: bool = False) -> tuple:
     """The scale bar SVG and its measurements {feet, units}."""
     width, height = frame
     ink = tokens["ink"]
@@ -828,12 +1074,21 @@ def _scale_bar(frame, projection, tokens) -> tuple:
     right = width - MARGIN_PT
     left = right - units
     y = height - MARGIN_PT - 9.0
+    casing = ""
+    if halo:
+        page, wide = tokens["page"], _fmt(0.9 + 2 * FURNITURE_CASING_PT)
+        casing = (
+            f'<line x1="{_fmt(left)}" y1="{_fmt(y)}" x2="{_fmt(right)}" y2="{_fmt(y)}" stroke="{page}" stroke-width="{wide}" stroke-linecap="square"/>'
+            f'<line x1="{_fmt(left)}" y1="{_fmt(y - 3.5)}" x2="{_fmt(left)}" y2="{_fmt(y + 3.5)}" stroke="{page}" stroke-width="{wide}" stroke-linecap="square"/>'
+            f'<line x1="{_fmt(right)}" y1="{_fmt(y - 3.5)}" x2="{_fmt(right)}" y2="{_fmt(y + 3.5)}" stroke="{page}" stroke-width="{wide}" stroke-linecap="square"/>'
+        )
     svg = (
-        f'<g id="scale-bar">'
+        f'<g id="scale-bar">' + casing +
         f'<line x1="{_fmt(left)}" y1="{_fmt(y)}" x2="{_fmt(right)}" y2="{_fmt(y)}" stroke="{ink}" stroke-width="0.9"/>'
         f'<line x1="{_fmt(left)}" y1="{_fmt(y - 3.5)}" x2="{_fmt(left)}" y2="{_fmt(y + 3.5)}" stroke="{ink}" stroke-width="0.9"/>'
         f'<line x1="{_fmt(right)}" y1="{_fmt(y - 3.5)}" x2="{_fmt(right)}" y2="{_fmt(y + 3.5)}" stroke="{ink}" stroke-width="0.9"/>'
-        + _text((left + right) / 2, y - 5.5, f"{feet:,} ft", font=FONT_DATA, size=LABEL_SIZE_PT, fill=ink, anchor="middle")
+        + _text((left + right) / 2, y - 5.5, f"{feet:,} ft", font=FONT_DATA, size=LABEL_SIZE_PT, fill=ink, anchor="middle",
+                halo=tokens["page"] if halo else None)
         + "</g>"
     )
     return svg, {"feet": feet, "units": units}
@@ -866,6 +1121,17 @@ def _swatch(spec: dict, tokens: dict) -> str:
             f'<rect x="0.25" y="0.25" width="{_fmt(w - 0.5)}" height="{_fmt(h - 0.5)}" fill="none" stroke="{fill}" '
             f'stroke-width="0.4"/>' + "".join(rows)
         )
+    elif spec["kind"] == "hatch":
+        # The same lines at the same spacing and weight, across a swatch with no outline.
+        spacing = spec["hatch_spacing_pt"]
+        lines = []
+        k = -h
+        while k < w + h:
+            lines.append(f'<line x1="{_fmt(k)}" y1="{_fmt(h)}" x2="{_fmt(k + h)}" y2="0" stroke="{fill}" '
+                         f'stroke-width="{_fmt(spec["stroke_width"])}"/>')
+            k += spacing * math.sqrt(2)
+        body = (f'<clipPath id="swatch-clip-{escape(spec["id"])}"><rect x="0" y="0" width="{_fmt(w)}" height="{_fmt(h)}"/></clipPath>'
+                f'<g clip-path="url(#swatch-clip-{escape(spec["id"])})">' + "".join(lines) + "</g>")
     elif spec["kind"] == "line":
         opacity = spec.get("stroke_opacity", 1.0)
         faint = f' stroke-opacity="{_fmt(opacity)}"' if opacity < 1.0 else ""
@@ -895,13 +1161,14 @@ def fitted_frame(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
     return (width, height)
 
 
-def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
+def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME, fit: bool = True) -> tuple:
     """The ground rectangle the (fitted) frame shows, in the DEM's CRS,
     above the furniture band: (minx, miny, maxx, maxy). A section drawing
     context beyond the parcel -- a stream next door, a flood zone along
     it -- clips to this so nothing is drawn under the scale bar or outside
     the frame, and the extent and scale stay the parcel's."""
-    frame = fitted_frame(boundary_polygon_utm, frame)
+    if fit:
+        frame = fitted_frame(boundary_polygon_utm, frame)
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
     width, height = frame
     minx = (0 - projection.offset_x) / projection.scale
@@ -911,14 +1178,26 @@ def visible_extent_utm(boundary_polygon_utm, frame: tuple = FRAME) -> tuple:
     return (minx, miny, maxx, maxy)
 
 
-def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> list:
+def frame_extent_utm(boundary_polygon_utm, frame: tuple = FRAME, fit: bool = True) -> tuple:
+    """The ground the WHOLE frame covers, furniture band included, in the
+    DEM's CRS: what an underlay must cover to fill the frame."""
+    if fit:
+        frame = fitted_frame(boundary_polygon_utm, frame)
+    projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
+    width, height = frame
+    return ((0 - projection.offset_x) / projection.scale, (projection.offset_y - height) / projection.scale,
+            (width - projection.offset_x) / projection.scale, projection.offset_y / projection.scale)
+
+
+def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME, fit: bool = True) -> list:
     """For a labelled line or polygon layer, whether each geometry's label
     will be SET (True) or DROPPED (False) -- for want of a part long
     enough to carry it clear of the line either side, or of room inside
     the polygon for its box. The same rules _labelled_line and
     _labelled_polygon apply at render time, so a caller can state the
     count or put the label elsewhere."""
-    projection = _Projection(boundary_polygon_utm.bounds, fitted_frame(boundary_polygon_utm, frame), MARGIN_PT, FURNITURE_BAND_PT)
+    projection = _Projection(boundary_polygon_utm.bounds, fitted_frame(boundary_polygon_utm, frame) if fit else frame,
+                             MARGIN_PT, FURNITURE_BAND_PT)
     placed = []
     for geometry, label in zip(spec["geometries"], spec.get("labels") or []):
         if not label or geometry is None or geometry.is_empty:
@@ -926,7 +1205,7 @@ def label_placements(boundary_polygon_utm, spec: dict, frame: tuple = FRAME) -> 
         elif spec["kind"] == "line":
             _, placement = _labelled_line(geometry, label, projection, LINE_LABEL_SIZE_PT)
             placed.append(placement is not None)
-        elif spec["kind"] == "polygon":
+        elif spec["kind"] in ("polygon", "hatch", "screen"):
             placed.append(_labelled_polygon(geometry, label, projection, LINE_LABEL_SIZE_PT) is not None)
         else:
             placed.append(False)
@@ -947,7 +1226,9 @@ def legend_entries(layers: list, tokens: dict) -> list:
     return entries
 
 
-def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME, note: Optional[dict] = None) -> dict:
+def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME, note: Optional[dict] = None,
+               *, fit: bool = True, underlay: Optional[dict] = None, wash: Optional[dict] = None,
+               halo: bool = False, labels_on_top: bool = False) -> dict:
     """
     The map, and its measurements:
 
@@ -970,8 +1251,30 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
     the muted ink, centred on the point, between the layers and the
     boundary: what a section says where a parcel has nothing to draw, so
     an empty shape reads as a finding rather than a failure.
+
+    THE LAYOUT MAP'S ARGUMENTS (branch 13), every one off by default:
+
+      fit       False draws in `frame` exactly as given, instead of the
+                width cut fitted_frame() makes -- the layout map takes
+                the full page and is NOT on the sections' shared scale.
+      underlay  {'href': a data: URI, 'extent_utm': (minx, miny, maxx,
+                maxy)} -- a raster set as an SVG <image> over the page
+                fill and under every layer, stretched to the extent it
+                was warped to. WeasyPrint embeds it as one image object
+                and keeps every path and glyph above it vector.
+      wash      {'token': name, 'opacity': float} -- the ground OUTSIDE
+                the parcel, over the underlay, so the parcel reads
+                distinctly against the neighbours' land.
+      halo      True cases the boundary, the north arrow and the scale
+                bar in the page colour, for a map drawn over photography.
+      labels_on_top
+                True sets every polygon, tint and point label after all
+                the layers and the boundary, point labels moved clear of
+                the others (_place_labels) -- so no label is drawn under a
+                later layer. The placed boxes come back as 'label_boxes'.
     """
-    frame = fitted_frame(boundary_polygon_utm, frame)
+    if fit:
+        frame = fitted_frame(boundary_polygon_utm, frame)
     width, height = frame
     projection = _Projection(boundary_polygon_utm.bounds, frame, MARGIN_PT, FURNITURE_BAND_PT)
     ink = tokens["ink"]
@@ -983,8 +1286,25 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         f'viewBox="0 0 {_fmt(width)} {_fmt(height)}" role="img" aria-label="Site map">',
         f'<rect x="0" y="0" width="{_fmt(width)}" height="{_fmt(height)}" fill="{page}" stroke="none"/>',
     ]
+    if underlay:
+        ux0, uy0, ux1, uy1 = underlay["extent_utm"]
+        left, top = projection.xy(ux0, uy1)
+        right, bottom = projection.xy(ux1, uy0)
+        parts.append(
+            f'<image id="underlay" x="{_fmt(left)}" y="{_fmt(top)}" width="{_fmt(right - left)}" '
+            f'height="{_fmt(bottom - top)}" preserveAspectRatio="none" href="{underlay["href"]}"/>'
+        )
+    if wash:
+        ux0, uy0, ux1, uy1 = underlay["extent_utm"] if underlay else visible_extent_utm(boundary_polygon_utm, frame, fit=False)
+        outside = Polygon([(ux0, uy0), (ux1, uy0), (ux1, uy1), (ux0, uy1)]).difference(boundary_polygon_utm)
+        if not outside.is_empty:
+            parts.append(
+                f'<path id="off-parcel-wash" d="{_geometry_path(outside, projection)}" fill="{_colour(tokens, wash["token"])}" '
+                f'fill-opacity="{_fmt(wash["opacity"])}" fill-rule="evenodd" stroke="none"/>'
+            )
+    pending = [] if labels_on_top else None
     for spec in layers:
-        parts.append(_layer_svg(spec, projection, tokens))
+        parts.append(_layer_svg(spec, projection, tokens, pending))
     if note and note.get("lines"):
         x, y = projection.xy(note["point"].x, note["point"].y)
         lines = list(note["lines"])
@@ -995,12 +1315,21 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
             for i, line in enumerate(lines)
         ) + "</g>")
     boundary_d = _geometry_path(boundary_polygon_utm, projection)
+    if halo:
+        parts.append(
+            f'<path id="parcel-boundary-casing" d="{boundary_d}" fill="none" stroke="{page}" '
+            f'stroke-width="{_fmt(BOUNDARY_STROKE_PT + 2 * FURNITURE_CASING_PT)}" stroke-linejoin="round"/>'
+        )
     parts.append(
         f'<path id="parcel-boundary" d="{boundary_d}" fill="none" stroke="{ink}" '
         f'stroke-width="{_fmt(BOUNDARY_STROKE_PT)}" stroke-linejoin="round"/>'
     )
-    parts.append(_north_arrow(frame, tokens))
-    scale_svg, scale_bar = _scale_bar(frame, projection, tokens)
+    label_boxes = []
+    if pending is not None:
+        labels_svg, label_boxes = _place_labels(pending, page)
+        parts.append(labels_svg)
+    parts.append(_north_arrow(frame, tokens, halo=halo))
+    scale_svg, scale_bar = _scale_bar(frame, projection, tokens, halo=halo)
     parts.append(scale_svg)
     parts.append(
         f'<rect x="{_fmt(FRAME_STROKE_PT / 2)}" y="{_fmt(FRAME_STROKE_PT / 2)}" '
@@ -1016,8 +1345,9 @@ def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = 
         "drawn_bbox": projection.drawn_bbox,
         "scale_bar": scale_bar,
         "legend": legend_entries(layers, tokens),
+        "label_boxes": label_boxes,
         "labels_placed": {
-            spec["id"]: label_placements(boundary_polygon_utm, spec, frame)
-            for spec in layers if spec["kind"] in ("line", "polygon") and spec.get("labels")
+            spec["id"]: label_placements(boundary_polygon_utm, spec, frame, fit=False)
+            for spec in layers if spec["kind"] in ("line", "polygon", "hatch", "screen") and spec.get("labels")
         },
     }

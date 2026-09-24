@@ -132,6 +132,15 @@ leaves a visible statement where its figures would be):
                                   the conterminous compilation is a real
                                   no-data answer, not an outage.
 
+THE TABLE AFTER BRANCH 13 (the design: one more, DEGRADABLE -- the map
+draws on white without it):
+
+  naip_imagery        DEGRADABLE  USDA NAIP orthoimagery from Planetary
+                                  Computer for the layout map's extent,
+                                  the latest year covering the parcel,
+                                  with each item's acquisition date --
+                                  printed beneath the map (naip_imagery).
+
 THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data,
 nlcd_landcover_data and forest_type_data derive the parcel's UTM window from the boundary with
 dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
@@ -194,6 +203,7 @@ import soil_road_ratings
 import soil_survey
 import soil_water_table
 import soil_woodland
+import naip_imagery
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
 from daymet_data import DaymetIncompleteError, get_daymet_daily_for_point
@@ -221,6 +231,7 @@ REPORT_FETCH_LAYERS = {
     "soil_woodland": DEGRADABLE,
     "soil_survey": DEGRADABLE,
     "bedrock_geology": DEGRADABLE,
+    "naip_imagery": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -240,6 +251,7 @@ LAYER_FOREST_TYPE_GROUP = ("forest_type_group", "forest type group")
 LAYER_SOIL_WOODLAND = ("soil_woodland", "soil woodland ratings")
 LAYER_SOIL_SURVEY = ("soil_survey", "soil survey properties")
 LAYER_BEDROCK_GEOLOGY = ("bedrock_geology", "bedrock geology")
+LAYER_NAIP_IMAGERY = ("aerial_imagery", "aerial imagery")
 
 # What a Water layer's fetch or parse can raise besides a RequestException:
 # a TIFF rasterio cannot open (OSError), a response whose shape the parser
@@ -256,7 +268,14 @@ _GEOLOGY_FETCH_ERRORS = _WATER_FETCH_ERRORS + (ElementTree.ParseError, bedrock_g
 # The exception kinds that mean "the source answered without the data",
 # as opposed to a RequestException, "the source did not answer".
 _NO_DATA_ERRORS = (DaymetIncompleteError, Atlas14IncompleteError, PowerIncompleteError,
-                   bedrock_geology.GeologyIncompleteError)
+                   bedrock_geology.GeologyIncompleteError, naip_imagery.NaipIncompleteError)
+
+# The imagery fetch adds its own no-data answer, and what the STAC client
+# and a COG read raise for a service that answers badly -- pystac_client's
+# APIError and rasterio's RasterioIOError are both RuntimeError-derived or
+# OSError-derived, so they are caught by those bases without this module
+# importing either library.
+_NAIP_FETCH_ERRORS = _WATER_FETCH_ERRORS + (naip_imagery.NaipIncompleteError, RuntimeError)
 
 
 class ReportDataIncompleteError(RuntimeError):
@@ -332,6 +351,10 @@ class ReportData:
     # bedrock_geology.parse_geology's, each None when it degraded.
     soil_survey: Optional[dict] = None
     bedrock_geology: Optional[dict] = None
+    # THE DESIGN LAYER (branch 13): naip_imagery.parse_naip's block -- the
+    # layout map's photography and its acquisition dates. None when it
+    # degraded, and the map draws on white.
+    naip_imagery: Optional[dict] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -523,6 +546,14 @@ def fetch_report_data(boundary) -> ReportData:
         geology = None
         _degrade("bedrock_geology", LAYER_BEDROCK_GEOLOGY, exc)
 
+    imagery = None
+    try:
+        with run_diagnostics.time_layer("naip_imagery", naip_imagery.get_naip_for_boundary):
+            imagery = naip_imagery.parse_naip(naip_imagery.get_naip_for_boundary(boundary))
+    except _NAIP_FETCH_ERRORS as exc:
+        imagery = None
+        _degrade("naip_imagery", LAYER_NAIP_IMAGERY, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -546,6 +577,7 @@ def fetch_report_data(boundary) -> ReportData:
         soil_woodland=woodland,
         soil_survey=survey,
         bedrock_geology=geology,
+        naip_imagery=imagery,
         unavailable=unavailable,
     )
 
@@ -569,6 +601,7 @@ def report_data_from_fixtures(
     soil_woodland_rows: Optional[dict] = None,
     soil_survey_rows: Optional[list] = None,
     bedrock_geology_raw: Optional[dict] = None,
+    naip_imagery_raw: Optional[dict] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -587,7 +620,8 @@ def report_data_from_fixtures(
     layers' raw answers (trees_reference_fixture): the forest type TIFF
     dict and the two woodland row sets. The Soils layers' the same way
     (soils_reference_fixture): the survey rows, and the geology fetch's
-    three-part raw answer.
+    three-part raw answer. The layout map's imagery the same way
+    (naip_reference_fixture.raw_naip()).
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -617,6 +651,7 @@ def report_data_from_fixtures(
         soil_woodland=soil_woodland.parse_woodland(soil_woodland_rows) if soil_woodland_rows is not None else None,
         soil_survey=soil_survey.parse_survey(soil_survey_rows) if soil_survey_rows is not None else None,
         bedrock_geology=bedrock_geology.parse_geology(bedrock_geology_raw) if bedrock_geology_raw is not None else None,
+        naip_imagery=naip_imagery.parse_naip(naip_imagery_raw) if naip_imagery_raw is not None else None,
         unavailable=dict(unavailable or {}),
     )
 

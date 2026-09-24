@@ -177,6 +177,16 @@ TREES_SCORE_TOP = _score_denominator(tree_zone_candidates._SCALES)
 STRUCTURES_SCORE_TOP = _score_denominator(solar_suitability._SCALES)
 
 
+def count_line(count: int, noun: str) -> dict:
+    """How many features a step committed, AS A COUNT: {'n': 6, 'text':
+    '6 production blocks committed.'}. Never a total of a column -- the
+    record prints no acreage sum anywhere (blocks may overlap, and a union
+    would be a recomputation), and nothing here should invite a reader to
+    add one up."""
+    return {"n": count, "noun": noun if count == 1 else noun + "s",
+            "text": f"{count} {noun if count == 1 else noun + 's'} committed."}
+
+
 def provenance_label(provenance: str, rank=None, user_word: str = "Drawn") -> str:
     """'Suggested · rank N', 'Suggested', or the user's word."""
     if provenance == PROVENANCE_USER_ADDED:
@@ -231,6 +241,13 @@ def _landform(features: list, provenance: dict) -> dict:
             "acres": to_fixed(p["area_acres"], MEASURE_DP),
             "score": to_fixed(p["suitability_score"], MEASURE_DP),
         })
+    # "DRAWN N" IN COMMIT ORDER, WHICH IS NOT ALWAYS THE PANEL'S N. The
+    # panel numbers drawn tabs across every block the user drew, ticked or
+    # not; the document keeps only the committed ones, so a block the user
+    # drew second after unticking the first is "Drawn 2" on the panel and
+    # "Drawn 1" here. The panel's numbering is not recoverable from the
+    # document, the name is a label rather than a measurement, and every
+    # figure beside it is the panel's. Not a bug -- see branch 13's review.
     for index, feature in enumerate(drawn):
         p = feature["properties"]
         rows.append({
@@ -248,7 +265,7 @@ def _landform(features: list, provenance: dict) -> dict:
             _column("acres", "acres", True), _column("score", f"/{LANDFORM_SCORE_TOP} score", True),
         ],
         "rows": rows,
-        "count": f"{count} production block{'s' if count != 1 else ''} committed.",
+        "count": count_line(count, "production block"),
     }
 
 
@@ -282,7 +299,7 @@ def _water(features: list, provenance: dict) -> dict:
             _column("acres", "survey acres", True), _column("score", f"/{WATER_SCORE_TOP} score", True),
         ],
         "rows": rows,
-        "count": f"{count} water survey area{'s' if count != 1 else ''} committed.",
+        "count": count_line(count, "water survey area"),
     }
 
 
@@ -332,7 +349,7 @@ def _trees(features: list, provenance: dict) -> dict:
             "acres": to_fixed(_py_round(p["area_acres"], 1), MEASURE_DP),
             "score": to_fixed(_py_round(p["tree_suitability_score"], 1), MEASURE_DP),
         })
-    for index, feature in enumerate(drawn):
+    for index, feature in enumerate(drawn):  # commit order: see _landform's note on "Drawn N"
         p = feature["properties"]
         rows.append({
             "id": feature["id"], "name": f"Drawn {index + 1}",
@@ -347,7 +364,7 @@ def _trees(features: list, provenance: dict) -> dict:
             _column("acres", "acres", True), _column("score", f"/{TREES_SCORE_TOP} score", True),
         ],
         "rows": rows,
-        "count": f"{count} tree zone{'s' if count != 1 else ''} committed.",
+        "count": count_line(count, "tree zone"),
     }
 
 
@@ -364,7 +381,7 @@ def _structures(features: list, provenance: dict) -> dict:
             "distance": to_fixed(p.get("distance_to_road_ft"), WHOLE_DP),
             "score": to_fixed(p.get("suitability_score"), MEASURE_DP),
         })
-    for index, feature in enumerate(placed):
+    for index, feature in enumerate(placed):  # commit order, as "Drawn N" above
         p = feature["properties"]
         # "Placed N" and NOT the panel's "Placed N · would rank R": the rank
         # the tool gave a site the user chose is not the user's decision.
@@ -381,7 +398,7 @@ def _structures(features: list, provenance: dict) -> dict:
             _column("distance", distance_label, True), _column("score", f"/{STRUCTURES_SCORE_TOP} score", True),
         ],
         "rows": rows,
-        "count": f"{count} structure site{'s' if count != 1 else ''} committed.",
+        "count": count_line(count, "structure site"),
     }
 
 
@@ -417,7 +434,7 @@ def _fencing(features: list, provenance: dict) -> dict:
             _column("name", "Fencing", False), _column("source", "Source", False), _column("feet", "feet", True),
         ],
         "rows": rows,
-        "count": f"{len(rows)} fence type{'s' if len(rows) != 1 else ''} committed.",
+        "count": count_line(len(rows), "fence type"),
     }
 
 

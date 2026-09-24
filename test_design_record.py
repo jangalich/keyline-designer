@@ -210,7 +210,7 @@ def record_text(record: dict) -> str:
             for row in step["rows"]:
                 lines.append("  " + "  ".join(row[c["key"]].rjust(w) if c["numeric"] else row[c["key"]].ljust(w)
                                               for c, w in zip(columns, widths)))
-            lines.append(f"  {step['count']}")
+            lines.append(f"  {step['count']['text']}")
     return "\n".join(lines)
 
 

@@ -269,9 +269,11 @@ assert "rotate(" not in without_label
 for t in labels:
     angle = float(t.getAttribute("transform")[len("rotate("):].split()[0])
     assert -90 < angle <= 90, angle
-# A label on a tint, or a count that does not match, is refused. A label on a POLYGON is not:
-# branch 12 made it a capability (the soil map's symbols; Site overview may want it too).
-for bad in (dict(kind="screen", labels=["x"], fill="stock"), dict(kind="line", labels=["a", "b"])):
+# A count that does not match is refused. A label on a POLYGON is not: branch 12 made it a
+# capability (the soil map's symbols). Nor, since branch 13, on a TINT -- the layout map names
+# its screened tree zones and hatched blocks the same way, inside each shape at its pole.
+layer("tint", [Polygon([(0, 0), (1, 0), (1, 1)])], kind="screen", fill="stock", labels=["x"])
+for bad in (dict(kind="line", labels=["a", "b"]),):
     try:
         layer("bad", [Point(0, 0)], stroke="ink", **bad)
     except ValueError:
