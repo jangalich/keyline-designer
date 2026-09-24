@@ -1025,9 +1025,60 @@ assert "also surviving -- below the presented set" in _capped_prose, (
 assert "nothing surviving is held back" not in _capped_prose, (
     "the uncapped arm's sentence must not appear on a run that does hold zones back from the lead"
 )
+# AND THE SAME ARM WITH THE ADDITIVE CLEAR-GROUND SLOTS FILLED. No new
+# report prose about the rule (presented_reason rides narrative_data for
+# a later branch that wants to say more) -- but the sentence still has
+# to be TRUE, and without the added clause it reads "the first 6 below
+# ... backfilled ... to 4", which is a number the run contradicts.
+_clear_nd = dict(_capped_nd)
+# EIGHT SURVIVORS, so six presented still leaves a remainder -- the
+# capped arm is the one under test, and with presented_count == zone_count
+# the formatter correctly takes its other arm instead.
+_clear_nd["zone_count"] = 8
+_clear_nd["presentation"] = {
+    **_capped_nd["presentation"],
+    "survivor_counts": {"embankment": 5, "excavated": 3},
+    "presented_count": 6,
+    "presented_counts": {"embankment": 4, "excavated": 2},
+    "clear_ground_slots": 2,
+    "clear_ground_max_overlap_pct": 0.0,
+    "clear_ground_counts": {"embankment": 1, "excavated": 1},
+    "clear_ground_count": 2,
+    "clear_ground_applied": True,
+    "clear_ground_unfilled": False,
+    "clear_ground_unfilled_reason": None,
+    "rule_applied": (
+        "2 embankment + 1 excavated + 1 embankment backfill + 1 embankment clear-ground "
+        "+ 1 excavated clear-ground"
+    ),
+}
+_clear_prose = _format_water_survey_areas_summary(_clear_nd)
+assert "The first 6 below are the ones to lead with" in _clear_prose, _clear_prose
+assert "plus 2 clear of committed production ground" in _clear_prose, (
+    "the additive slots are NAMED in one clause rather than explained -- without it the sentence "
+    f"claims a total of 4 on a run that presented 6: {_clear_prose}"
+)
+assert "the rest are described in full after them and are not ruled out" in _clear_prose, (
+    "and the claim that keeps it honest survives the added clause"
+)
+assert "plus" not in _capped_prose, (
+    "while a run where the slots did NOT fire says nothing about them -- a cap that stayed empty "
+    "is not a sentence"
+)
+# AND A PRESENTATION BLOCK FROM BEFORE THESE KEYS EXISTED still renders:
+# the report reaches for them with .get(), so an old stored narrative
+# does not crash the formatter.
+_legacy_nd = dict(_capped_nd)
+_legacy_nd["presentation"] = {
+    key: value for key, value in _capped_nd["presentation"].items()
+    if not key.startswith("clear_ground")
+}
+assert "The first 4 below are the ones to lead with" in _format_water_survey_areas_summary(_legacy_nd)
+
 print("_format_water_survey_areas_summary(): the capped arm names the presented set, the rule that "
       "produced it, the per-type survivor totals, and states that the rest are described below and "
-      "not ruled out.")
+      "not ruled out; with the clear-ground slots filled it names them in one clause and stays "
+      "true about its own total, and a pre-slots block still renders.")
 
 _solar_nd = {
     "site_found": True,

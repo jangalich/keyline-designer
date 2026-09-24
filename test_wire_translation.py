@@ -61,6 +61,7 @@ from shapely.ops import unary_union
 
 import wire_translation as wt
 from feature_schema import VALID_CONFIDENCE_LEVELS, validate_feature_collection
+from water_survey_areas import PRESENTED_REASON_RANK
 
 # ======================================================================
 # Fixtures -- synthetic internal shapes, built the way the real modules
@@ -223,6 +224,11 @@ def _water_zone(zid, x0, y0, members):
         # rather than letting the builder invent a default.
         "presented": zid == 0,
         "presentation_order": 1 if zid == 0 else None,
+        # WHICH SLOT KIND, the third mark and required for the same
+        # reason: the clear-ground slots made "presented" two different
+        # facts, and a feature that carried only the boolean would tell
+        # a reader nothing about why a rank-7 zone is in the set.
+        "presented_reason": PRESENTED_REASON_RANK if zid == 0 else None,
         "sparse_anchor": False,
         "truncated_by_road": False,
         "cross_type_overlaps": [],

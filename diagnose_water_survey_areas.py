@@ -182,6 +182,7 @@ from water_survey_areas import (
     EXCAVATED_WEIGHTS,
     MAX_VALLEY_CONTRIBUTING_AREA_ACRES,
     MIN_SURVEY_REGION_AREA_ACRES,
+    PRESENTED_REASON_CLEAR_GROUND,
     REASON_CATCHMENT_EXCEEDS_CEILING,
     # The prominence threshold that DECIDED every crest height printed
     # on the enclosure-depth line below -- carried into the output beside
@@ -592,6 +593,15 @@ def _presented_cell(zone: dict) -> str:
     by what rule, so an unmarked line reads as "surviving, not led
     with", which is exactly what it is."""
     if zone.get("presented"):
+        # The SLOT KIND is named on the diagnostic line and nowhere a
+        # user sees (PANEL_EXCLUDED_KEYS): this table is where a reader
+        # checks why a rank-7 zone is in the presented set, and the
+        # answer is the point of the rule.
+        if zone.get("presented_reason") == PRESENTED_REASON_CLEAR_GROUND:
+            return (
+                f" [PRESENTED #{zone['presentation_order']}, clear-ground slot "
+                f"@ {_overlap_cell(zone['production_overlap_pct'])} prod]"
+            )
         return f" [PRESENTED #{zone['presentation_order']}]"
     return ""
 
@@ -635,6 +645,36 @@ def summarize_survey_zones_table(identify_result: dict) -> str:
             "  A MARK, NOT A FILTER: every survivor below is in the payload, the panel and the "
             "GeoJSON whether or not it is presented; nothing here was dropped for being unpresented."
         )
+        # THE ADDITIVE SLOTS, reported in the same style as the rule
+        # line above and ALWAYS reported -- filled or unfilled. A run
+        # that shows four zones because nothing qualified and a run
+        # that shows four because the rule never looked must not print
+        # the same thing, which is the whole reason the unfilled case
+        # carries a reason rather than an absence.
+        if presentation["clear_ground_applied"]:
+            lines.append(
+                f"  CLEAR-GROUND SLOTS: {len(presentation['clear_ground_zones'])} of "
+                f"{presentation['clear_ground_slots']} filled (<= "
+                f"{presentation['clear_ground_max_overlap_pct']}% production overlap, one per type "
+                "by rank then backfilled) -- "
+                + ", ".join(
+                    f"zone {entry['zone_id']} ({entry['survey_type']} #{entry['rank']}, "
+                    f"prod {_overlap_cell(entry['production_overlap_pct'])})"
+                    for entry in presentation["clear_ground_zones"]
+                )
+                + ". ADDITIVE: appended after the four above, which did not move."
+            )
+            if presentation["clear_ground_unfilled"]:
+                lines.append(
+                    f"  ...and the remaining slot(s) went unfilled: "
+                    f"{presentation['clear_ground_unfilled_reason']}."
+                )
+        else:
+            lines.append(
+                f"  CLEAR-GROUND SLOTS: 0 of {presentation['clear_ground_slots']} filled -- "
+                f"{presentation['clear_ground_unfilled_reason']}. The slots are a CAP, never a "
+                "quota: this run leads with the rank set alone and nothing was padded."
+            )
     for survey_type in SURVEY_TYPES:
         zones = identify_result["zones_by_type"][survey_type]
         lines.append(f"=== {survey_type.upper()}-TYPE SURVEY ZONES ({len(zones)} surviving) ===")

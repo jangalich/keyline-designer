@@ -765,9 +765,21 @@ def _format_water_survey_areas_summary(water_narrative: Optional[dict]) -> str:
             f"({survivors['embankment']} embankment, {survivors['excavated']} excavated). The first "
             f"{presentation['presented_count']} below are the ones to lead with -- the top "
             f"{presentation['per_type_count']} of each type by rank, backfilled from the other type "
-            f"in rank order to {presentation['presentation_count']} "
-            f"({presentation['rule_applied']}); the rest are described in full after them and are "
-            "not ruled out -- you decide which to walk"
+            f"in rank order to {presentation['presentation_count']}"
+            # THE ADDITIVE SLOTS NAMED ONLY WHEN THEY FIRED, and named
+            # in one clause rather than explained: without it this
+            # sentence says "the first 6 ... to 4", which is simply
+            # false on a run where the clear-ground slots filled. No
+            # prose about WHY those zones are there and no per-zone
+            # marking -- presented_reason rides narrative_data for a
+            # later branch that wants to say more.
+            + (
+                f", plus {presentation['clear_ground_count']} clear of committed production ground"
+                if presentation.get("clear_ground_applied")
+                else ""
+            )
+            + f" ({presentation['rule_applied']}); the rest are described in full after them and "
+            "are not ruled out -- you decide which to walk"
             + (
                 f". {water_narrative['dropped_count']} zone(s) were dropped (under the 0.1-acre "
                 "floor, or a duplicate of a better-seeded compartment) -- listed in the diagnostic "

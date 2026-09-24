@@ -1600,10 +1600,22 @@ for zone_holder in (flat_result["zones"], v_result["zones"], strip_result["zones
 # blend and a pinch drainage score deliberately ordered AGAINST their
 # compartment means, so if ranking or selection ever reads either claim
 # again (or any composite of them), every assertion below flips.
-def _mini_zone(zid, stype, mean, acres, poly, seed_blend=None, pinch_drainage=None, catchment=None):
+def _mini_zone(
+    zid, stype, mean, acres, poly,
+    seed_blend=None, pinch_drainage=None, catchment=None,
+    production_overlap_pct=None,
+):
     zone = {
         "id": zid, "survey_type": stype, "mean_suitability": mean,
         "polygon_utm": poly,
+        # THE MEASUREMENT THE CLEAR-GROUND SLOTS ARE DEFINED ON, on
+        # every mini zone because assign_presentation_order() now
+        # REQUIRES it (it reads the key, never .get()s it -- a caller
+        # that forgot to measure must fail loudly rather than have
+        # every zone silently read as ineligible). Defaults to None,
+        # the established "never checked" sentinel, so the rank-rule
+        # cases below are untouched by the additive slots.
+        "production_overlap_pct": production_overlap_pct,
     }
     if stype == SURVEY_TYPE_EMBANKMENT:
         # The two claims ride the record and rank nothing. They are
@@ -1834,14 +1846,59 @@ def _assert_presentation_invariants(result, label):
     assert [zone["id"] for zone in presented] == summary["presented_zone_ids"], (
         f"{label}: the per-zone marks and the summary's id list are one answer, not two"
     )
-    assert summary["presented_count"] == len(presented) <= wsa.WATER_ZONE_PRESENTATION_COUNT, (
-        f"{label}: the count is a CAP -- the presented set never exceeds it"
+    # TWO CAPS, BOTH CAPS: the rank rule's own count, and the additive
+    # clear-ground slots on top of it. Read as separate numbers rather
+    # than as one total, because the whole design rests on the second
+    # never eating into the first.
+    rank_slotted = [
+        zone for zone in presented
+        if zone["presented_reason"] == wsa.PRESENTED_REASON_RANK
+    ]
+    clear_slotted = [
+        zone for zone in presented
+        if zone["presented_reason"] == wsa.PRESENTED_REASON_CLEAR_GROUND
+    ]
+    assert len(rank_slotted) + len(clear_slotted) == len(presented), (
+        f"{label}: every presented zone carries one of the two slot reasons and nothing else"
     )
-    assert summary["presented_count"] == min(
+    assert summary["presented_count"] == len(presented) <= (
+        wsa.WATER_ZONE_PRESENTATION_COUNT + wsa.WATER_ZONE_CLEAR_GROUND_SLOTS
+    ), f"{label}: the two counts are CAPS -- the presented set never exceeds them together"
+    assert len(rank_slotted) == min(
         wsa.WATER_ZONE_PRESENTATION_COUNT, len(result["zones"])
     ), (
-        f"{label}: and it is never a QUOTA either -- with fewer survivors than the cap, the "
-        "presented set is every survivor and nothing is padded to reach four"
+        f"{label}: the rank slots are a cap and never a QUOTA either -- with fewer survivors than "
+        "the cap, they take every survivor and nothing is padded to reach four"
+    )
+    assert len(clear_slotted) <= wsa.WATER_ZONE_CLEAR_GROUND_SLOTS, (
+        f"{label}: and the additive slots are a cap of their own"
+    )
+    assert summary["clear_ground_count"] == len(clear_slotted)
+    assert summary["clear_ground_applied"] is bool(clear_slotted)
+    assert summary["clear_ground_unfilled"] is (
+        len(clear_slotted) < wsa.WATER_ZONE_CLEAR_GROUND_SLOTS
+    )
+    assert (summary["clear_ground_unfilled_reason"] is None) is not summary[
+        "clear_ground_unfilled"
+    ], (
+        f"{label}: an unfilled slot always says WHY -- the four-presented run that found no "
+        "qualifier must be distinguishable from the one that never looked"
+    )
+    assert [entry["zone_id"] for entry in summary["clear_ground_zones"]] == [
+        zone["id"] for zone in clear_slotted
+    ], f"{label}: the clear-ground record names exactly the zones that took those slots"
+    for entry, zone in zip(summary["clear_ground_zones"], clear_slotted):
+        assert entry["production_overlap_pct"] == zone["production_overlap_pct"]
+        assert entry["production_overlap_pct"] is not None
+        assert entry["production_overlap_pct"] <= wsa.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT, (
+            f"{label}: a clear-ground slot shows the measurement it qualified on, and it is at or "
+            f"below the threshold -- got {entry['production_overlap_pct']}%"
+        )
+    # THE FIRST-N PROPERTY, the one the additive design is FOR: the
+    # clear-ground slots append, so the rank rule's own entries are the
+    # leading entries of the order and nothing below them moved.
+    assert presented[: len(rank_slotted)] == rank_slotted, (
+        f"{label}: the rank slots lead the presented order; the additions are appended after them"
     )
     assert summary["survivor_counts"] == {
         survey_type: len(result["zones_by_type"][survey_type]) for survey_type in SURVEY_TYPES
@@ -1853,7 +1910,9 @@ def _assert_presentation_invariants(result, label):
         )
         assert summary["presented_counts"][survey_type] == len(typed_presented)
         assert (
-            summary["base_counts"][survey_type] + summary["backfill_counts"][survey_type]
+            summary["base_counts"][survey_type]
+            + summary["backfill_counts"][survey_type]
+            + summary["clear_ground_counts"][survey_type]
             == summary["presented_counts"][survey_type]
         )
         assert summary["base_counts"][survey_type] == min(
@@ -1882,6 +1941,10 @@ def _assert_presentation_invariants(result, label):
         zone = next(z for z in result["zones"] if z["id"] == feature["properties"]["zone_id"])
         assert feature["properties"]["presented"] is zone["presented"]
         assert feature["properties"]["presentation_order"] == zone["presentation_order"]
+        assert feature["properties"]["presented_reason"] == zone["presented_reason"], (
+            f"{label}: the slot kind rides the feature with the other two marks -- an internal "
+            "record for the export and the diagnostic, never a panel row"
+        )
         assert feature["properties"]["rank"] == zone["rank"], (
             f"{label}: `rank` keeps its own meaning -- rank WITHIN TYPE across all survivors, "
             "presented or not; presentation never renumbers it"
@@ -2334,14 +2397,30 @@ def _assert_display_order(zones, label):
         assert displayed[0] == max(displayed), (
             f"{label} / {stype}: rank 1 must hold the highest displayed score"
         )
-        # AND THE PRESENTED PAIR IS THE TOP OF THAT ORDER, never a
+        # AND THE RANK-SLOT ZONES ARE THE TOP OF THAT ORDER, never a
         # window into the middle of it: whatever a reader would pick by
         # sorting this type's payload rows on their own score column.
-        presented = [z for z in typed if z["presented"]]
-        assert presented == typed[: len(presented)], (
-            f"{label} / {stype}: the presented zones of a type are its highest-scoring ones, "
-            f"contiguous from rank 1 -- got ranks {[z['rank'] for z in presented]}"
+        #
+        # SCOPED TO THE RANK SLOTS, and the scoping is the point rather
+        # than a weakening. The additive clear-ground slots
+        # (WATER_ZONE_CLEAR_GROUND_SLOTS) deliberately append zones from
+        # further down the order, so the PRESENTED set of a type may be
+        # ranks 1, 2, 5 -- that gap is the rule working. What may never
+        # happen, and is what this asserts, is the rank rule itself
+        # skipping a better-ranked zone for a worse one.
+        rank_slotted = [
+            z for z in typed if z["presented_reason"] == wsa.PRESENTED_REASON_RANK
+        ]
+        assert rank_slotted == typed[: len(rank_slotted)], (
+            f"{label} / {stype}: the RANK-SLOT zones of a type are its highest-scoring ones, "
+            f"contiguous from rank 1 -- got ranks {[z['rank'] for z in rank_slotted]}"
         )
+        for zone in typed:
+            if zone["presented_reason"] == wsa.PRESENTED_REASON_CLEAR_GROUND:
+                assert zone["rank"] > len(rank_slotted), (
+                    f"{label} / {stype}: a clear-ground addition is a zone the rank slots did NOT "
+                    f"take -- rank {zone['rank']} with {len(rank_slotted)} rank slot(s) filled"
+                )
 
 
 for (emb_n, exc_n) in _rule_cases:
@@ -2390,11 +2469,482 @@ print(
     "directions, both zero-of-a-type shapes, one-each, and the empty run), plus the lopsided pool "
     "that a best-four-overall rule would get wrong."
 )
+
+# ==========================================================================
+# THE CLEAR-GROUND SLOTS: TWO ADDITIVE SLOTS FOR SITES OFF PRODUCTION
+# ==========================================================================
+# THE DEFECT THESE EXIST TO CLOSE, and it is a real run, not a
+# hypothetical: with only the top two of each type presented, a parcel
+# whose best pond ground IS its best production ground shows four sites
+# the user cannot build without first redrawing a production boundary.
+# The networked stream-corridor boundary this branch ran shows exactly
+# that: its top two embankment zones overlap committed production at
+# 92.8% and 86.1%, its two excavated zones at 47.9% and 82.2%, and the
+# only zones clear of production are ranks 5 and 6 -- so the rank rule
+# alone presents four sites, all four of them on ground the user would
+# have to take back from production first.
+#
+# WHAT IS ASSERTED HERE, and the order matters: FIRST that the four
+# rank slots are IDENTICAL in content and order to what they were
+# before these slots existed (the additive property -- everything else
+# in this section is worthless without it), then the four fill cases,
+# then the consequences the design accepted on purpose (a
+# non-contiguous presented set, a mark that never reaches the panel,
+# and a selection that does not move).
+
+# --- THE RULE, EXERCISED DIRECTLY ON POOLS. The generated fixtures
+# below run the whole pipeline; these pin the rule itself, where every
+# overlap is a number this test chose.
+def _clear_ground_pool(emb_overlaps, exc_overlaps):
+    """A ranked pool whose zones carry the production overlaps handed
+    in, best-scoring first within each type: emb_overlaps[0] is the
+    overlap on embankment rank 1. None entries are the "never checked"
+    sentinel, which must never qualify."""
+    pool = []
+    for index, overlap in enumerate(emb_overlaps):
+        pool.append(_mini_zone(
+            index, SURVEY_TYPE_EMBANKMENT, round(0.75 - 0.01 * index, 4), 1.0,
+            box(index * 100, 0, index * 100 + 20, 20),
+            seed_blend=0.5, pinch_drainage=0.5, catchment=2.0,
+            production_overlap_pct=overlap,
+        ))
+    for index, overlap in enumerate(exc_overlaps):
+        pool.append(_mini_zone(
+            1000 + index, SURVEY_TYPE_EXCAVATED, round(0.80 - 0.01 * index, 4), 1.0,
+            box(index * 100, 500, index * 100 + 20, 520),
+            production_overlap_pct=overlap,
+        ))
+    rank_survey_zones_per_type(pool)
+    return pool
+
+
+def _slots(pool):
+    """(rank-slot zones, clear-ground zones), each in presentation order."""
+    presented = sorted(
+        [z for z in pool if z["presented"]], key=lambda z: z["presentation_order"]
+    )
+    return (
+        [z for z in presented if z["presented_reason"] == wsa.PRESENTED_REASON_RANK],
+        [z for z in presented if z["presented_reason"] == wsa.PRESENTED_REASON_CLEAR_GROUND],
+    )
+
+
+# THE ADDITIVE PROPERTY, ASSERTED AS AN EQUALITY RATHER THAN DESCRIBED.
+# The same pool is marked twice -- once with every zone on production
+# ground (so no slot can fire) and once with clear zones available (so
+# both fire) -- and the four rank slots must be the SAME four zones in
+# the SAME order. Nothing else in this section means anything if this
+# fails: it would mean the additive slots had become a swap.
+_blocked = _clear_ground_pool([100.0] * 8, [100.0] * 8)
+assign_presentation_order(_blocked)
+_blocked_rank, _blocked_clear = _slots(_blocked)
+_open = _clear_ground_pool([100.0, 100.0, 100.0, 100.0, 0.0, 0.0, 0.0, 0.0],
+                           [100.0, 100.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+assign_presentation_order(_open)
+_open_rank, _open_clear = _slots(_open)
+assert [(z["survey_type"], z["rank"]) for z in _blocked_rank] == [
+    (z["survey_type"], z["rank"]) for z in _open_rank
+], (
+    "THE WHOLE DESIGN, IN ONE ASSERTION: the four rank slots are the same four zones in the same "
+    "order whether or not a clear-ground zone exists to append. Nothing is displaced, nothing is "
+    f"penalised, no tiebreak is decided: {[(z['survey_type'], z['rank']) for z in _blocked_rank]} "
+    f"vs {[(z['survey_type'], z['rank']) for z in _open_rank]}"
+)
+assert not _blocked_clear and len(_open_clear) == 2
+
+# TEST 1: BOTH TYPES HAVE A QUALIFIER -> six presented, one clear-ground
+# slot per type, the original four unchanged.
+_both_q = _clear_ground_pool([100.0, 100.0, 0.0, 0.0], [100.0, 100.0, 0.0, 0.0])
+_both_q_summary = assign_presentation_order(_both_q)
+_both_q_rank, _both_q_clear = _slots(_both_q)
+assert len(_both_q_rank) == 4 and len(_both_q_clear) == 2
+assert [(z["survey_type"], z["rank"]) for z in _both_q_rank] == [
+    (SURVEY_TYPE_EMBANKMENT, 1), (SURVEY_TYPE_EXCAVATED, 1),
+    (SURVEY_TYPE_EMBANKMENT, 2), (SURVEY_TYPE_EXCAVATED, 2),
+], "the original four, unchanged in content and order"
+assert [(z["survey_type"], z["rank"]) for z in _both_q_clear] == [
+    (SURVEY_TYPE_EMBANKMENT, 3), (SURVEY_TYPE_EXCAVATED, 3),
+], "ONE PER TYPE, each its type's best-ranked qualifier, interleaved as the base is"
+assert _both_q_summary["presented_count"] == 6
+assert _both_q_summary["clear_ground_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 1, SURVEY_TYPE_EXCAVATED: 1
+}
+assert _both_q_summary["rule_applied"] == (
+    "2 embankment + 2 excavated + 1 embankment clear-ground + 1 excavated clear-ground"
+), (
+    "the rule line names the additive slots as what they are -- this exact string is what the "
+    f"diagnostic prints, so a run explains its own set: {_both_q_summary['rule_applied']!r}"
+)
+assert _both_q_summary["clear_ground_unfilled"] is False
+assert _both_q_summary["clear_ground_unfilled_reason"] is None
+
+# TEST 2: ONE TYPE HAS NO QUALIFIER -> its slot backfills from the other
+# type. Every excavated zone is on production ground; embankment has two
+# clear ones below the rank slots.
+_one_q = _clear_ground_pool([100.0, 100.0, 0.0, 0.0], [100.0, 100.0, 100.0, 100.0])
+_one_q_summary = assign_presentation_order(_one_q)
+_one_q_rank, _one_q_clear = _slots(_one_q)
+assert [(z["survey_type"], z["rank"]) for z in _one_q_clear] == [
+    (SURVEY_TYPE_EMBANKMENT, 3), (SURVEY_TYPE_EMBANKMENT, 4),
+], (
+    "with no excavated qualifier BOTH slots go to embankment, in rank order -- the same 'one per "
+    "type, then the other type' shape the rank backfill has, and a cap that would rather be "
+    f"filled than balanced: {[(z['survey_type'], z['rank']) for z in _one_q_clear]}"
+)
+assert _one_q_summary["clear_ground_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 2, SURVEY_TYPE_EXCAVATED: 0
+}
+assert _one_q_summary["rule_applied"].endswith("2 embankment clear-ground")
+assert _one_q_summary["presented_count"] == 6
+
+# TEST 3: NEITHER TYPE QUALIFIES -> four presented, and the slots are
+# REPORTED as unfilled rather than silently absent.
+_none_q = _clear_ground_pool([100.0] * 4, [100.0] * 4)
+_none_q_summary = assign_presentation_order(_none_q)
+_none_q_rank, _none_q_clear = _slots(_none_q)
+assert len(_none_q_rank) == 4 and _none_q_clear == []
+assert _none_q_summary["presented_count"] == 4
+assert _none_q_summary["clear_ground_applied"] is False
+assert _none_q_summary["clear_ground_unfilled"] is True
+assert _none_q_summary["clear_ground_unfilled_reason"] == (
+    "no unpresented survivor of either type is at or below "
+    f"{wsa.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT}% production overlap"
+), (
+    "A CAP, NEVER A QUOTA -- and the run SAYS SO. Four presented because nothing qualified must "
+    "not read the same as four presented because the rule never looked, which is why the reason "
+    f"is a value and not an absence: {_none_q_summary['clear_ground_unfilled_reason']!r}"
+)
+assert _none_q_summary["rule_applied"] == "2 embankment + 2 excavated", (
+    "and the rule line says only what happened -- no empty clear-ground clause"
+)
+# THE OTHER UNFILLED CASE, told apart by its reason: nothing was
+# measured at all. None is the established "never checked" sentinel and
+# a slot claiming "clear" cannot be filled from an unmeasured zone.
+_unchecked = _clear_ground_pool([None] * 6, [None] * 6)
+_unchecked_summary = assign_presentation_order(_unchecked)
+assert _slots(_unchecked)[1] == []
+assert _unchecked_summary["clear_ground_unfilled_reason"] == (
+    "production overlap was never checked on this run -- no zone can be claimed clear"
+), _unchecked_summary["clear_ground_unfilled_reason"]
+# AND THE BOUNDARY IS 'AT OR BELOW', not 'below': a zone measured at
+# exactly the threshold qualifies. Pinned because the constant is
+# CONFIGURABLE and a later retune to 10.0 must not quietly change which
+# comparison is meant.
+_at_threshold = _clear_ground_pool(
+    [100.0, 100.0, wsa.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT, 100.0], [100.0] * 4
+)
+assign_presentation_order(_at_threshold)
+assert [z["rank"] for z in _slots(_at_threshold)[1]] == [3], (
+    "a zone measured at exactly WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT qualifies -- the "
+    "comparison is AT OR BELOW"
+)
+
+# TEST 4: A QUALIFYING ZONE ALREADY IN THE TOP FOUR is not
+# double-presented and does not consume a clear-ground slot. Every zone
+# on the pool is clear, so all four rank slots qualify on the
+# measurement -- and the additive slots still go to the two best zones
+# the rank rule did NOT take.
+_already = _clear_ground_pool([0.0] * 4, [0.0] * 4)
+_already_summary = assign_presentation_order(_already)
+_already_rank, _already_clear = _slots(_already)
+_already_ids = [z["id"] for z in _already_rank + _already_clear]
+assert len(_already_ids) == len(set(_already_ids)) == 6, (
+    f"no zone is presented twice: {_already_ids}"
+)
+assert not ({id(z) for z in _already_rank} & {id(z) for z in _already_clear}), (
+    "the two slot kinds hold disjoint zones -- a zone the rank rule already took cannot also "
+    "spend a clear-ground slot on itself"
+)
+assert [(z["survey_type"], z["rank"]) for z in _already_clear] == [
+    (SURVEY_TYPE_EMBANKMENT, 3), (SURVEY_TYPE_EXCAVATED, 3),
+], "the slots go to the best-ranked qualifiers the rank rule left over, never back over its four"
+assert _already_summary["presented_count"] == 6
+for zone in _already_rank:
+    assert zone["production_overlap_pct"] == 0.0, (
+        "the premise: the rank-slot zones DO qualify on the measurement, so the only thing "
+        "keeping them out of the additive slots is that they are already presented"
+    )
+
+# TEST 5: NON-CONTIGUOUS RANKS. The presented set can be 1,2,3,4,7,8 --
+# expected and correct, not a zone gone missing -- and
+# presentation_order stays dense over it.
+_gap = _clear_ground_pool([100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 0.0, 0.0], [])
+_gap_summary = assign_presentation_order(_gap)
+_gap_presented = sorted(
+    [z for z in _gap if z["presented"]], key=lambda z: z["presentation_order"]
+)
+assert [z["rank"] for z in _gap_presented] == [1, 2, 3, 4, 7, 8], (
+    "THE CONSEQUENCE THIS DESIGN ACCEPTED ON PURPOSE: ranks 5 and 6 are on production ground, so "
+    "the additive slots reach past them to 7 and 8. The gap is the rule working -- nothing was "
+    f"hidden and nothing was displaced to make it: {[z['rank'] for z in _gap_presented]}"
+)
+assert [z["presentation_order"] for z in _gap_presented] == [1, 2, 3, 4, 5, 6], (
+    "and presentation_order is DENSE over the presented set, 1..N with no gaps -- it numbers the "
+    "reading order, never the rank"
+)
+assert [z["presented_reason"] for z in _gap_presented] == (
+    [wsa.PRESENTED_REASON_RANK] * 4 + [wsa.PRESENTED_REASON_CLEAR_GROUND] * 2
+)
+assert _gap_summary["presented_zone_ids"] == [z["id"] for z in _gap_presented]
+assert [z["rank"] for z in _gap if not z["presented"]] == [5, 6], (
+    "and the skipped ranks are UNPRESENTED SURVIVORS, still in the list this function was handed "
+    "-- marking, never filtering"
+)
+
+# TEST 6: presented_reason is on every presented zone, is a panel
+# exclusion by name, and the pool-level marks are exhaustive.
+for zone in _gap:
+    assert (zone["presented_reason"] is None) is not zone["presented"], (
+        "every presented zone carries a reason and every unpresented one carries None -- absent "
+        "is not a value here any more than it is for the other two marks"
+    )
+    assert zone["presented_reason"] in (
+        None, wsa.PRESENTED_REASON_RANK, wsa.PRESENTED_REASON_CLEAR_GROUND
+    )
+assert "presented_reason" in wsa.PANEL_EXCLUDED_KEYS, (
+    "presented_reason is a DECIDED panel exclusion, listed beside presented and "
+    "presentation_order -- rank is not displayed as a cutoff, so a row naming the slot kind would "
+    "invent a distinction the display does not otherwise make"
+)
+
+
+# --- THE SAME FOUR FILL CASES, END TO END THROUGH THE PIPELINE. Four
+# channels in one valley grid: nine embankment compartments and four
+# excavated zones, enough of each type to have leftovers after the rank
+# slots. The DEM, the accumulation and the boundary are IDENTICAL
+# across the four cases -- only the production geometry moves -- so
+# every difference below is the presentation rule responding to
+# production ground and nothing else. That is also why the ranks can be
+# read off the first run and used to build the patches for the rest:
+# production areas are measured against zones, never inputs to them.
+_cg_dem, _cg_boundary, _cg_acc = _presentation_dem(40, 65, [8, 24, 40, 56], 60, 0.30, 0.25)
+_cg_base = compute_water_survey_areas(
+    _cg_dem, _cg_boundary, flow_accumulation=_cg_acc, production_areas=[]
+)
+_cg_by_type = {stype: _cg_base["zones_by_type"][stype] for stype in SURVEY_TYPES}
+assert len(_cg_by_type[SURVEY_TYPE_EMBANKMENT]) >= 5 and len(_cg_by_type[SURVEY_TYPE_EXCAVATED]) >= 3, (
+    "the fixture's premise: both types produced MORE than their rank slots, so there is something "
+    f"for the additive slots to reach: {[(t, len(v)) for t, v in _cg_by_type.items()]}"
+)
+
+
+def _cg_run(covered_zones):
+    """The same parcel with one production block laid over exactly the
+    zones handed in -- the way a real parcel puts a pond's best ground
+    under committed production."""
+    if not covered_zones:
+        return compute_water_survey_areas(
+            _cg_dem, _cg_boundary, flow_accumulation=_cg_acc, production_areas=[]
+        )
+    footprint = unary_union([zone["polygon_utm"] for zone in covered_zones])
+    patch = {
+        "id": 900,
+        "polygon_utm": footprint,
+        "render_fill_polygon_utm": footprint,
+        # BELOW every zone on this grid, so each one reads gravity feed
+        # and no zone is flagged for want of a service relationship --
+        # the case is about production OVERLAP, and an unrelated flag
+        # moving with the patch would muddy it.
+        "representative_elevation_m": 50.0,
+        "max_elevation_m": 50.0,
+    }
+    return compute_water_survey_areas(
+        _cg_dem, _cg_boundary, flow_accumulation=_cg_acc, production_areas=[patch]
+    )
+
+
+_cg_rank_slot_zones = _cg_by_type[SURVEY_TYPE_EMBANKMENT][:2] + _cg_by_type[SURVEY_TYPE_EXCAVATED][:2]
+_cg_cases = {
+    # Both types keep a clear zone below their rank slots.
+    "both types qualify": _cg_run(_cg_rank_slot_zones),
+    # Every excavated zone is under production; embankment still has clear ones.
+    "one type qualifies": _cg_run(_cg_by_type[SURVEY_TYPE_EXCAVATED] + _cg_by_type[SURVEY_TYPE_EMBANKMENT][:2]),
+    # The production block covers the whole surviving set.
+    "neither type qualifies": _cg_run(_cg_base["zones"]),
+    # Nothing is on production ground at all: every zone qualifies,
+    # including the four already presented.
+    "every zone qualifies": _cg_run([]),
+}
+for _label, _res in _cg_cases.items():
+    _assert_presentation_invariants(_res, f"clear-ground e2e / {_label}")
+    _assert_display_order(_res["zones"], f"clear-ground e2e / {_label}")
+
+_cg_both = _cg_cases["both types qualify"]
+_cg_one = _cg_cases["one type qualifies"]
+_cg_none = _cg_cases["neither type qualifies"]
+_cg_all = _cg_cases["every zone qualifies"]
+
+# THE ORIGINAL FOUR DID NOT MOVE -- across all four cases, and against
+# the production-free run the fixture started from. The strongest form
+# available: the same zone IDS in the same order, whatever the
+# production layer does.
+_cg_reference_rank_ids = [
+    zone["id"] for zone in _presented_in_order(_cg_base)
+][:wsa.WATER_ZONE_PRESENTATION_COUNT]
+for _label, _res in _cg_cases.items():
+    _rank_ids = [
+        zone["id"] for zone in _presented_in_order(_res)
+        if zone["presented_reason"] == wsa.PRESENTED_REASON_RANK
+    ]
+    assert _rank_ids == _cg_reference_rank_ids, (
+        f"{_label}: the four rank slots are the same four zones in the same order as the run with "
+        f"no production layer at all -- {_rank_ids} vs {_cg_reference_rank_ids}. A production "
+        "boundary may add to what is shown and may never reorder it."
+    )
+
+# CASE 1 END TO END: one clear-ground slot per type, six presented.
+_cg_both_clear = [
+    z for z in _presented_in_order(_cg_both)
+    if z["presented_reason"] == wsa.PRESENTED_REASON_CLEAR_GROUND
+]
+assert _cg_both["presentation"]["presented_count"] == 6
+assert [z["survey_type"] for z in _cg_both_clear] == list(SURVEY_TYPES), "one per type, interleaved"
+assert all(z["production_overlap_pct"] == 0.0 for z in _cg_both_clear)
+assert all(
+    z["production_overlap_pct"] > wsa.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT
+    for z in _presented_in_order(_cg_both)
+    if z["presented_reason"] == wsa.PRESENTED_REASON_RANK
+), (
+    "the case's whole point, stated as its premise: ALL FOUR rank slots are on committed "
+    "production ground, which is the run that shows a reader nothing they can build"
+)
+
+# CASE 2 END TO END: the excavated slot backfills from embankment.
+_cg_one_clear = [
+    z for z in _presented_in_order(_cg_one)
+    if z["presented_reason"] == wsa.PRESENTED_REASON_CLEAR_GROUND
+]
+assert [z["survey_type"] for z in _cg_one_clear] == [SURVEY_TYPE_EMBANKMENT] * 2
+assert _cg_one["presentation"]["clear_ground_counts"] == {
+    SURVEY_TYPE_EMBANKMENT: 2, SURVEY_TYPE_EXCAVATED: 0
+}
+assert all(
+    z["production_overlap_pct"] > wsa.WATER_ZONE_CLEAR_GROUND_MAX_OVERLAP_PCT
+    for z in _cg_one["zones_by_type"][SURVEY_TYPE_EXCAVATED]
+), "the premise: no excavated zone on this run is clear, so its slot has to come from the other type"
+
+# CASE 3 END TO END: nothing qualifies, four presented, said out loud.
+assert _cg_none["presentation"]["presented_count"] == 4
+assert _cg_none["presentation"]["clear_ground_applied"] is False
+assert _cg_none["presentation"]["clear_ground_unfilled"] is True
+assert "at or below" in _cg_none["presentation"]["clear_ground_unfilled_reason"]
+
+# CASE 4 END TO END: with every zone clear, the four rank slots qualify
+# and still do not consume a slot.
+_cg_all_presented = _presented_in_order(_cg_all)
+assert len({z["id"] for z in _cg_all_presented}) == len(_cg_all_presented) == 6
+assert all(z["production_overlap_pct"] == 0.0 for z in _cg_all["zones"])
+
+# THE DIAGNOSTIC REPORTS THE RULE -- filled AND unfilled, in the same
+# style as the rank line above it.
+_cg_both_table = diag.summarize_survey_zones_table(_cg_both)
+assert "CLEAR-GROUND SLOTS: 2 of 2 filled" in _cg_both_table, _cg_both_table[:600]
+assert "clear-ground" in _cg_both["presentation"]["rule_applied"]
+for _entry in _cg_both["presentation"]["clear_ground_zones"]:
+    assert f"zone {_entry['zone_id']}" in _cg_both_table
+    assert f"prod {_entry['production_overlap_pct']}%" in _cg_both_table, (
+        "each addition is named WITH the overlap it qualified on -- a slot that asserts 'clear' "
+        "shows the measurement it asserts that on"
+    )
+assert "ADDITIVE: appended after the four above, which did not move." in _cg_both_table
+_cg_none_table = diag.summarize_survey_zones_table(_cg_none)
+assert "CLEAR-GROUND SLOTS: 0 of 2 filled" in _cg_none_table, _cg_none_table[:600]
+assert _cg_none["presentation"]["clear_ground_unfilled_reason"] in _cg_none_table, (
+    "the unfilled case PRINTS, with its reason -- never four zones and silence"
+)
+assert "clear-ground slot @ 0.0% prod" in _cg_both_table, (
+    "and the marked line says which slot the zone is in, on the diagnostic where an internal "
+    "record belongs"
+)
+
+# MARK, NOT FILTER -- restated on the run where the slots fire, over all
+# three surfaces at once. The rule reaches further down the ranking than
+# it ever did, and that must still take nothing out of anything.
+_cg_both_narrative = build_narrative_data(_cg_both)
+_cg_both_collection = survey_areas_to_geojson(_cg_both["zones"])
+validate_feature_collection(_cg_both_collection)
+_cg_survivor_ids = {zone["id"] for zone in _cg_both["zones"]}
+assert len(_cg_survivor_ids) > 6, "the case needs survivors past the six presented, or it proves nothing"
+assert {row["id"] for row in _cg_both_narrative["zones"]} == _cg_survivor_ids, (
+    "every survivor is in narrative_data, presented or not"
+)
+assert {
+    feature["properties"]["zone_id"] for feature in _cg_both_collection["features"]
+    if feature["properties"]["layer"].startswith("survey_zone_")
+    and not feature["properties"]["layer"].startswith("survey_zone_member_")
+} == _cg_survivor_ids, "and on the wire, with the same layer and the same full property set"
+for _row in _cg_both_narrative["zones"]:
+    assert _row["panel"], f"every survivor keeps its panel block, zone {_row['id']}"
+    assert "presented_reason" not in {entry["key"] for entry in _row["panel"]}, (
+        "and presented_reason is NOT one of its rows, on the widest panel any zone here produces"
+    )
+    assert "presented_reason" in _row, (
+        "it rides the narrative block instead, where the report can use it later"
+    )
+_cg_both_reasons = {
+    _row["id"]: _row["presented_reason"] for _row in _cg_both_narrative["zones"]
+}
+assert _cg_both_reasons == {zone["id"]: zone["presented_reason"] for zone in _cg_both["zones"]}, (
+    "one answer about the slot kind, not two"
+)
+
+# THE CONTRACT: consumer-read fields unchanged, and SELECTION NEVER
+# MOVES. Presentation is downstream of selection by construction
+# (select_survey_zone() reads neither mark), and the additive slots do
+# not change that -- asserted on the fixture where they actually fire,
+# against the runs where they do not.
+_cg_selected_ids = {
+    label: (res["selected_water_zone"] or {}).get("id") for label, res in _cg_cases.items()
+}
+assert len(set(_cg_selected_ids.values())) == 1 and None not in _cg_selected_ids.values(), (
+    "PRESENTATION MUST NEVER MOVE SELECTION: the same parcel selects the same zone whether the "
+    f"clear-ground slots fill, half-fill or stay empty -- {_cg_selected_ids}"
+)
+assert _cg_base["selected_water_zone"]["id"] == next(iter(_cg_selected_ids.values())), (
+    "and it is the zone the production-free run selected, too"
+)
+_cg_feature_keys = {
+    frozenset(feature["properties"])
+    for feature in _cg_both_collection["features"]
+    if feature["properties"]["layer"].startswith("survey_zone_")
+    and not feature["properties"]["layer"].startswith("survey_zone_member_")
+}
+_cg_base_feature_keys = {
+    frozenset(feature["properties"])
+    for feature in survey_areas_to_geojson(_cg_base["zones"])["features"]
+    if feature["properties"]["layer"].startswith("survey_zone_")
+    and not feature["properties"]["layer"].startswith("survey_zone_member_")
+}
+assert _cg_feature_keys == _cg_base_feature_keys, (
+    "the property set a consumer reads does not depend on whether the slots fired"
+)
+for _keys in _cg_feature_keys:
+    for _consumer_field in (
+        "zone_id", "survey_type", "status", "drop_reason", "rank", "presented",
+        "presentation_order", "presented_reason", "zone_acres", "mean_suitability",
+        "production_overlap_pct", "canopy_overlap_pct", "road_overlap_pct",
+        "has_service_relationship", "confidence",
+    ):
+        assert _consumer_field in _keys, f"{_consumer_field} left the zone feature contract"
+
+print(
+    "Clear-ground slots: the four rank slots are byte-identical in content and order whether the "
+    "additive slots fire or not (asserted against the production-free run on every case); all "
+    "four fill cases exercised on pools AND end to end -- both types qualify (6 presented, one "
+    "per type), one type qualifies (both slots backfill to the other), neither qualifies (4 "
+    "presented, unfilled WITH its reason printed), and every-zone-qualifies (the presented four "
+    "do not consume a slot); the presented set runs 1,2,3,4,7,8 with presentation_order dense "
+    "over it; presented_reason on every presented zone, in narrative_data, on the feature, and "
+    "absent from the widest panel; every survivor still in the payload, the panel and the "
+    f"GeoJSON; and selection unmoved across all four cases ({sorted(set(_cg_selected_ids.values()))})."
+)
+
 print(
     "Display order: rank 1 holds the highest DISPLAYED score in every pool and every generated "
-    "fixture, the presented zones of a type are contiguous from rank 1, and the reported defect "
-    "is pinned -- a 65/100 embankment with the worst claims on the parcel leads its type instead "
-    "of dropping behind a 52 and a 48."
+    "fixture, the RANK-SLOT zones of a type are contiguous from rank 1 (a clear-ground addition "
+    "sits below them, never among them), and the reported defect is pinned -- a 65/100 "
+    "embankment with the worst claims on the parcel leads its type instead of dropping behind a "
+    "52 and a 48."
 )
 
 
