@@ -5,7 +5,7 @@ THE SITE DATA REPORT'S FIXED SECTION ORDER -- the Scale of Permanence,
 as site-data-report-proposal.md lays it out -- and the numeral each
 section carries because of its place in it.
 
-    SECTION_OUTLINE          the seven section names, in order
+    SECTION_OUTLINE          the eight section names, in order
     section_number("Climate") -> "II"
 
 A SECTION'S NUMBER IS ITS PLACE IN THE OUTLINE, NOT ITS PLACE IN THE
@@ -38,6 +38,13 @@ site data REPORT has a numbered section for. Soils & geology moves from
 IX to VII because the two names ahead of it are gone, which is the one
 renumbering the outline has taken and the reason the numeral lives here
 rather than being counted at render time.
+
+DESIGN IS VIII (branch 13), and it is the one section that is not
+inventory. The seven before it describe the property; this one is what
+the user committed on it -- the layout map, the design on its land, and
+the design record, each step's committed features in step order. It comes
+last because it is what the survey was for, and adding it at the end
+renumbers nothing.
 """
 
 SECTION_OUTLINE = (
@@ -48,6 +55,7 @@ SECTION_OUTLINE = (
     "Access",
     "Trees & forestry",
     "Soils & geology",
+    "Design",
 )
 
 _ROMAN = ("I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII")

@@ -91,12 +91,15 @@ assert report_outline.section_number("Climate") == "II"
 # overview, Fencing & animals investigated and dropped, and Soils &
 # geology moved from IX to VII because of it. The numeral is the
 # outline's place, so this is the one renumbering there has been.
+# DESIGN IS VIII SINCE BRANCH 13, appended: the committed design, after
+# the seven inventory sections, renumbering none of them.
 assert report_outline.SECTION_OUTLINE == (
-    "Site overview", "Climate", "Landform", "Water & hydrology", "Access", "Trees & forestry", "Soils & geology")
+    "Site overview", "Climate", "Landform", "Water & hydrology", "Access", "Trees & forestry", "Soils & geology", "Design")
 assert report_outline.section_number("Soils & geology") == "VII"
-assert len(report_outline.SECTION_OUTLINE) == 7
+assert report_outline.section_number("Design") == "VIII"
+assert len(report_outline.SECTION_OUTLINE) == 8
 assert [report_outline.section_number(n) for n in report_outline.SECTION_OUTLINE] == \
-    ["I", "II", "III", "IV", "V", "VI", "VII"]
+    ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"]
 # The two dropped names are not numbered any more -- a section the method
 # does not have is a mistake to surface, not to number.
 for gone in ("Weather", "Buildings & utilities", "Fencing & animals"):
@@ -275,7 +278,7 @@ templates_dir = site_report.TEMPLATES_DIRECTORY
 template_files = []
 for root, _, files in os.walk(templates_dir):
     template_files += [os.path.join(root, f) for f in files]
-assert len(template_files) == 17, sorted(template_files)   # css, base, 9 components, 6 sections
+assert len(template_files) == 18, sorted(template_files)   # css, base, 9 components, 7 sections
 for path in template_files:
     with open(path, encoding="utf-8") as handle:
         hits = HEX.findall(handle.read())

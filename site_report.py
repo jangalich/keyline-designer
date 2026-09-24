@@ -64,6 +64,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 import access_derivations
 import access_section
 import climate_section
+import design_section
 import landform_section
 import report_data as report_data_module
 import session_manager
@@ -178,7 +179,7 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
     return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
 
 
-def build_sections(report_data, terrain=None, water=None, access=None, trees=None, soils=None) -> list:
+def build_sections(report_data, terrain=None, water=None, access=None, trees=None, soils=None, design=None) -> list:
     """Every section the report renders, in outline order. Climate from
     the report data; Landform from the session's terrain reads
     (landform_section.TerrainInputs) when the caller has a session to read
@@ -191,8 +192,11 @@ def build_sections(report_data, terrain=None, water=None, access=None, trees=Non
     (trees_derivations.TreesInputs) and the report data's forest type and
     woodland blocks; Soils & geology (branch 12) from the session's Layer
     1 soil reads (soils_derivations.SoilsInputs) and the report data's
-    survey and geology blocks. Each section carries its own numeral from
-    report_outline, so adding one renumbers nothing."""
+    survey and geology blocks; Design (branch 13) from the session's
+    committed Design Document and the report data's NAIP imagery
+    (design_section.DesignInputs) -- the layout map and the design
+    record. Each section carries its own numeral from report_outline, so
+    adding one renumbers nothing."""
     sections = [climate_section.build_climate_section(report_data)]
     if terrain is not None:
         landform = landform_section.build_landform_section(terrain, TOKENS)
@@ -205,6 +209,8 @@ def build_sections(report_data, terrain=None, water=None, access=None, trees=Non
             sections.append(trees_section.build_trees_section(trees, TOKENS))
         if soils is not None:
             sections.append(soils_section.build_soils_section(soils, TOKENS))
+        if design is not None:
+            sections.append(design_section.build_design_section(design, TOKENS))
     return sections
 
 
@@ -227,6 +233,7 @@ def render_site_report_html(
     access=None,
     trees=None,
     soils=None,
+    design=None,
 ) -> str:
     """The whole document as HTML, stylesheet inlined. `terrain` is the
     session's landform_section.TerrainInputs, or None for a report built
@@ -248,7 +255,7 @@ def render_site_report_html(
     return env.get_template("base.html").render(
         stylesheet=render_stylesheet(env, fonts_directory),
         cover=cover,
-        sections=build_sections(report_data, terrain, water, access, trees, soils),
+        sections=build_sections(report_data, terrain, water, access, trees, soils, design),
     )
 
 
@@ -262,6 +269,7 @@ def generate_site_report_pdf(
     access=None,
     trees=None,
     soils=None,
+    design=None,
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
@@ -269,7 +277,7 @@ def generate_site_report_pdf(
 
     html = render_site_report_html(
         report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water,
-        access=access, trees=trees, soils=soils,
+        access=access, trees=trees, soils=soils, design=design,
     )
     HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
     return output_path
@@ -292,10 +300,12 @@ def generate_session_site_report_pdf(
     warm-up's own products -- session_manager.get_session_context, a cache
     hit or a rebuild, never a recompute here), the PDF at output_path.
 
-    Reads the document and the context only -- the site inventory
-    describes the property, not the design, so no step's commit state is
-    consulted here. The design record (site-data-report-proposal.md,
-    section 3 of the report) will add that read when it is built. Raises
+    Reads the document and the context only. The seven inventory sections
+    describe the property and consult no step's commit state; the Design
+    section (VIII) reads the committed steps off the DOCUMENT -- never the
+    session cache -- so an evicted cache cannot fail it
+    (design_record.py). The report is offered only once every step is
+    committed; design_record raises for a step that is not. Raises
     report_data.ReportDataIncompleteError for a REQUIRED layer that fails,
     which session_report.error_payload() maps to the failed_layer shape.
     """
@@ -309,7 +319,13 @@ def generate_session_site_report_pdf(
     access = access_derivations.access_inputs_from_context(context, document, data)
     trees = trees_derivations.trees_inputs_from_context(context, document, data)
     soils = soils_derivations.soils_inputs_from_context(context, document, data)
+    # DESIGN ONLY FOR A FINISHED DESIGN. The report is offered once every
+    # step is committed (the job's precondition, session_report); called
+    # before that, this still renders the inventory and leaves the design
+    # out, rather than a record with an unfinished step in it.
+    finished = all(document["steps"][step]["status"] == "committed" for step in document["steps"])
+    design = design_section.design_inputs_from_context(context, document, data) if finished else None
     return generate_site_report_pdf(
         data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access,
-        trees=trees, soils=soils,
+        trees=trees, soils=soils, design=design,
     )

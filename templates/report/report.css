@@ -366,6 +366,126 @@ th.num {
 .section--access .data-table th.text {
   width: 58%;
 }
+/* DESIGN IS TWO PAGES: the layout map at the full measure over its
+   photograph, then the record. The map's frame is report_map.LAYOUT_FRAME
+   and is exempt from the shared section scale on purpose. The record is
+   one block per step -- a small title, then a card per committed feature
+   and the step's count, or the sentence a step committed empty carries. */
+.section--design .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--design .caption {
+  max-width: none;
+}
+.section--design .section__detail .eyebrow--continued {
+  margin-bottom: var(--space-2);
+}
+.section--design .section__detail .heading {
+  margin-bottom: var(--space-2);
+}
+.section--design .source-footer {
+  padding-top: var(--space-1);
+}
+/* A STEP MAY SPLIT between rows of cards -- the cards themselves never
+   do -- and its title stays with its first row. */
+.record-step {
+  margin-bottom: 5pt;
+}
+.record-step__title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-body);
+  color: var(--ink);
+  margin: 0 0 2pt 0;
+  break-after: avoid;
+}
+.record-step__statement {
+  font-family: var(--font-prose);
+  font-size: var(--text-body);
+  color: var(--ink);
+  margin: 0;
+}
+/* THE RECORD'S CARDS: one per committed feature, the step's data panel as
+   the user saw it -- header, provenance, then a figure (data face, right-
+   aligned, so the points line up down the card) or a word before each
+   label. Three to a row across the measure; a card never splits. */
+.record-cards {
+  display: flex;
+  flex-wrap: wrap;
+}
+.record-card {
+  box-sizing: border-box;
+  width: 33.333%;
+  padding: 0 8pt var(--space-2) 0;
+  break-inside: avoid;
+}
+.record-card__name {
+  font-family: var(--font-prose);
+  font-weight: 600;
+  font-size: var(--text-table);
+  color: var(--ink);
+  margin: 0;
+  border-bottom: var(--hairline);
+  padding-bottom: 1pt;
+}
+.record-card__source {
+  font-family: var(--font-prose);
+  font-size: var(--text-label);
+  color: var(--ink-muted);
+  margin: 1pt 0 2pt 0;
+}
+.record-card__rows {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-label);
+  line-height: 1.25;
+}
+.record-card__rows td {
+  padding: 0.5pt 0;
+  vertical-align: baseline;
+}
+.record-card__rows td.num,
+.record-card__rows td.word {
+  width: 42%;
+  text-align: right;
+  padding-right: 5pt;
+}
+.record-card__rows td.num {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.record-card__rows td.word {
+  font-family: var(--font-prose);
+  color: var(--ink);
+}
+.record-card__rows td.label {
+  font-family: var(--font-prose);
+  color: var(--ink-muted);
+}
+.record-card__row--caution td.num,
+.record-card__row--caution td.label {
+  color: var(--oxide);
+}
+.record-card__rule td {
+  border-top: var(--hairline);
+  padding: 0;
+  height: 2pt;
+}
+.record-card__heading td {
+  font-family: var(--font-prose);
+  font-style: italic;
+  color: var(--ink-muted);
+  padding-top: 1pt;
+}
+.record-card__term td {
+  font-family: var(--font-prose);
+  color: var(--ink);
+  padding-left: 6pt;
+}
+.record-step .caption {
+  margin: 0;
+}
 /* TREES IS TWO PAGES ON ACCESS'S RHYTHM: the canopy map at Landform's
    extent and scale with the extent table under it, then the height,
    site index and limitations tables and the sources. The numbers page

@@ -2685,11 +2685,12 @@ assert any("times 12 of 12 declared layers" in line for line in _fetch_lines), _
 # since branch 9 (six Water layers), ten since branch 10 (the Access
 # section's soil road ratings), twelve since branch 11 (the Trees
 # section's forest type group and soil woodland ratings), fourteen since
-# branch 12 (the Soils section's survey query and its bedrock geology); a
-# fifteenth added without a timer would read "14 of 15" and fail here.
+# branch 12 (the Soils section's survey query and its bedrock geology),
+# fifteen since branch 13 (the layout map's NAIP imagery); a sixteenth
+# added without a timer would read "15 of 16" and fail here.
 assert any("report_data.fetch_report_data calls time_layer" in line for line in _fetch_lines), _fetch_lines
 assert any(
-    "report_data.fetch_report_data times 14 of 14 declared report layers" in line for line in _fetch_lines
+    "report_data.fetch_report_data times 15 of 15 declared report layers" in line for line in _fetch_lines
 ), _fetch_lines
 assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
 assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)

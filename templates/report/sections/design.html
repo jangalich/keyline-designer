@@ -1,0 +1,66 @@
+{#- THE DESIGN SECTION -- TWO PAGES, AND THE ONE THAT IS NOT INVENTORY.
+    The map page: eyebrow, heading, the layout map at the full page (NOT
+    the sections' shared scale -- its own scale bar states its scale) over
+    the aerial photograph, its legend, and the imagery line naming the
+    photograph's acquisition date, or the statement that stands in its
+    place. The record page: the continuation eyebrow, the record's
+    heading, then each step in step order -- a card per committed feature,
+    the step's data panel as the user saw it (header, provenance, a
+    figure or word before each label, the panel's hairlines and headings),
+    then the count or the road's access point; or the sentence a step
+    committed empty carries -- and the sources. No styling here, no numbers here: `section` is
+    design_section.build_design_section()'s dict, every value already
+    formatted. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--design section--map">
+  <div class="section__figures">
+    {{ c1.eyebrow(section.number, section.name) }}
+    {{ c2.heading(section.heading) }}
+    {{ c7.map(section.map) }}
+{%- if section.imagery_available %}
+    {{ c9.caption(section.imagery_line) }}
+{%- else %}
+    {{ c9.unavailable(section.imagery_line) }}
+{%- endif %}
+  </div>
+  <div class="section__detail">
+    {{ c1.eyebrow(section.number, section.name, continued=True) }}
+    {{ c2.heading(section.record_heading) }}
+{%- for step in section.record %}
+    <div class="record-step record-step--{{ step.step_id }}">
+      <h3 class="record-step__title">{{ step.title }}</h3>
+{%- if step.empty %}
+      <p class="record-step__statement">{{ step.statement }}</p>
+{%- else %}
+      <div class="record-cards">
+{%- for card in step.cards %}
+        <div class="record-card">
+          <p class="record-card__name">{{ card.name }}</p>
+          <p class="record-card__source">{{ card.source }}</p>
+          <table class="record-card__rows">
+{%- for row in card.rows %}
+{%- if row.kind == "rule" %}
+            <tr class="record-card__rule"><td colspan="2"></td></tr>
+{%- elif row.kind == "heading" %}
+            <tr class="record-card__heading"><td colspan="2">{{ row.label }}</td></tr>
+{%- elif row.kind == "term" %}
+            <tr class="record-card__term"><td colspan="2">{{ row.value }}</td></tr>
+{%- else %}
+            <tr class="record-card__row record-card__row--{{ row.kind }}"><td class="{{ 'num' if row.kind in ('measured', 'caution') else 'word' }}">{{ row.value }}</td><td class="label">{{ row.label }}</td></tr>
+{%- endif %}
+{%- endfor %}
+          </table>
+        </div>
+{%- endfor %}
+      </div>
+      {{ c9.caption(step.note) }}
+{%- endif %}
+    </div>
+{%- endfor %}
+    {{ c6.source_footer({"lines": section.sources}) }}
+  </div>
+</section>

@@ -59,7 +59,7 @@ print("1. no colour literal outside site_report.TOKENS")
 checked = []
 for root, _dirs, files in os.walk(site_report.TEMPLATES_DIRECTORY):
     checked += [os.path.join(root, f) for f in files]
-assert len(checked) == 17, sorted(checked)   # css, base, 9 components, 6 sections
+assert len(checked) == 18, sorted(checked)   # css, base, 9 components, 7 sections
 for path in checked:
     with open(path, encoding="utf-8") as handle:
         assert not HEX.findall(handle.read()), f"{path} carries a colour literal"

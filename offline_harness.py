@@ -77,6 +77,16 @@ def _refusing(verb: str):
     return call
 
 
+def _refusing_session():
+    refuse = _refusing("request")
+
+    def request(self, method, url, *args, **kwargs):
+        return refuse(method, url)
+
+    request.__name__ = "offline_session_request"
+    return request
+
+
 def install(*, retry_pause_seconds: float = 0.0) -> None:
     """Refuse every outbound `requests` call from now on and zero the
     retry pause. Idempotent."""
@@ -87,6 +97,14 @@ def install(*, retry_pause_seconds: float = 0.0) -> None:
         for verb in _VERBS:
             _ORIGINALS[verb] = getattr(requests, verb)
             setattr(requests, verb, _refusing(verb))
+        # AND EVERY SESSION. pystac-client (Planetary Computer's STAC API:
+        # the canopy, Sentinel-2 and NAIP searches) and planetary_computer's
+        # token signing go through a requests.Session, never the module
+        # verbs, so without this a STAC search in a test leaks to the real
+        # network. Session.request is the one method every Session verb
+        # and send path funnels through.
+        _ORIGINALS["session_request"] = requests.Session.request
+        requests.Session.request = _refusing_session()
         _ORIGINALS["retry_pause_seconds"] = fetch_attempts.RETRY_PAUSE_SECONDS
         fetch_attempts.RETRY_PAUSE_SECONDS = retry_pause_seconds
         _INSTALLED = True
@@ -101,6 +119,7 @@ def uninstall() -> None:
             return
         for verb in _VERBS:
             setattr(requests, verb, _ORIGINALS.pop(verb))
+        requests.Session.request = _ORIGINALS.pop("session_request")
         fetch_attempts.RETRY_PAUSE_SECONDS = _ORIGINALS.pop("retry_pause_seconds")
         _INSTALLED = False
 
