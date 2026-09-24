@@ -398,6 +398,20 @@ def build_production_zone_payload(
     return assemble_production_zone_payload(exclusion, production)
 
 
+# The ground rows the landform panel shows for a block (the frontend's
+# productionBlockRows): aspect as the sector and whether it is known, the
+# elevation word, the median slope, the soil run and the drainage class --
+# the fields a drawn block's Feature already carries, under the same names.
+PANEL_READING_FIELDS = (
+    "dominant_aspect",
+    "aspect_available",
+    "elevation_position",
+    "slope_median_pct",
+    "soil_components",
+    "drainage_class",
+)
+
+
 def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
     """
     THE PAYLOAD CONTRACT ITSELF, with the fetching lifted off it: an
@@ -507,6 +521,31 @@ def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
         }
         for zone in narrative["patches"]
         if int(zone["id"]) in drawable
+    ]
+
+    # THE PANEL'S READINGS, ON THE FEATURE TOO. The panel reads a suggested
+    # block's ground rows off `zones` just above; the Feature the user
+    # commits never carried them, so the Design Document could not either --
+    # while a DRAWN block's Feature carries the same fields, spread onto it
+    # from the same row builder (_patch_narrative_data(), see wire_translation.
+    # drawn_production_block_to_feature()). This copies the displayed values
+    # from THE ROW THE PANEL READS onto the matching Feature, so what a commit
+    # stores is what the panel showed, by construction rather than by a second
+    # derivation. New objects throughout: `features` and the rows are this
+    # payload's own, and the cached result is never touched. Nothing
+    # downstream reads these on the way back in -- the rehydrator copies its
+    # own field list (wire_translation._ADVISORY_WIRE_FIELDS) and ignores the
+    # rest.
+    row_by_feature_id = {zone["feature_id"]: zone for zone in zones}
+    features = [
+        {
+            **feature,
+            "properties": {
+                **feature["properties"],
+                **{field: row_by_feature_id[feature["id"]][field] for field in PANEL_READING_FIELDS},
+            },
+        }
+        for feature in features
     ]
 
     # Both totals are SUMS of the per-zone figures above, not a separate

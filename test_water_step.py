@@ -568,9 +568,21 @@ with Harness() as h:
         "the two instruments must find SOME common ground on this fixture, or "
         "section 9's invariance assertion is vacuous"
     )
+    # EACH ENTRY ALSO NAMES ITS PARTNER as the panel resolved it (branch 14,
+    # step_orchestrator._water_feature_with_panel): its survey type and rank
+    # when the partner is a zone this payload presents, `presented: False`
+    # when it is not -- the payload's own presented set decides, as the
+    # panel's does.
+    presented_ids = {feature["properties"]["zone_id"] for feature in ZONES}
     for feature in ZONES:
         for entry in feature["properties"]["cross_type_overlaps"]:
-            assert set(entry) == {"zone_id", "fraction"}, entry
+            if entry["zone_id"] in presented_ids:
+                assert set(entry) == {"zone_id", "fraction", "presented", "survey_type", "rank"}, entry
+                partner = next(f for f in ZONES if f["properties"]["zone_id"] == entry["zone_id"])
+                assert entry["presented"] is True
+                assert (entry["survey_type"], entry["rank"]) == (partner["properties"]["survey_type"], partner["properties"]["rank"])
+            else:
+                assert entry == {"zone_id": entry["zone_id"], "fraction": entry["fraction"], "presented": False}, entry
 
     # THE STEP-LEVEL BLOCK -- build_narrative_data()'s own, whole.
     summary = water_payload["summary"]

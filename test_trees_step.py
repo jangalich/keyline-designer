@@ -729,8 +729,8 @@ for original in GENERATED_PATCHES:
 OUTBOUND = wire_translation.tree_zones_to_feature_collection(GENERATED_PATCHES)
 validate_feature_collection(OUTBOUND)
 
-# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NOTHING ELSE, and the
-# equality is asserted rather than tolerated. build_trees_payload() used to add
+# THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NO GEOMETRY BESIDE IT, and
+# the equality is asserted rather than tolerated. build_trees_payload() used to add
 # `display_only_smoothed_outline`, and it no longer does: render_layout_map.py
 # draws the tree hatch from the cell-union footprint verbatim ("no hull, no
 # opening, no smoothing of any kind"), so a smoothed outline on a tree feature
@@ -742,8 +742,24 @@ validate_feature_collection(OUTBOUND)
 DISPLAY_ONLY_OUTLINE = display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY
 PAYLOAD_COLLECTION = GENERATE_PAYLOAD["tree_zones"]
 
-assert PAYLOAD_COLLECTION == OUTBOUND, (
-    "the payload carries the outbound collection unchanged -- nothing added"
+# THE PANEL'S THREE READINGS ARE THE ONE ADDITION (branch 14,
+# step_orchestrator.TREE_PANEL_READING_FIELDS), copied from the `zones` row the
+# panel reads so a commit stores what the panel showed. Strip exactly them and
+# the payload is the outbound collection, unchanged; no geometry is added.
+READINGS = step_orchestrator.TREE_PANEL_READING_FIELDS
+ROWS_BY_ID = {row["feature_id"]: row for row in GENERATE_PAYLOAD["zones"]}
+for feature in PAYLOAD_COLLECTION["features"]:
+    for field in READINGS:
+        assert feature["properties"][field] == ROWS_BY_ID[feature["id"]][field], (feature["id"], field)
+STRIPPED = {
+    **PAYLOAD_COLLECTION,
+    "features": [
+        {**f, "properties": {k: v for k, v in f["properties"].items() if k not in READINGS}}
+        for f in PAYLOAD_COLLECTION["features"]
+    ],
+}
+assert STRIPPED == OUTBOUND, (
+    "the payload carries the outbound collection unchanged but for the panel's readings"
 )
 for feature in PAYLOAD_COLLECTION["features"]:
     assert DISPLAY_ONLY_OUTLINE not in feature["properties"], (
