@@ -16,6 +16,8 @@ photograph is the reference parcel's real 2022 NAIP window
     5. the imagery: its year printed; the no-imagery render
     6. the pages: two, no overflow, decimal alignment, the record's words
     7. vector over raster, read back from the PDF
+    8. the page decisions: the edge only over a photograph, the record's
+       empty rows and shared ground, the record heading a part of VIII
 """
 
 import copy
@@ -421,6 +423,11 @@ assert naip_imagery.format_acquired({"acquired": ["2022-06-21", "2022-07-02"]}) 
 assert naip_imagery.format_acquired({"acquired": ["2021-09-30", "2022-06-21"]}) == "30 September 2021 and 21 June 2022"
 BARE = ds.build_design_section(inputs(imagery=False), TOKENS)
 assert BARE["map"]["underlay"] is None and "<image" not in BARE["map"]["svg"] and "off-parcel-wash" not in BARE["map"]["svg"]
+# THE GRADED EDGE ONLY OVER A PHOTOGRAPH. The lift means something against
+# imagery; on white its four bands read as a drawn soft border, so the bare
+# map leaves the boundary line to carry the parcel alone.
+assert 'id="parcel-edge"' in SVG and 'id="parcel-edge"' not in BARE["map"]["svg"]
+assert 'id="parcel-boundary"' in BARE["map"]["svg"]
 assert not BARE["imagery_available"] and "unavailable" in BARE["imagery_line"][0]
 # The same design either way: every layer and the legend unchanged.
 assert [s["id"] for s in BARE["map"]["layers"]] == [s["id"] for s in MAP["layers"]]
@@ -563,6 +570,47 @@ assert not bare[1].get_images(), "the no-imagery render embeds no image"
 print(f"   one image object ({images[0][2]} x {images[0][3]}), painted first; {len(over)} vector operations and "
       f"{len(on_image)} words after it, over it; "
       f"PDF {len(RENDERS['design'][2]):,} bytes, {len(RENDERS['design-no-imagery'][2]):,} without imagery")
+
+# ======================================================================
+# 8. The page decisions
+# ======================================================================
+print("8. the page decisions: the record's empty rows and shared ground, the part heading")
+record_blocks = {block["step_id"]: block for block in FULL["record"]}
+cards = {card["name"]: card for card in record_blocks["landform"]["cards"]}
+# A ROW EMPTY ON EVERY SUGGESTED CARD IS DROPPED where it is empty: the
+# fixture's suggested blocks have no soil data, and six dash pairs read as
+# a failed report. The drawn block's soil has a value and keeps its row.
+raw = {card["name"]: card for step in design_record.build_design_record(FIXTURE["full"]["document"])["steps"]
+       if step["step_id"] == "landform" for card in step["cards"]}
+assert all(any(r["label"] == "soil" and r["value"] == design_record.EM_DASH for r in raw[f"Block {n}"]["rows"])
+           for n in range(1, 6)), "the fixture really has no soil under the suggested blocks"
+for name, card in cards.items():
+    assert not any(row.get("value") == design_record.EM_DASH for row in card["rows"]), name
+    assert not any(row.get("label") == "drainage" for row in card["rows"]), name
+assert [(r["value"], r["label"]) for r in cards["Drawn 1"]["rows"] if r.get("label") == "soil"] == \
+    [("68% Fixture silt loam", "soil")], "the drawn block's soil row stays"
+# SHARED GROUND NAMED ONLY FOR COMMITTED PARTNERS; the rest one line, a
+# count and a range -- never a sum: the partners' geometry is not in the
+# document, and two of them may overlap each other.
+water_cards = {card["name"]: card for card in record_blocks["water"]["cards"]}
+shared = lambda name: [(r["value"], r["label"]) for r in water_cards[name]["rows"]
+                       if str(r.get("label") or "").startswith(ds.SHARED_PREFIX)]
+assert shared("Excavated 1") == [("6.9", "shared ground w/ Embankment 1 %"),
+                                 ("3.4–30.1", "shared ground w/ 6 areas not shown, % each")], shared("Excavated 1")
+assert shared("Embankment 1") == [("14.4", "shared ground w/ Excavated 1 %")], "a committed partner's row is unchanged"
+assert not any("not shown %" in label and value != "3.4–30.1" for value, label in shared("Excavated 1"))
+# THE RECORD HEADING IS A PART OF VIII: the only continued page with a
+# heading, so set a step below the section's and above the steps' own.
+sizes = {}
+for index in (1, 2):
+    for block in pdf[index].get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                sizes.setdefault(span["text"].strip(), round(span["size"], 2))
+assert sizes["The layout"] > sizes["The design record"] > sizes["Landform"] > sizes["Block 1"], sizes
+print(f"   no edge on the bare map; suggested blocks' empty soil and drainage dropped, the drawn block's soil kept; "
+      f"Excavated 1's shared ground {len(shared('Excavated 1'))} rows from 8; headings "
+      f"{sizes['The layout']} > {sizes['The design record']} > {sizes['Landform']} > {sizes['Block 1']} pt")
 
 assert offline_harness.refused() == [], offline_harness.refused()
 print("\ntest_design_section.py: all sections passed")

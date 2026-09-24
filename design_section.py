@@ -64,7 +64,9 @@ across 25 pt (report_map's `edge`), so the parcel reads as lifted off its
 neighbours. Built with shapely buffers, not an SVG filter -- WeasyPrint
 ignores feGaussianBlur and feDropShadow -- and disjoint rather than
 stacked, so each band prints at exactly its stated opacity. At 15 pt the
-lift read only in close-up.
+lift read only in close-up. ONLY OVER A PHOTOGRAPH: on the bare page the
+four rings read as a soft border drawn round the parcel, not a lift, and
+the boundary line carries the parcel alone.
 
 THE PIN'S DROP SHADOW DOES NOT PRINT (it is a CSS filter on screen), so
 the --halo stroke carries the separation alone; test_design_section.py
@@ -124,6 +126,9 @@ alone, as each step's DATA PANEL showed it, no footnote about what the
 document does not hold. A card per committed feature -- the panel's
 header, its provenance, the panel's rows in the panel's order -- in
 STEP_ORDER; a step committed empty said in words; a count, never a sum.
+Printed less what a reader cannot use -- a row empty on every suggested
+card, and shared ground with areas this map does not show, collapsed to
+one line -- see SHARED_PREFIX.
 """
 
 from dataclasses import dataclass
@@ -402,7 +407,7 @@ def build_map(inputs: DesignInputs, record: dict, tokens: dict) -> dict:
     rendered = report_map.render_map(
         inputs.boundary_polygon_utm, layers, tokens, report_map.LAYOUT_FRAME,
         fit=False, underlay=underlay, wash=WASH if underlay else None, halo=True, labels_on_top=True,
-        boundary_style=BOUNDARY_STYLE, edge=EDGE,
+        boundary_style=BOUNDARY_STYLE, edge=EDGE if underlay else None,
     )
     by_id = {spec["id"]: spec for spec in layers}
     ordered = [by_id[i] for i in LEGEND_ORDER if i in by_id] + [boundary_legend_spec()]
@@ -447,17 +452,102 @@ def _card(card: dict) -> dict:
     return {"name": card["name"], "source": card["source"], "rows": rows}
 
 
-def build_record(record: dict) -> list:
+# THE RECORD PAGE PRINTS THE PANEL, LESS WHAT A READER CANNOT USE. Two
+# page decisions, made here and not in design_record, which stays the
+# panel's figures as the document holds them:
+#
+# A ROW EMPTY ON EVERY SUGGESTED CARD IS DROPPED wherever it is empty. On a
+# parcel where the soil survey has nothing under the suggested blocks,
+# every one of them printed "- soil / - drainage", and six identical dash
+# pairs read as a report that failed rather than as data that is not
+# there. A card where the row has a value keeps it: a drawn block's soil
+# shows the row works.
+#
+# SHARED GROUND IS NAMED ONLY FOR PARTNERS THAT WERE COMMITTED. A reader
+# can act on an overlap with an area on the map; one with an area not
+# shown -- never presented, or presented and not committed -- is noise
+# row by row, so those collapse into ONE line: how many, and the range of
+# their shares. Not a sum: the partners' own geometry is not in the
+# document, two of them may overlap each other, and the record's rule is
+# a count, never a total.
+SHARED_PREFIX = "shared ground w/ "
+
+
+def _is_suggested(card: dict) -> bool:
+    return str(card.get("source", "")).startswith("Suggested")
+
+
+def _empty_labels(cards: list) -> set:
+    """The row labels empty (a dash, or absent) on every suggested card of
+    a step -- none when the step has no suggested card."""
+    suggested = [card for card in cards if _is_suggested(card)]
+    if not suggested:
+        return set()
+    filled = {row["label"] for card in suggested for row in card["rows"]
+              if row["label"] and row["kind"] in ("measured", "categorical") and row["value"] != design_record.EM_DASH}
+    labels = {row["label"] for card in suggested for row in card["rows"]
+              if row["label"] and row["kind"] in ("measured", "categorical")}
+    return labels - filled
+
+
+def _shared_ground(rows: list, feature: Optional[dict], committed_zone_ids: set) -> list:
+    """The card's rows with its shared-ground rows collapsed: a row per
+    committed partner, as the record set it, then one line for every
+    partner not shown on this map."""
+    if feature is None or not any(str(row["label"] or "").startswith(SHARED_PREFIX) for row in rows):
+        return rows
+    kept, rest = [], []
+    for entry in feature["properties"].get("cross_type_overlaps") or []:
+        if "presented" not in entry:
+            continue
+        if entry["presented"] and entry.get("zone_id") in committed_zone_ids:
+            kept.append(f"{SHARED_PREFIX}{design_record._survey_zone_name(entry)} %")
+        else:
+            rest.append(float(entry["fraction"]) * 100)
+    shared = [row for row in rows if str(row["label"] or "").startswith(SHARED_PREFIX)]
+    first = rows.index(shared[0])
+    collapsed = [row for row in shared if row["label"] in kept] + ([_rest_row(rest)] if rest else [])
+    return [row for row in rows[:first] if row not in shared] + collapsed + [row for row in rows[first:] if row not in shared]
+
+
+def _rest_row(shares: list) -> dict:
+    low, high = min(shares), max(shares)
+    if len(shares) == 1:
+        return {"kind": "measured", "value": design_record.to_fixed(low, design_record.MEASURE_DP),
+                "label": f"{SHARED_PREFIX}an area not shown %"}
+    value = f"{design_record.to_fixed(low, design_record.MEASURE_DP)}–{design_record.to_fixed(high, design_record.MEASURE_DP)}"
+    return {"kind": "measured", "value": value, "label": f"{SHARED_PREFIX}{len(shares)} areas not shown, % each"}
+
+
+def _page_rows(card: dict, empty: set, feature: Optional[dict], committed_zone_ids: set) -> dict:
+    rows = [row for row in card["rows"]
+            if not (row["label"] in empty and row["value"] == design_record.EM_DASH)]
+    return {**card, "rows": _shared_ground(rows, feature, committed_zone_ids)}
+
+
+def build_record(record: dict, document: Optional[dict] = None) -> list:
     """One block per step, in STEP_ORDER: a heading, then a card per
     committed feature and the step's count, or the sentence a step
-    committed empty carries. The road carries its access point."""
+    committed empty carries. The road carries its access point. The
+    record's rows are printed less what a reader cannot use -- see
+    SHARED_PREFIX's note -- which needs the document's features."""
+    features = {}
+    committed_zone_ids = set()
+    if document:
+        for step_id, step in document["steps"].items():
+            for f in step["features"].get("features") or []:
+                features[f["id"]] = f
+                if step_id == "water":
+                    committed_zone_ids.add(f["properties"].get("zone_id"))
     blocks = []
     for step in record["steps"]:
         block = {"step_id": step["step_id"], "title": step["title"], "empty": step["empty"]}
         if step["empty"]:
             block["statement"] = step["statement"]
         else:
-            block["cards"] = [_card(card) for card in step["cards"]]
+            empty = _empty_labels(step["cards"])
+            block["cards"] = [_card(_page_rows(card, empty, features.get(card.get("id")), committed_zone_ids))
+                              for card in step["cards"]]
             if step["step_id"] == "roads":
                 block["note"] = ["Access point ", {"value": step["access_point"]["text"]}, ", placed."]
             else:
@@ -496,7 +586,7 @@ def build_design_section(inputs: DesignInputs, tokens: dict) -> dict:
         "map": rendered,
         "imagery_line": build_imagery_line(inputs, rendered["underlay"]),
         "imagery_available": rendered["underlay"] is not None,
-        "record": build_record(record),
+        "record": build_record(record, inputs.document),
         "sources": build_sources(inputs, rendered["contours"]),
         "design_record": record,
     }
