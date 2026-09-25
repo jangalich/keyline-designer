@@ -111,6 +111,25 @@ TOKENS = {
     # here as it is there -- never a control, a rule or a tint on the
     # page. The frontend's value, unchanged.
     "field": "#4a5f3a",
+    # NEW ON BRANCH 16, carried over from the frontend palette for the
+    # layout map, which draws the interactive map's marks (design_section):
+    # --halo, the pure white a map mark's halo and the excavated screen
+    # are drawn in -- MAP-ONLY, as there; --tree, the tree zones' hatch;
+    # and the two survey blues, embankment's wash and excavated's dots.
+    # The frontend's values, unchanged.
+    "halo": "#ffffff",
+    "tree": "#52a466",
+    "survey-embankment": "#6da4c6",
+    "survey-excavated": "#3d5a6c",
+    # NEW ON BRANCH 16, and the report's own: the layout map's NHD streams.
+    # An existing feature rather than a design element, so in the palette's
+    # desaturated register, not a cartographic cyan; lighter than both
+    # survey blues so a stream is never read as a survey edge.
+    # hsl(205, 30%, 74%): judged rendered against the embankment tint
+    # (diagnose_layout_map_variants.py) over hsl(203, 28%, 70%), which sat on the
+    # embankment's own edge, and hsl(203, 22%, 76%), which greyed out
+    # over pasture.
+    "stream": "#a9c0d1",
 }
 
 # --- fonts -------------------------------------------------------------

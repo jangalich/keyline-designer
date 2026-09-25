@@ -21,7 +21,8 @@ the network is refused by offline_harness.
   2. NO COLOUR LITERAL OUTSIDE TOKENS: a hex-colour grep over the
      stylesheet template, every component and section template,
      site_report.py, the map renderer and the chart renderer hits only
-     inside site_report.TOKENS -- nine tokens, water and ochre new.
+     inside site_report.TOKENS -- fifteen tokens, the layout map's five the
+     newest.
   3. THE HTML: the climate section composes the components and nothing
      else, on two page blocks; every measured value is inside a
      data-face element; a hostile property label is escaped everywhere it
@@ -301,6 +302,9 @@ assert site_report.TOKENS == {
     "water": "#3f5d75", "ochre": "#c99a2e",
     # Branch 11: the frontend's map-geometry green, the Trees section's canopy screen.
     "field": "#4a5f3a",
+    # Branch 16: the layout map's marks -- four frontend values and the report's stream blue.
+    "halo": "#ffffff", "tree": "#52a466", "survey-embankment": "#6da4c6", "survey-excavated": "#3d5a6c",
+    "stream": "#a9c0d1",
 }
 # Ochre and field are the frontend's own values; water is new to the plate system.
 assert site_report.TOKENS["ochre"] == "#c99a2e" and site_report.TOKENS["field"] == "#4a5f3a"

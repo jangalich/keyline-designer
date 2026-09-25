@@ -47,6 +47,7 @@
   --text-table: 8.75pt;
   --text-body: 10.5pt;
   --text-heading: 20pt;
+  --text-part: 14pt;
   --text-figure: 21pt;
   --text-cover: 34pt;
 
@@ -390,6 +391,16 @@ th.num {
    do -- and its title stays with its first row. */
 .record-step {
   margin-bottom: 5pt;
+}
+/* THE RECORD'S HEADING IS A PART OF VIII, NOT A SECOND SECTION. Every other
+   section's continued page carries its eyebrow alone; the Design section
+   names its two parts, "The layout" and "The design record", and the
+   second set at the section heading's own 20 pt read as a new section
+   starting under a "continued" eyebrow. A part title: a step below the
+   section's heading, a step above the steps' own titles. */
+.section--design .section__detail > .heading {
+  font-size: var(--text-part);
+  margin-bottom: var(--space-2);
 }
 .record-step__title {
   font-family: var(--font-display);

@@ -384,8 +384,22 @@ _mentions = subprocess.run(
 ).stdout.split()
 _mentions = {name.removeprefix("./") for name in _mentions}
 _non_test = {name for name in _mentions if not name.startswith("test_")}
-assert _non_test == _producers, (
-    f"the display-only outline is mentioned outside its producers: {sorted(_non_test - _producers)}"
+# AND ONE RENDERER, which is what the property is FOR. Section VIII's layout
+# map (branch 16) draws a suggested block's outline exactly as the
+# interactive map does -- display, never computation. Asserted, like the
+# orchestrator's prose: the module's one code use hands the property to
+# _utm() for the production layer's geometries and to nothing else, so a
+# measurement that started reading it here would fail this line.
+_renderers = {"design_section.py"}
+_renderer_code = [
+    line.strip() for line in open("design_section.py").read().splitlines()
+    if "DISPLAY_ONLY_OUTLINE_PROPERTY" in line and not line.strip().startswith("from ")
+]
+assert _renderer_code == [
+    '[_utm(f["properties"].get(DISPLAY_ONLY_OUTLINE_PROPERTY) or f["geometry"], crs) for f in blocks],'
+], _renderer_code
+assert _non_test == _producers | _renderers, (
+    f"the display-only outline is mentioned outside its producers: {sorted(_non_test - _producers - _renderers)}"
 )
 
 # (b) MEASURED, WHICH IS THE ONE THAT MATTERS. A feature carrying the property
