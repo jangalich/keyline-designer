@@ -168,6 +168,19 @@ THE PHYSIOGRAPHIC PROVINCE AND THE LIVESTOCK PREDATOR LINE ARE BUNDLED
 (class E: physiography.py, livestock_predators.py) and, like severe
 weather, have no row in the table; the overview reads them directly.
 
+A DEGRADABLE LAYER RETRIES BEFORE IT DEGRADES, PER REQUEST. Every
+network-backed module this table calls runs each of its requests in the
+bounded, progressive-timeout loop fetch_attempts.py describes: at most
+three attempts, 30/60/90 s timeouts, a two-second pause between them, the
+attempts published. The three layers the report-generation audit measured
+as the slowest -- fema_nfhl (nfhl_data._get), nwi (nwi_data._get) and
+context_roads (farm_roads_data._query_road_layer) -- are held to it by
+test_report_layer_retry.py: a transient failure recovers and the layer is
+present; an exhausted budget degrades it; and an answer that is EMPTY (no
+mapped wetland) is a success, taken once and never retried. There is
+deliberately no second, layer-level retry around those loops: it would
+multiply the worst case for no failure the inner loop does not cover.
+
 RETRIEVED ON. ReportData.retrieved_on is the date this fetch ran -- the
 retrieval date of every report-layer source, which the back matter's
 vintage table prints as data. The Layer 1 sources' date is the Design
