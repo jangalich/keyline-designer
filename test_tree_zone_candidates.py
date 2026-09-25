@@ -513,7 +513,7 @@ print(
     f"render_fill_polygon_utm: a canopy pocket carved out of region 1's own interior leaves the real "
     f"footprint ({real_footprint.area}sqm) genuinely excluding it, and render_fill_polygon_utm is that same "
     f"footprint UNMODIFIED -- the pocket stays OPEN, whereas a convex hull would have closed over it. "
-    "Confirms the raw footprint, not a hull or opening, is what render_layout_map.py draws."
+    "Confirms the raw footprint, not a hull or opening, is what the layout map draws."
 )
 
 # The ordinary, un-notched case (region 2, a solid rectangle, no canopy gate): render_fill_

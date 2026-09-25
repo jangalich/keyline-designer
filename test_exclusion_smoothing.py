@@ -460,5 +460,5 @@ print(
     "\nAll exclusion smoothing measurements passed. CONCLUSION: the smoothing pass is net INWARD on "
     "exclusion geometry, not net outward as designed, and the switch was not made -- exclusion_zones.py "
     "still publishes the exact closed union. The relocated helpers in raster_grid.py are unaffected and "
-    "remain in use by render_layout_map.py."
+    "remain in use by display_outline.py."
 )

@@ -977,6 +977,6 @@ print(
     "\n11 [test 11]. REGRESSION: run the other test files separately -- test_step_registry.py, "
     "test_fencing.py, test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_trees_step.py, "
-    "test_structures_step.py, test_session_api.py, test_render_layout_map.py, test_pipeline_context.py."
+    "test_structures_step.py, test_session_api.py, test_design_section.py, test_pipeline_context.py."
 )
 print("\nAll fencing step checks passed.")

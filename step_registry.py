@@ -2337,8 +2337,8 @@ FENCING = StepDefinition(
             why=(
                 "The first developed part the boundary fence protects: each "
                 "committed zone's render fill, as the LIST the entry point "
-                "takes -- exactly what render_layout_map.fetch_layout_layers() "
-                "extracts from context.production_areas for this parameter. "
+                "takes -- exactly what the batch layout-layer fetch (retired) "
+                "extracted from context.production_areas for this parameter. "
                 "Forwarded as polygons rather than as production_areas= "
                 "because the entry point reads production_areas ONLY to feed "
                 "the three self-computes the committed edges below close; "
@@ -2410,8 +2410,8 @@ FENCING = StepDefinition(
                 "THE FOOTPRINT SHAPE of the same roads commit: the network's "
                 "undilated cell footprint, the developed part the boundary "
                 "fence actually protects. identify_fencing() does not derive "
-                "it from selected_road_corridor (render_layout_map extracts "
-                "it), so it is forwarded separately -- the second read of "
+                "it from selected_road_corridor (the retired batch layout map "
+                "extracted it), so it is forwarded separately -- the second read of "
                 "one commit, see the module docstring."
             ),
         ),

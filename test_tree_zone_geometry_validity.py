@@ -955,8 +955,7 @@ print(
     f"{sum(len(f['properties']) for f in TREES_PAYLOAD['tree_zones']['features']) // len(TREES_PAYLOAD['tree_zones']['features'])} "
     f"properties each, so the absence is about this key), while all "
     f"{len(_production_features)} production feature(s) still carry theirs -- and all "
-    f"{_byte_identical} of those are WKB-IDENTICAL to the expression render_layout_map.py "
-    f"evaluates for the PDF."
+    f"{_byte_identical} of those are WKB-IDENTICAL to the display-outline rule's own expression."
 )
 
 
@@ -965,7 +964,7 @@ print(
     "this file's fixture), test_tree_zone_candidates.py, test_display_outline.py, "
     "test_tree_zone_render_footprint.py, test_wire_translation.py, "
     "test_wire_translation_inbound.py, test_step_commit.py, test_step_orchestrator.py, "
-    "test_render_layout_map.py, test_production_fill_smoothing.py, test_fencing.py."
+    "test_design_section.py, test_production_fill_smoothing.py, test_fencing.py."
 )
 
 print("\nAll tree-zone geometry validity checks passed.")

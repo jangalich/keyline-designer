@@ -10,10 +10,10 @@ pipeline walk would have chosen for them.
 
 --- NO PRODUCTION CONSUMER NOW -------------------------------------------
 
-The narrated report (generate_full_report.py, generate_pdf_report.py,
-report_generator.py) and the matplotlib layout map (render_layout_map.py)
-this module fed were retired when the report job switched to the site data
-report (site_report.py), whose Design section reads the committed steps
+The narrated report, its PDF assembly and Claude call, and the matplotlib
+layout map this module fed were retired when the report job switched to
+the site data report (site_report.py), whose Design section reads the
+committed steps
 off the Design Document directly (design_record.py). What is still read
 from here is SessionWorkingDataExpiredError, which session_report.
 error_payload() maps. This module is kept, unchanged in behaviour, and is

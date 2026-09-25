@@ -18,8 +18,8 @@ data report's sections; data completeness is a precondition for a
 trustworthy design, not an optional enhancement -- a missing/broken layer
 means nothing downstream should run against incomplete data.
 
-TWO LAYERS LEFT WITH THE NARRATED REPORT. climate_summary (Open-Meteo, a
-ten-year daily archive) and imagery_summary (a Sentinel-2 scene search and
+TWO LAYERS LEFT WITH THE NARRATED REPORT. The climate summary (Open-Meteo,
+a ten-year daily archive) and imagery_summary (a Sentinel-2 scene search and
 two band reads) were hard-fail layers here read by nothing but the retired
 narrated report's prompt. Each could sink a session creation -- and, worse,
 a COLD REBUILD: a report on a session the cache had let go refetches Layer
