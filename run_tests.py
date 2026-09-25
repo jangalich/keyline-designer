@@ -92,6 +92,10 @@ FULL_ONLY = (
     "test_pipeline_context.py",
     "test_road_corridors_pipeline.py",
     "test_road_corridors.py",
+    # Branch 17: the overview test builds the reference session, derives the
+    # overview five times (four sources degraded alone) and the landscape
+    # position at two more radii. Measured at 24.9 s.
+    "test_overview_derivations.py",
 )
 
 TAIL_LINES = 40
