@@ -33,11 +33,35 @@
       the pipeline's UTM zone, to one decimal. -#}
   <p class="cover__acres"><span class="data">{{ cover.acres }}</span> acres</p>
 {%- endif %}
+{%- if cover.county %}
+  <p class="cover__county">{{ cover.county }}</p>
+{%- endif %}
   <p class="cover__meta">{{ cover.meta }}</p>
+{%- if cover.contents %}
+  {#- THE CONTENTS: the outline's eight sections and the back matter, each
+      page number resolved by WeasyPrint's target-counter() against the
+      anchor wrapped round the section below -- one pass, and the number
+      is the page the section's first block landed on. A section the
+      report does not carry is listed without a number. -#}
+  <ol class="contents">
+{%- for entry in cover.contents %}
+    <li class="contents__entry{% if not entry.anchor %} contents__entry--absent{% endif %}">
+      <span class="contents__number">{{ entry.number or "" }}</span>
+      {%- if entry.anchor %}<a class="contents__link" href="#{{ entry.anchor }}">{{ entry.name }}</a>
+      {%- else %}<span class="contents__name">{{ entry.name }}</span><span class="contents__note">not included</span>{% endif -%}
+    </li>
+{%- endfor %}
+  </ol>
+{%- endif %}
 </div>
 
 {% for section in sections -%}
+<div class="section-anchor" id="{{ section.anchor or ('section-' ~ loop.index) }}">
 {% include "sections/" ~ section.template %}
+</div>
 {% endfor %}
+{%- if back %}
+{% include "back_matter.html" %}
+{%- endif %}
 </body>
 </html>

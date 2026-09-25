@@ -960,3 +960,212 @@ th.num {
 .source-footer__line {
   margin: 0 0 1.5pt 0;
 }
+
+/* --- the cover's county and contents (branch 17) ------------------------ */
+
+.cover__county {
+  font-size: var(--text-body);
+  margin: 0 0 var(--space-2) 0;
+}
+/* THE CONTENTS fill the sparse cover: the outline's eight sections and
+   the back matter, a numeral, the name, and the page number resolved by
+   target-counter() in the data face, right-aligned on a dotted leader. */
+.contents {
+  list-style: none;
+  margin: var(--space-6) 0 0 0;
+  padding: var(--space-3) 0 0 0;
+  border-top: var(--hairline);
+  width: 4.2in;
+}
+.contents__entry {
+  display: flex;
+  align-items: baseline;
+  font-size: var(--text-body);
+  line-height: 1.9;
+}
+.contents__number {
+  font-family: var(--font-data);
+  font-size: var(--text-label);
+  font-weight: 500;
+  color: var(--ink-muted);
+  width: 0.45in;
+  flex: none;
+}
+.contents__link {
+  flex: 1;
+  color: var(--ink);
+  text-decoration: none;
+}
+.contents__link::after {
+  content: leader(dotted) target-counter(attr(href), page);
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+}
+.contents__entry--absent {
+  color: var(--ink-muted);
+}
+.contents__name {
+  flex: 1;
+}
+.contents__note {
+  font-size: var(--text-label);
+  font-style: italic;
+}
+
+/* --- I. Site overview (branch 17) ---------------------------------------- */
+
+/* ONE PAGE: summary, the context map, the key figures, the facts, the
+   boundary statement and the sources, spaced to the page. */
+.section--overview .summary {
+  margin-bottom: var(--space-3);
+  max-width: none;
+}
+.section--overview .report-map {
+  margin-bottom: var(--space-1);
+}
+.section--overview .caption {
+  margin-bottom: var(--space-2);
+  max-width: none;
+}
+/* THE MAP AND THE FIGURES SIDE BY SIDE. The context map is drawn
+   near-square (overview_section.CONTEXT_FRAME) so the ground it shows is
+   about a mile each way; the six figures stack in one column beside it. */
+.overview__top {
+  display: flex;
+  align-items: flex-start;
+  column-gap: var(--space-3);
+  margin-bottom: var(--space-1);
+}
+/* The frame's width, overview_section.CONTEXT_FRAME[0]: the legend
+   wraps inside it rather than widening the column past the measure. */
+.overview__map {
+  flex: none;
+  width: 318pt;
+}
+.overview__map .report-map__legend {
+  min-height: 0;
+}
+.overview__map .report-map__entry {
+  margin-right: var(--space-3);
+}
+.overview__map .report-map {
+  margin-bottom: 0;
+}
+.overview__figures {
+  flex: 1;
+}
+.section--overview .key-figures {
+  grid-template-columns: 1fr;
+  padding: var(--space-3) var(--space-3);
+  row-gap: var(--space-2);
+  margin-bottom: 0;
+}
+.section--overview .key-figure .figure,
+.section--overview .key-figure .figure-word {
+  font-size: 17pt;
+}
+.section--overview .data-table {
+  margin-bottom: var(--space-2);
+}
+.section--overview .data-table th,
+.section--overview .data-table td {
+  padding-top: 2pt;
+  padding-bottom: 2pt;
+}
+/* The facts table has no header of its own: a label and a sentence. */
+.data-table--facts thead {
+  display: none;
+}
+.data-table--facts th.label,
+.data-table--facts td.label {
+  width: 24%;
+  vertical-align: top;
+}
+/* THE BOUNDARY STATEMENT is not a caveat about a figure; it is a fact
+   about every figure on the page, set plainly in the page's ink. */
+.caption--boundary {
+  font-style: normal;
+  color: var(--ink);
+}
+.section--overview .source-footer {
+  padding-top: 0;
+}
+
+/* --- the back matter (branch 17) ----------------------------------------- */
+
+.back-matter {
+  break-before: page;
+}
+.back-matter__methods {
+  break-before: page;
+}
+/* THE VINTAGE TABLE: every source once. Five prose columns at the table
+   size, the source name widest, the terms next. */
+/* It may break across a page rather than push its heading onto a page
+   of its own (every other data table avoids breaking). */
+.data-table--vintage {
+  font-size: 7.5pt;
+  break-inside: auto;
+}
+.data-table--vintage th,
+.data-table--vintage td {
+  padding-top: 1pt;
+  padding-bottom: 1pt;
+  line-height: 1.2;
+}
+.data-table--vintage td.text {
+  line-height: 1.2;
+}
+.data-table--vintage tr {
+  break-inside: avoid;
+}
+.data-table--vintage {
+  table-layout: fixed;
+}
+.data-table--vintage th.label,
+.data-table--vintage td.label {
+  width: 20%;
+  white-space: normal;
+}
+.data-table--vintage th:nth-child(2),
+.data-table--vintage td:nth-child(2) {
+  width: 24%;
+}
+.data-table--vintage th:nth-child(3),
+.data-table--vintage td:nth-child(3) {
+  width: 12%;
+}
+/* The section numerals hold one line. */
+.data-table--vintage th:nth-child(4),
+.data-table--vintage td:nth-child(4) {
+  width: 10%;
+  white-space: nowrap;
+}
+/* THE METHODS NOTE: two columns of small prose, a section's name above
+   its entries, each entry led by its source. */
+.methods {
+  column-count: 2;
+  column-gap: var(--space-4);
+  font-size: 7.25pt;
+  line-height: 1.32;
+}
+.methods__group {
+  margin-bottom: var(--space-2);
+}
+.methods__section {
+  font-family: var(--font-data);
+  font-size: var(--text-eyebrow);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 var(--space-1) 0;
+  break-after: avoid;
+}
+.methods__entry {
+  margin: 0 0 var(--space-1) 0;
+  text-align: left;
+}
+.methods__source {
+  font-weight: 600;
+}

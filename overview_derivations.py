@@ -233,6 +233,7 @@ def derive_landscape(context_dem: dict, polygon) -> Optional[dict]:
         "median_slope_deg": median_slope_deg,
         "percentile_low": percentile(float(parcel.min())),
         "percentile_high": percentile(float(parcel.max())),
+        "percentile_mean": percentile(float(parcel.mean())),
         "window_min_ft": window_min / METERS_PER_FOOT,
         "window_max_ft": window_max / METERS_PER_FOOT,
         "window_relief_ft": (window_max - window_min) / METERS_PER_FOOT,

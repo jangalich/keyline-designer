@@ -1,0 +1,40 @@
+{#- THE SITE OVERVIEW -- ONE PAGE. The eyebrow and heading, the summary
+    line (the drainage fact first, then where the parcel sits), the
+    context map -- a line map of about a mile around the parcel, unlike
+    every other map in the report -- with its legend, the key figures
+    beside it, the caption that says it is not the parcel's terrain, the facts (the
+    location, the province, transmission, broadband, livestock
+    predators), the boundary statement and the sources. No styling here,
+    no numbers here: `section` is overview_section.build_overview_section()'s
+    dict, every value already formatted. A report-layer source that did
+    not answer leaves its statement. -#}
+{% import "components/eyebrow.html" as c1 %}
+{% import "components/heading.html" as c2 %}
+{% import "components/summary.html" as c3 %}
+{% import "components/key_figures.html" as c4 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/source_footer.html" as c6 %}
+{% import "components/map.html" as c7 %}
+{% import "components/caption.html" as c9 %}
+<section class="section section--overview">
+  {{ c1.eyebrow(section.number, section.name) }}
+  {{ c2.heading(section.heading) }}
+  {{ c3.summary(section.summary) }}
+  {#- The map and the figures side by side: the map near-square, so it
+      shows as much ground north and south as east and west. -#}
+  <div class="overview__top">
+{%- if section.map %}
+    <div class="overview__map">{{ c7.map(section.map) }}</div>
+{%- endif %}
+    <div class="overview__figures">{{ c4.key_figures(section.key_figures) }}</div>
+  </div>
+{%- if section.map %}
+  {{ c9.caption(section.map_caption) }}
+{%- endif %}
+{%- for statement in section.unavailable %}
+  {{ c9.unavailable(statement) }}
+{%- endfor %}
+  {{ c5.data_table(section.facts) }}
+  {{ c9.caption(section.boundary_statement, variant="boundary") }}
+  {{ c6.source_footer({"lines": section.sources}) }}
+</section>

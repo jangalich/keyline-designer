@@ -58,7 +58,12 @@
 {%- endif -%}</td>
 {%- for value in row.cells %}
 {%- if value is mapping and value.kind == "text" %}
-      <td class="text">{{ value.value }}{{ cell_note(value.note) }}</td>
+      <td class="text">
+{%- if value.value is string -%}{{ value.value }}{%- else -%}
+{%- for part in value.value -%}
+{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- endfor -%}
+{%- endif -%}{{ cell_note(value.note) }}</td>
 {%- elif value is mapping %}
       <td class="num{% if value.kind %} num--{{ value.kind }}{% endif %}">{{ value.value }}{{ cell_note(value.note) }}</td>
 {%- else %}

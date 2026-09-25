@@ -194,5 +194,35 @@ for key, (layer, gone) in DEGRADABLE.items():
     assert result.acres == D.acres and result.elevation == D.elevation
 print(f"   {len(DEGRADABLE)} sources, each down alone: only its own figures go")
 
+# ======================================================================
+print("11. the page's words: the summary leads with the drainage, the wildlife line is two sentences")
+import overview_section as osn  # noqa: E402
+
+SECTION = osn.build_overview_section(INPUTS, site_report.TOKENS, D)
+summary = "".join(p if isinstance(p, str) else p["value"] for p in SECTION["summary"])
+assert summary.startswith("15.9 acres of higher ground drain onto this 13.2-acre parcel, more than its own area."), summary
+assert "lower-middle of the surrounding terrain" in summary and "mid slope" in summary
+wildlife = osn.wildlife_parts(D.wildlife)[0]
+assert wildlife.count(". ") == 1 and wildlife.endswith("by deer or birds."), wildlife
+assert wildlife.startswith("Coyotes account for the large majority of livestock predator losses in Pennsylvania, with bears, "
+                           "foxes, dogs, vultures and predatory birds also reported.")
+assert "%" not in wildlife, "the finding, not the table"
+rows = {row["label"]: "".join(p if isinstance(p, str) else p["value"] for p in row["cells"][0]["value"])
+        for row in SECTION["facts"]["rows"]}
+assert rows["Transmission"].startswith("3.1 mi to the nearest mapped line, voltage not recorded; the nearest of known voltage "
+                                       "is 138 kV at 3.3 mi."), rows["Transmission"]
+assert [f["label"] for f in SECTION["key_figures"]].count("to the nearest transmission line") == 1
+assert osn.relief_position(9) == "low in" and osn.relief_position(32) == "in the lower-middle of"
+# Degraded: no context DEM, no map -- a statement in its place; no geocoder, no county in the summary.
+bare = od.derive(od.OverviewInputs(**dict(vars(INPUTS), context_dem=None, county_state=None,
+                                          unavailable={"context_dem": {"label": "surrounding elevation"},
+                                                       "county_state": {"label": "county and state"}})))
+BARE = osn.build_overview_section(od.OverviewInputs(**dict(vars(INPUTS), context_dem=None, county_state=None)),
+                                  site_report.TOKENS, bare)
+assert BARE["map"] is None and len(BARE["unavailable"]) == 2
+assert "Allegheny" not in "".join(p if isinstance(p, str) else p["value"] for p in BARE["summary"])
+assert [f["value"] for f in BARE["key_figures"]][3] == "not assessed"
+print(f"   \"{summary[:72]}...\"; wildlife in two sentences; one transmission row; degraded: no map, two statements")
+
 print("\ntest_overview_derivations.py: all sections passed")
 print(offline_harness.summary())
