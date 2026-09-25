@@ -1,11 +1,13 @@
 """
 test_fence_display_geometry.py
 
-THE DISPLAY-ONLY FENCE LINE: the two passes render_layout_map.py has always
-run over a fence ring before drawing it -- an angular simplify of every ring
-and a SYMMETRIC coincidence trim of the zone rings -- moved into one module,
-fence_display_geometry.py, and shipped on the wire from that same function
-object, so the interactive map and the PDF draw one line. Run as:
+THE DISPLAY-ONLY FENCE LINE: the two passes the matplotlib layout map ran
+over a fence ring before drawing it -- an angular simplify of every ring and
+a SYMMETRIC coincidence trim of the zone rings -- moved into one module,
+fence_display_geometry.py, and shipped on the wire from that function, so
+the interactive map and the PDF draw one line. The PDF's layout map is now
+the site data report's (design_section.py), which draws the shipped
+property; the matplotlib renderer was retired with the narrated report. Run as:
 
     python test_fence_display_geometry.py
 
@@ -20,13 +22,11 @@ released only if it fails.
 Sections (the branch's numbered tests in brackets):
   1  [1]  WHO CARRIES IT: every fence feature carries the field; no
           production, water, road, tree or structure feature does.
-  2  [2]  ONE IMPLEMENTATION: render_layout_map.fence_display_lines IS
-          fence_display_geometry.fence_display_lines, the wire calls the same
-          object, and the renderer holds no simplify, no union and no trim of
-          its own.
-  3  [3]  BYTE-IDENTICAL: the layout map's PNG, and every geometry it hands
-          its fence-drawing helper, are identical to the inline code the
-          shared function replaced -- asserted against a LITERAL
+  2  [2]  ONE IMPLEMENTATION: the wire calls fence_display_geometry's own
+          object, and the printed layout map (design_section.py) holds no
+          simplify, no union and no trim of its own.
+  3  [3]  BYTE-IDENTICAL: the shared function's geometries are WKB-identical
+          to the inline code it replaced -- asserted against a LITERAL
           TRANSCRIPTION of that code, not a second call to the code under
           test. And the wire's lines are that transcription's output too.
   4  [4]  THE TRIM IS SYMMETRIC: where two zone rings run close BOTH lose the
@@ -40,14 +40,11 @@ Sections (the branch's numbered tests in brackets):
   7  [7]  Regression is the other test files, run separately.
 """
 
-import hashlib
 import io
-import os
 import re
 import sys
-import tempfile
 import time
-from contextlib import ExitStack, redirect_stdout
+from contextlib import redirect_stdout
 from unittest.mock import patch as mock_patch
 
 # OFFLINE BY CONSTRUCTION: every outbound request is refused instantly and
@@ -66,14 +63,12 @@ except BaseException:
     sys.stdout.write(_captured.getvalue())
     raise
 
-import numpy as np
 from rasterio.warp import transform_geom
 from shapely.geometry import LineString, MultiLineString, Polygon, mapping, shape
 from shapely.ops import unary_union
 
 import fence_display_geometry
 import fencing
-import render_layout_map as rlm
 import step_orchestrator
 import wire_translation
 from fence_display_geometry import (
@@ -162,9 +157,8 @@ print(
 
 # --- 2 [test 2]. ONE IMPLEMENTATION -------------------------------------
 
-# (a) THE SAME FUNCTION OBJECT, on both callers. Not two functions that agree
+# (a) THE SAME FUNCTION OBJECT on the wire. Not two functions that agree
 #     today.
-assert rlm.fence_display_lines is fence_display_geometry.fence_display_lines
 assert wire_translation.display_only_fence_lines_wgs84 is fence_display_geometry.display_only_fence_lines_wgs84
 # AND THE WIRE WRAPPER CALLS THAT SAME OBJECT: patch it, run the wire path,
 # and the patch is what ran.
@@ -182,10 +176,10 @@ with mock_patch.object(fence_display_geometry, "fence_display_lines", _recording
 assert len(_calls) == 1, "the wire runs both passes ONCE for the whole collection (the trim is mutual)"
 assert _calls[0] == (BLOCKS["boundary"]["feature_count"], len(FENCE_FEATURES) - BLOCKS["boundary"]["feature_count"])
 
-# (b) THE RENDERER HOLDS NO PASS OF ITS OWN. A source read rather than an
-#     import check: an import it does not use would pass (a) while a second
-#     inline simplify or trim sat below it.
-_renderer_source = open("render_layout_map.py").read()
+# (b) THE PRINTED MAP HOLDS NO PASS OF ITS OWN. A source read: the site data
+#     report's layout map draws the shipped display line, and a second inline
+#     simplify or trim there would be a second answer.
+_renderer_source = open("design_section.py").read()
 _code_lines = [line for line in _renderer_source.splitlines() if not line.lstrip().startswith("#")]
 for forbidden in ("angular_simplify_closed_ring(", "unary_union(", ".buffer(ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M"):
     hits = [line for line in _code_lines if forbidden in line and not line.lstrip().startswith(('"""', "*", "("))]
@@ -195,25 +189,24 @@ for forbidden in ("angular_simplify_closed_ring(", "unary_union(", ".buffer(ZONE
     # argument rather than a closing paren or a dash.
     hits = [line for line in hits if not re.search(re.escape(forbidden) + r"\)", line)]
     assert not hits, (forbidden, hits)
-# AND THE TWO TOLERANCES ARE ONE NUMBER EACH: the renderer's names are the
-# module's values, re-exported, not a second declaration.
-assert rlm.FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M == FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M == 6.0
-assert rlm.ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == 8.0
+# AND THE TWO TOLERANCES ARE ONE NUMBER EACH: the module's, never a second
+# declaration in the printed map.
+assert FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M == 6.0
+assert ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M == 8.0
 assert not re.search(r"^FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M\s*=", _renderer_source, re.M)
 assert not re.search(r"^ZONE_FENCE_BOUNDARY_COINCIDENCE_TOLERANCE_M\s*=", _renderer_source, re.M)
 
 print(
-    "2 [test 2]. ONE IMPLEMENTATION: render_layout_map.fence_display_lines IS "
-    "fence_display_geometry.fence_display_lines; wire_translation.display_only_fence_lines_wgs84 is the "
+    "2 [test 2]. ONE IMPLEMENTATION: wire_translation.display_only_fence_lines_wgs84 is the "
     f"module's own and ran the shared function exactly once over ({_calls[0][0]} boundary + {_calls[0][1]} zone) "
-    "rings; render_layout_map.py holds no simplify(), union or buffer-trim call of its own and declares "
-    "neither tolerance (6.0 / 8.0 Mercator units are read from the module)."
+    "rings; design_section.py (the printed layout map) holds no simplify(), union or buffer-trim call of "
+    "its own and declares neither tolerance (6.0 / 8.0 Mercator units are the module's)."
 )
 
 
 # --- 3 [test 3]. BYTE-IDENTICAL ----------------------------------------
 #
-# A LITERAL TRANSCRIPTION of the inline code render_layout_map.py evaluated
+# A LITERAL TRANSCRIPTION of the inline code the matplotlib layout map evaluated
 # before the shared function existed -- its two passes, written out here
 # rather than called, so this section is an independent statement of what
 # the PDF drew rather than a second call to the code under test:
@@ -275,10 +268,9 @@ def _transcription(
     return boundary_fence_render_rings, trimmed
 
 
-# THE FIXTURE: test_render_layout_map.py's own trim fixture, a 600 m square
-# parcel with a boundary ring, a water ring, two adjacent tree rings, a lone
-# tree ring and one beside the boundary -- every pairing the trim has a case
-# for. Rendered through the real render_layout_map(), twice.
+# THE FIXTURE: the retired renderer's own trim fixture, a 600 m square parcel
+# with a boundary ring, a water ring, two adjacent tree rings, a lone tree ring
+# and one beside the boundary -- every pairing the trim has a case for.
 _CRS = "EPSG:32617"
 _OX, _OY, _SIZE = 500000.0, 4500000.0, 600.0
 
@@ -305,44 +297,21 @@ _fixture_geojson = {
         + tree_zone_fencing_to_geojson([_wgs(_tree1_utm), _wgs(_tree2_utm), _wgs(_tree3_utm), _wgs(_tree4_utm)])["features"]
     ),
 }
-_fixture_layers = {
-    "dem": {"array": np.zeros((10, 10), dtype=np.float32), "resolution_meters": (5.0, 5.0),
-            "origin_x": _OX, "origin_y": _OY, "crs": _CRS},
-    "production_areas": [], "water_zone": None, "road_corridor": [], "tree_zone_result": None,
-    "structure_site": None, "water_features": {"streams": []}, "contour_lines": [],
-    "fencing_result": {"fencing_geojson": _fixture_geojson, "segment_count": 1},
-}
-
-
-def _render(display_function=None):
-    """One full render; returns (png bytes, [(wkb, zorder) handed to the fence helper])."""
-    drawn = []
-    real_draw = rlm._draw_boundary_fence
-
-    def recording_draw(ax, ring, zorder=rlm.FENCE_ZORDER):
-        drawn.append((ring.wkb, zorder))
-        return real_draw(ax, ring, zorder=zorder)
-
-    with ExitStack() as stack:
-        stack.enter_context(mock_patch.object(rlm, "_draw_boundary_fence", recording_draw))
-        if display_function is not None:
-            stack.enter_context(mock_patch.object(rlm, "fence_display_lines", display_function))
-        tmpdir = stack.enter_context(tempfile.TemporaryDirectory())
-        path = os.path.join(tmpdir, "layout_map.png")
-        rlm.render_layout_map(_fixture_coordinates, path, layers=_fixture_layers)
-        png = open(path, "rb").read()
-    return png, drawn
-
-
-_png_shared, _drawn_shared = _render()
-_png_inline, _drawn_inline = _render(display_function=_transcription)
-assert _png_shared == _png_inline, "the layout map PNG differs from the inline code's"
-assert _drawn_shared == _drawn_inline and len(_drawn_shared) >= 6, "a drawn fence geometry differs (WKB)"
-# DETERMINISM IS WHAT MAKES THE ABOVE A MEASUREMENT: rendering twice with the
-# same function yields the same bytes, so equal bytes above means equal
-# input geometry rather than a lucky raster.
-_png_again, _ = _render()
-assert _png_again == _png_shared
+# THE SHARED FUNCTION AGAINST THE TRANSCRIPTION, on the fixture's rings in the
+# display CRS: every geometry WKB-identical. (This compared the two renderer
+# PNGs byte for byte until that renderer was retired; the geometries are what
+# the PNG was drawn from, so the claim is the same one, taken one step
+# earlier.)
+_fx_boundary = [_to_display(f["geometry"]) for f in _fixture_geojson["features"]
+                if f["properties"]["fence_type"] == "boundary"]
+_fx_zones = [_to_display(f["geometry"]) for f in _fixture_geojson["features"]
+             if f["properties"]["fence_type"] in ZONE_TYPES]
+_shared_boundary, _shared_zones = fence_display_geometry.fence_display_lines(_fx_boundary, _fx_zones)
+_lit_boundary, _lit_zones = _transcription(_fx_boundary, _fx_zones)
+assert len(_shared_boundary) + len(_shared_zones) >= 6
+assert [g.wkb for g in _shared_boundary] == [g.wkb for g in _lit_boundary], "a boundary display line differs (WKB)"
+assert [g.wkb for g in _shared_zones] == [g.wkb for g in _lit_zones], "a zone display line differs (WKB)"
+_fixture_geometry_count = len(_shared_boundary) + len(_shared_zones)
 
 # AND THE WIRE CARRIES THE TRANSCRIPTION'S OUTPUT, on the REAL parcel: each
 # feature's display line is the transcription evaluated on the reprojected
@@ -368,10 +337,8 @@ for feature, expected in zip(_real_boundary + _real_zones, _exp_boundary + _exp_
     _wire_identical += 1
 
 print(
-    f"3 [test 3]. BYTE-IDENTICAL: the layout map PNG ({len(_png_shared)} bytes, sha256 "
-    f"{hashlib.sha256(_png_shared).hexdigest()[:16]}...) rendered through the shared function is byte-for-byte "
-    f"the PNG rendered through a literal transcription of the inline code it replaced, and all "
-    f"{len(_drawn_shared)} fence geometries handed to the drawing helper are WKB-identical; on the real parcel, "
+    f"3 [test 3]. BYTE-IDENTICAL: all {_fixture_geometry_count} fixture display lines from the shared "
+    f"function are WKB-identical to a literal transcription of the inline code it replaced; on the real parcel, "
     f"{_wire_identical} of {len(FENCE_FEATURES)} wire display lines equal that transcription's output "
     f"(reprojected to WGS84 and rounded, nothing else) and the rest are None where the transcription was empty."
 )
@@ -561,7 +528,7 @@ print(
 
 print(
     "7 [test 7]. Regression is the other test files, run separately: test_fencing_step.py (the tests "
-    "over this file's fixture), test_render_layout_map.py, test_display_outline.py, test_fencing.py, "
+    "over this file's fixture), test_design_section.py, test_display_outline.py, test_fencing.py, "
     "test_wire_translation.py, test_step_commit.py."
 )
 print("\nAll fence display geometry checks passed.")

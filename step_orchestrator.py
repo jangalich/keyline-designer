@@ -2000,9 +2000,9 @@ def build_trees_payload(result: dict, assembled: dict) -> dict:
     `display_only_smoothed_outline`, on the argument that a tree zone is a
     union of 5 m DEM cells and its staircase should be smoothed the way
     production's is. That argument does not survive contact with what the
-    layout map actually draws: render_layout_map.py smooths the PRODUCTION
-    FILL, because that geometry is what its contour lines are clipped against
-    and a 5 m staircase shows in the clip; it draws the TREE hatch from the
+    layout map actually drew: the retired layout map smoothed the PRODUCTION
+    FILL, because that geometry was what its contour lines were clipped against
+    and a 5 m staircase shows in the clip; it drew the TREE hatch from the
     cell-union footprint verbatim -- "no hull, no opening, no smoothing of any
     kind" -- so a smoothed outline on a tree feature made the interactive map
     disagree with the printed one rather than agree with it.

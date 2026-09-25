@@ -82,7 +82,7 @@ tree zones (a later, separate pass), not the reverse.
             confirmed-live, deliberately negligible effect on the
             resulting search-space AREA -- confirmed live AGAIN the other
             way once real tree-zone candidates started rendering directly
-            alongside the road corridor on render_layout_map.py's own
+            alongside the road corridor on the retired layout map's own
             output: candidates were being proposed right along, and
             effectively ON, the road itself, since a zero-area
             subtraction leaves those cells fully available to Step 2's
@@ -104,11 +104,11 @@ tree zones (a later, separate pass), not the reverse.
             blocky, notched raw cell-union footprint. A real interior
             pocket (excluded steep/hydric cells) or waist-split pinch in
             polygon_utm would otherwise read as "still open" ground here,
-            when the property's actual final layout (what render_layout_
-            map.py draws, what a reader actually sees) shows it as part of
+            when the property's actual final layout (what the layout map
+            drew, what a reader actually sees) shows it as part of
             one coherent production zone. This is the SAME reasoning
-            render_layout_map.py's own module docstring documents for why
-            it draws this field, not polygon_utm, for production zones --
+            the retired layout map's module docstring documented for why
+            it drew this field, not polygon_utm, for production zones --
             reused here for the same "reads as one coherent shape"
             purpose, not just for rendering. BUFFERED by TREE_ZONE_
             PRODUCTION_BUFFER_METERS (a plain shapely.buffer() around the
@@ -138,7 +138,7 @@ tree zones (a later, separate pass), not the reverse.
             utm' field directly (that field is the network's real but
             UNBUFFERED footprint -- this module needs its own buffered
             variant, see identify_tree_zone_candidates()'s own inline
-            comment), and NOT render_layout_map.py's own render-smoothed
+            comment), and NOT the retired layout map's render-smoothed
             line (that smoothing is a purely cosmetic transform for how
             the road SYMBOL looks on the final map; it has nothing to do
             with what ground the network actually occupies). At least one
@@ -235,7 +235,7 @@ what a measured factor implies, a function is what a person decides to
 plant. Each benefit is gated on its factor's own data availability, so a
 factor sitting at _NEUTRAL_FACTOR_VALUE because its fetch never ran earns
 nothing. See MARGINAL_BENEFIT_FACTOR_SOURCES and marginal_benefits(). It also
-does NOT wire into generate_full_report.py/report_generator.py's prompt in
+does NOT wire into the retired narrated report's prompt in
 this pass -- same "validate the layer on its own first" framing every other
 zone-type layer in this pipeline used before being narrated.
 
@@ -1471,7 +1471,7 @@ def score_tree_search_space(
                 # fills, which DO open/hull their geometry -- a thin arm is unworkable as a
                 # cultivation block or a pond but a genuinely useful tree feature. Carried as a
                 # separate field only for interface parity with those layers; also consumed by
-                # fencing.py (via render_layout_map.py's fetch_layout_layers() ->
+                # fencing.py (once via the retired layout map's fetch_layout_layers() ->
                 # identify_fencing() call) to build the tree_zone_exclusion fence loops.
             'geometry_wgs84': GeoJSON geometry dict,
             'area_acres': float,
@@ -1777,7 +1777,7 @@ def score_tree_search_space(
         # (hence production/water open theirs) but is a genuinely useful tree
         # feature. render_fill_polygon_utm therefore equals polygon_utm here;
         # it stays a separate field for interface parity with those layers and
-        # because fencing.py consumes it (via render_layout_map.py's
+        # because fencing.py consumes it (once via the retired layout map's
         # identify_fencing() call) for the tree_zone_exclusion fence loops.
         render_fill_polygon_utm = footprint
         patches.append(
@@ -2490,8 +2490,8 @@ def identify_tree_zone_candidates(
     # identify_road_corridor_candidates() needs a real anchor_lon_lat to
     # generate any routes at all (see road_corridors.py's own module
     # docstring) -- passed through from this function's own anchor_lon_lat
-    # parameter (the real, user-picked access point, threaded down from
-    # generate_full_report.py). None here degrades the same clean way
+    # parameter (the real, user-picked access point, threaded down by
+    # the caller). None here degrades the same clean way
     # identify_road_corridor_candidates() itself already handles a missing
     # anchor: no road routes, not an error.
     #
@@ -2536,7 +2536,7 @@ def identify_tree_zone_candidates(
     # purpose thing other callers may want unbuffered); this module needs
     # its own +TREE_ZONE_ROAD_BUFFER_CELLS variant specifically so
     # tree-zone candidates get a genuine, corner-clear gap from the road,
-    # not just edge-adjacency. Also NOT render_layout_map.py's own
+    # not just edge-adjacency. Also NOT the retired layout map's own
     # render-smoothed line -- that smoothing is a purely cosmetic
     # transform for how the road SYMBOL looks on the final map, unrelated
     # to what ground this route actually occupies.
@@ -3028,15 +3028,14 @@ if __name__ == "__main__":
 
     # Manual-testing-only reference anchor -- imported here, not at module
     # level, so this stays a __main__-only test fixture rather than a
-    # production dependency (see render_layout_map.py's own module
-    # docstring for this constant).
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    # production dependency (see reference_fixture.REFERENCE_ANCHOR_LON_LAT).
+    from reference_fixture import REFERENCE_ANCHOR_LON_LAT
 
     print("Identifying tree zone candidates for property boundary...\n")
 
     try:
         result = identify_tree_zone_candidates(
-            property_boundary, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+            property_boundary, anchor_lon_lat=REFERENCE_ANCHOR_LON_LAT
         )
         print(summarize_tree_zone_candidates(result))
     except Exception as e:

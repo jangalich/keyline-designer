@@ -67,7 +67,6 @@ from shapely import contains_xy
 from shapely.geometry import box
 
 import diagnose_water_survey_areas as diag
-import report_generator
 import water_survey_areas as wsa
 from water_survey_areas import (
     EMBANKMENT_SEED_MIN_SCORE,
@@ -446,7 +445,7 @@ assert "twi_is_parcel_relative" not in _narrative, "the retired flag does not ri
 
 # NO USER-FACING STRING MAY CLAIM PARCEL-RELATIVE TWI. Checked over
 # everything a reader can actually see: the narrative block (note, panel
-# rows and their labels, scales) and the report prose built from it.
+# rows and their labels, scales).
 _FORBIDDEN = ("parcel-relative", "PARCEL-RELATIVE", "THIS parcel", "wettest on this parcel", "percentile rank")
 
 
@@ -487,22 +486,10 @@ assert _curve_block["window_twi_percentiles"]["p25"] == _curve_block["floor_brea
 )
 assert _curve_block["window_twi_percentiles"]["p90"] == _curve_block["full_credit_breakpoint"]
 
-# THE REPORT PROSE, the other place a reader meets this claim: it is
-# built from the narrative block above and must carry the caveat that is
-# now true and none of the one that is not.
-_prose = report_generator._format_water_survey_areas_summary(_narrative)
-for _claim in _FORBIDDEN:
-    assert _claim not in _prose, f"the report prose still claims parcel-relative TWI: {_claim!r}"
-assert "WINDOW-REFERENCED" in _prose and "ELEVATION TILE" in _prose, (
-    "and the prose does carry what the curve is referenced to, which is what makes a score readable"
-)
-assert "FIXED ABSOLUTE curve" not in _prose, (
-    "the retired fixed-curve claim must leave the prose the same way the parcel-relative one did"
-)
 print(
     "2. Retirement: parcel_relative_percentile() is AST-absent from water_survey_areas (call site "
     "swapped to twi_score), the note constant and the twi_is_parcel_relative flag are gone, and no "
-    "user-facing string in narrative_data OR in the report prose claims parcel-relative TWI."
+    "user-facing string in narrative_data claims parcel-relative TWI."
 )
 
 

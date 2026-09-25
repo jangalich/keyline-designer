@@ -2,9 +2,9 @@
 test_production_fill_smoothing.py
 
 Offline (no-network) verification for the DISPLAY-TIME smoothing of the
-production zone fill used as the contour clip mask -- the
-display_outline.smoothed_display_outline() call render_layout_map.py makes,
-over raster_grid.angular_smooth_polygon(), which is where the four ring
+production zone fill -- display_outline.smoothed_display_outline(), the
+outline the production payload ships and both maps draw, over
+raster_grid.angular_smooth_polygon(), which is where the four ring
 smoothers and this polygon-level wrapper now live (they were private to the
 renderer until exclusion_zones.py needed them too). This is still a Layer-3
 display transform at the CALL SITE: it
@@ -13,23 +13,9 @@ curve so contour lines terminate along a field edge rather than a frayed comb.
 The STORED render_fill_polygon_utm the four consumer modules read is never
 touched.
 
-test_render_layout_map.py itself cannot run here because contextily is not
-installed (a pre-existing, unrelated environment gap). render_layout_map.py
-imports contextily at module load but uses it only inside the plotting call, so
-these tests stub it if absent and exercise the smoothing helper directly. All
-fixtures are synthetic; nothing touches the network.
+These tests exercise the smoothing helper directly. All fixtures are
+synthetic; nothing touches the network.
 """
-
-import sys
-import types
-
-# Make the import portable whether or not contextily is installed: the smoothing
-# helper does not use it, so a stub is sufficient to import render_layout_map.
-if "contextily" not in sys.modules:
-    try:
-        import contextily  # noqa: F401
-    except ImportError:
-        sys.modules["contextily"] = types.ModuleType("contextily")
 
 import numpy as np
 from shapely.geometry import MultiPolygon, Polygon, box
@@ -39,9 +25,9 @@ from production_area import cluster_and_gate, compute_step1_eligible_cells
 from production_suitability import score_production_areas
 import raster_grid
 from raster_grid import angular_smooth_polygon
-# THE SPEC MOVED OUT OF THE RENDERER, and the values did not. It was
-# render_layout_map.PRODUCTION_FILL_{SIMPLIFY_TOLERANCE_CELLS,CHAIKIN_ITERATIONS}
-# while the PDF's contour clip was the only consumer; the interactive map now
+# THE SPEC MOVED OUT OF THE RENDERER, and the values did not. It was the
+# matplotlib layout map's PRODUCTION_FILL_{SIMPLIFY_TOLERANCE_CELLS,
+# CHAIKIN_ITERATIONS} while the PDF's contour clip was the only consumer; the interactive map now
 # draws the same smoothed outline for production and tree zones, so the
 # tolerance, the iteration count and the call itself live in display_outline.py
 # -- one implementation for both maps. This file still asserts what the CALL
@@ -197,7 +183,7 @@ print("T5 fallback: a collapsing degenerate sliver and a forced ring-smoother ex
 _patch = _gate(_rect(2, 22, 2, 22), (30, 30))[0]
 _stored_before = _patch["render_fill_polygon_utm"]
 _wkt_before = _stored_before.wkt
-# Run the smoothing exactly as render_layout_map does (result goes to a local).
+# Run the smoothing exactly as the display outline does (result goes to a local).
 _ = angular_smooth_polygon(_stored_before, _TOL, _ITERS).intersection(_patch["polygon_utm"])
 assert _patch["render_fill_polygon_utm"] is _stored_before, (
     "smoothing must not replace the patch dict's render_fill_polygon_utm object"

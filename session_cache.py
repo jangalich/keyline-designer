@@ -141,7 +141,7 @@ import valley_delineation
 #     hold: the cap on how WRONG a hit can be.
 #
 #   * It is also the precision the real inputs already carry. The drawn
-#     boundary in generate_full_report.py is given to 7 decimals, which
+#     boundary in the retired narrated report was given to 7 decimals, which
 #     is what a browser map hands back. Rounding there is lossless for
 #     genuine input while still collapsing the sub-centimetre noise this
 #     normalization exists for: float64 arithmetic, a WGS84 -> UTM ->
@@ -476,14 +476,27 @@ def run_terrain_warm_up(boundary_coordinates: list, parcel: object) -> dict:
     dem = parcel.dem
     boundary_polygon_utm = parcel.boundary_polygon_utm
 
-    valleys = valley_delineation.delineate_valleys(dem)
+    # ONE FLOW PASS, forwarded to both consumers below (valley_delineation.
+    # flow_pass()'s docstring). Forwarding valleys= alone left
+    # detect_keypoints() refilling the DEM for the arrays the valleys were
+    # traced on -- a second fill and flow pass per warm-up.
+    flow = valley_delineation.flow_pass(dem)
+    filled, flow_to_row, flow_to_col, flow_accumulation = flow
+    valleys = valley_delineation.delineate_valleys(dem, flow=flow)
 
-    # valleys= is forwarded so delineate_valleys() is NOT run a second
-    # time inside detect_keypoints() -- it self-computes valleys when the
-    # override is absent. dem/boundary_polygon_utm come straight off
-    # ParcelData, which already derived the UTM polygon.
+    # valleys= AND the four flow arrays are forwarded so neither
+    # delineate_valleys() nor the fill and flow pass runs a second time
+    # inside detect_keypoints() -- it self-computes each when its override
+    # is absent. dem/boundary_polygon_utm come straight off ParcelData,
+    # which already derived the UTM polygon.
     keypoints = keypoint_detection.detect_keypoints(
-        dem, boundary_polygon_utm, valleys=valleys
+        dem,
+        boundary_polygon_utm,
+        filled=filled,
+        flow_to_row=flow_to_row,
+        flow_to_col=flow_to_col,
+        flow_accumulation=flow_accumulation,
+        valleys=valleys,
     )
 
     # farm_roads= is ParcelData's own already-fetched road rows, so this

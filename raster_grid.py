@@ -767,13 +767,13 @@ def connected_components(mask: np.ndarray, connectivity: int = 8) -> tuple[np.nd
 # RING SMOOTHING -- angular simplify + Chaikin corner-cutting
 #
 # These four ring-level helpers and the polygon-level wrapper below lived in
-# render_layout_map.py until this branch, where they were private to the
+# the matplotlib layout map (now retired) until this branch, private to the
 # renderer. They are not renderer-specific: they are the same kind of
 # dependency-free geometry building block as binary_erode()/binary_dilate()/
 # cell_union_footprint()/disc_closing() above, and exclusion_zones.py (a
 # Layer 2 computation module) now needs them too. A Layer 2 module importing
 # from Layer 3's renderer would be a wrong-direction dependency, so they live
-# here instead and render_layout_map.py imports them from this module. The
+# here instead and the layout map imported them from this module. The
 # move is behaviour-neutral: the bodies are unchanged, only the leading
 # underscore (module-private) is dropped now that they are a shared API.
 #
@@ -788,8 +788,8 @@ def connected_components(mask: np.ndarray, connectivity: int = 8) -> tuple[np.nd
 # vertices and INWARD at convex ones. Which of those is the dangerous
 # direction depends entirely on which side of the ring the caller's interior
 # sits, so no clipping is applied here -- each caller clips (or asserts) in
-# whichever direction is safe for its own geometry. See render_layout_map.py's
-# production-fill call site (clips back to polygon_utm) and exclusion_zones.py's
+# whichever direction is safe for its own geometry. The retired layout map's
+# production-fill call site clipped back to polygon_utm; see exclusion_zones.py's
 # own EXCLUSION SMOOTHING docstring section (over-exclusion is the safe
 # direction there, so it does not clip back).
 # ===========================================================================
@@ -800,8 +800,8 @@ def chaikin_smooth_coords(coords: list[tuple[float, float]], iterations: int) ->
     Chaikin's corner-cutting subdivision, run `iterations` times, over an
     OPEN polyline (a road corridor, not a closed ring) -- simple enough
     to not need a new spline/smoothing dependency for what's purely a
-    cosmetic rendering touch-up (see render_layout_map._smooth_line_for_
-    render(), its only caller).
+    cosmetic rendering touch-up (the retired layout map's _smooth_line_for_
+    render() was its only caller).
 
     The first and last coordinates are always kept EXACTLY as given, so a
     smoothed branch still starts/ends at the same real endpoint -- the

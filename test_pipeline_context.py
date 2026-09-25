@@ -1408,7 +1408,7 @@ print(
 # --- 12. dem= override: a caller-supplied dem skips the self-fetch entirely ---
 #
 # build_pipeline_context() previously had no dem parameter at all -- always called dem_data.
-# get_dem_for_boundary() itself, even for a caller (render_layout_map.fetch_layout_layers()) that
+# get_dem_for_boundary() itself, even for a caller (the retired layout map's fetch_layout_layers()) that
 # already had one. This dedicated third run supplies dem= directly and proves two things: (a)
 # dem_data.get_dem_for_boundary is never called (call_count == 0, not just "still 1"), and (b) the
 # EXACT object passed in is what ends up on the returned context AND gets threaded down to a
@@ -1774,7 +1774,7 @@ print(
 # --- confirmed hanging when tried) for zero additional canopy-forwarding proof. Real, wraps=-based zero- ---
 # --- additional-canopy-fetch proof for this call site lives in test_road_corridors_pipeline.py instead ---
 # --- (section 6/7, canopy-height-road-corridors branch) and in the dedicated full-run call-count-------- ---
-# --- measurement section of test_render_layout_map.py (this branch's own addition).
+# --- measurement section of the layout map's test file, since retired (this branch's own addition).
 import canopy_height_data  # noqa: E402
 import production_area  # noqa: E402
 from _canopy_override_probe import CanopyOverrideProbe, clean_canopy_for  # noqa: E402

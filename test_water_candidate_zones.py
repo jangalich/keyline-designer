@@ -1485,7 +1485,7 @@ print(
 #   water_candidate_zones.zones_to_geojson
 #       -> + contributing_area_cells, slope_pct, render_fill_geometry_wgs84
 #   water_candidate_zones.build_narrative_data  -> the same subset
-#   render_layout_map / road_corridors / fencing / tree_zone_candidates /
+#   layout map (retired) / road_corridors / fencing / tree_zone_candidates /
 #     solar_suitability / pipeline_context._attach_keypoint_feature_
 #     relationships                              -> render_fill_polygon_utm
 #   diagnose_water_zone_mask                     -> cells

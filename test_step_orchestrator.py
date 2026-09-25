@@ -6,7 +6,7 @@ The generic generate path, end to end, run as:
     python test_step_orchestrator.py
 
 REAL COORDINATES, REAL PIPELINE CODE. The boundary is the actual drawn
-property from generate_full_report.py -- 5614 N Montour Rd, Gibsonia, PA
+property from the retired narrated report -- 5614 N Montour Rd, Gibsonia, PA
 (~13.23 acres, UTM 17N) -- the SAME boundary test_session_manager.py (B2) and
 test_wire_translation_inbound.py (B4) use, so a payload produced here is
 comparable to what those branches asserted over. session_manager.create_
@@ -317,9 +317,7 @@ def _build_parcel_data(_boundary=None) -> ParcelData:
         soil_geometries=HYDRIC_GEOMETRIES,
         water_features={"features": []},
         farm_roads=FIXTURE_ROADS,
-        climate_summary={},
         canopy_height=_build_canopy(dem),
-        imagery_summary={},
         irradiance={"status": "ok"},
     )
 

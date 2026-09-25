@@ -2984,7 +2984,7 @@ _ = selected["render_fill_polygon_utm"].buffer(6.096)          # road_corridors 
 _ = unary_union([selected["render_fill_polygon_utm"]])          # solar water_zones union
 _ = selected["render_fill_polygon_utm"] if selected else None   # fencing truthiness guard
 _ = 101.5 - selected["representative_elevation_m"]              # keypoint elevation differential
-_ = f"Water zone {selected['id']}: log line"                    # render_layout_map id branch
+_ = f"Water zone {selected['id']}: log line"                    # retired layout map's id branch
 
 # Stored WGS84 beside UTM everywhere: zones, members, and their features.
 for obj in flat_result["zones"] + flat_result["regions"] + v_result["zones"] + v_result["regions"]:

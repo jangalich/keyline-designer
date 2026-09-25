@@ -8,8 +8,8 @@ and nothing else, on the interactive map's production features.
 WHAT THE PROBLEM IS. A production zone is a union of 5 m DEM cells. Its edge is
 therefore a pixel boundary: an unbroken right-angle staircase that reads as a
 raster artefact rather than as a field edge. The PDF has never had that look,
-because render_layout_map.py has always run its production clip mask through
-raster_grid.angular_smooth_polygon() before clipping contours to it. The
+because the retired matplotlib layout map always ran its production clip mask
+through raster_grid.angular_smooth_polygon() before clipping contours to it. The
 interactive map drew the staircase raw, so the two maps of the same parcel
 disagreed about what the same zone looks like.
 
@@ -22,9 +22,9 @@ where the staircase is real and the smooth is wrong anyway. This module once
 had a second producer site, on tree_zone_candidates.py's patches by way of
 step_orchestrator.build_trees_payload(), and it was removed. The test the
 smooth was justified by -- that the interactive map should agree with the
-printed one -- is the test it FAILS for trees: render_layout_map.py smooths the
-production fill because that geometry is what its contour lines are clipped
-against, and it draws the tree hatch from the cell-union footprint verbatim,
+printed one -- is the test it FAILS for trees: the retired layout map smoothed the
+production fill because that geometry was what its contour lines were clipped
+against, and it drew the tree hatch from the cell-union footprint verbatim,
 "no hull, no opening, no smoothing of any kind." Smoothing a tree feature made
 the two maps disagree.
 
@@ -40,8 +40,8 @@ is already the output of a 12 m opening, so a light corner-cut moves an edge
 that has already been placed a full cell inside the real footprint.
 
 So this module is called from exactly one producer site (production_area.py's
-clusters by way of production_zone_payload.py) plus render_layout_map.py, and
-nowhere else.
+clusters by way of production_zone_payload.py) plus, once, the retired layout
+map, and nowhere else.
 
   ***********************************************************************
   *  DISPLAY ONLY. NOTHING MAY COMPUTE FROM WHAT THIS FUNCTION RETURNS. *
@@ -112,7 +112,7 @@ DISPLAY_ONLY_OUTLINE_PROPERTY = "display_only_smoothed_outline"
 # IN CELLS AND NOT IN METRES because the staircase it is simplifying is made
 # of cells: one cell is the size of the smallest step in the input, whatever
 # the DEM's resolution happens to be. This was
-# render_layout_map.PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS while the
+# the retired layout map's PRODUCTION_FILL_SIMPLIFY_TOLERANCE_CELLS while the
 # production contour clip was the only consumer, and it is unchanged in value;
 # the payload builder and the renderer read this one number so the shipped
 # outline and the printed one cannot drift apart. CONFIGURABLE.
@@ -121,7 +121,7 @@ DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS = 1.0
 # Post-simplify Chaikin softening. Kept small deliberately: this geometry
 # decides where the PDF's contour lines terminate and what extent the
 # interactive map appears to claim, so over-smoothing moves both. Was
-# render_layout_map.PRODUCTION_FILL_CHAIKIN_ITERATIONS, unchanged in value.
+# the retired layout map's PRODUCTION_FILL_CHAIKIN_ITERATIONS, same value.
 # CONFIGURABLE -- start light.
 DISPLAY_OUTLINE_CHAIKIN_ITERATIONS = 1
 
@@ -168,8 +168,8 @@ def _polygonal_parts(geometry):
 
     A Polygon or MultiPolygon passes through AS ITSELF, and the identity is the
     point: it is what makes this guard invisible in the common case, so the
-    result is byte-identical to the unguarded intersection render_layout_map.py
-    used to compute inline. A GeometryCollection is rebuilt from its polygonal
+    result is byte-identical to the unguarded intersection the retired layout
+    map used to compute inline. A GeometryCollection is rebuilt from its polygonal
     members alone (an empty MultiPolygon when it has none). Anything else -- a
     bare LineString from a purely tangential touch, an empty geometry -- has no
     polygonal content at all and comes back as an empty MultiPolygon, which

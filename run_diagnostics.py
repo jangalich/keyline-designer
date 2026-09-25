@@ -1126,9 +1126,9 @@ def _collect_wire_features(payload, dem) -> tuple:
 # hit instead.
 #
 # A FETCH WITH NO PROBE IS NOT RECORDED, which is the batch paths'
-# answer: generate_full_report.py and render_layout_map.py call
+# answer: the retired narrated report and layout map called
 # fetch_parcel_data() directly, outside any session, with no session id
-# to file a record under. Their layer timers find no probe and cost one
+# to file a record under. Their layer timers found no probe and cost one
 # thread-local attribute lookup.
 
 # THE CONTRACT A FETCH MODULE MUST MEET FOR ITS ATTEMPT COUNT TO BE
@@ -1137,9 +1137,9 @@ def _collect_wire_features(payload, dem) -> tuple:
 # layer's call returns, which for a strictly sequential fetch is
 # unambiguous.
 #
-# THE FIVE RETRYING MODULES NOW MEET IT, through the one convention in
-# fetch_attempts.py: soil_data, hydrology_data, farm_roads_data,
-# imagery_data and canopy_height_data each open a ledger at their layer
+# THE FOUR RETRYING MODULES NOW MEET IT, through the one convention in
+# fetch_attempts.py: soil_data, hydrology_data, farm_roads_data and
+# canopy_height_data each open a ledger at their layer
 # entry point, every retry loop underneath counts its attempts and times
 # its own sleeps into it, and the totals are published under the three
 # names below. Before that they were swallowed -- `for attempt in
@@ -1373,11 +1373,11 @@ def _retry_helpers(modules) -> dict:
                 # The pause between attempts, which is most of what a
                 # retry costs on a server that is merely slow.
                 "sleeps_between_attempts": "sleep" in names,
-                # WHETHER THIS HELPER IS A LOOP OR A PASS-THROUGH. Three
-                # of the eight functions a `max_retries` parameter finds
-                # -- imagery_data._search_scenes, canopy_height_data.
-                # _search_hag_items and canopy_height_data.get_canopy_
-                # height_for_boundary -- declare a budget and hand it
+                # WHETHER THIS HELPER IS A LOOP OR A PASS-THROUGH. Some
+                # of the functions a `max_retries` parameter finds --
+                # canopy_height_data._search_hag_items and canopy_height_
+                # data.get_canopy_height_for_boundary among them --
+                # declare a budget and hand it
                 # straight to a helper that owns the loop, so their
                 # attempts are counted under that helper and never under
                 # them. Read the same way as the flag above: whether the

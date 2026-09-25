@@ -5,7 +5,7 @@ Standalone, read-only diagnostic: reports the contributing-area ceiling
 mask for compute_water_eligible_cells() (water_candidate_zones.py), then
 breaks it down further by the real service-distance/boundary-setback gates
 that function applies -- against the real reference property boundary (the
-same coordinates render_layout_map.py's own __main__ block uses).
+same coordinates the retired layout map's own __main__ block used).
 
 This does NOT modify compute_water_eligible_cells() itself, and does not
 reimplement any of its gate logic independently -- the ceiling-mask section
@@ -118,8 +118,8 @@ from water_candidate_zones import (
     find_candidate_zones,
 )
 
-# The user's real, drawn property boundary -- same one render_layout_map.py's
-# own __main__ block (and every other module's own __main__ block) uses.
+# The user's real, drawn property boundary -- same one every other module's
+# own __main__ block uses (as the retired layout map's did).
 PROPERTY_BOUNDARY = [
     (-79.9838154, 40.6458343),
     (-79.9836701, 40.6428581),

@@ -479,7 +479,7 @@ MAX_WALL_SEARCH_DOWNSTREAM_METERS = 150.0
 # that reliably removes the subject is not a display smoothing.
 #
 # The KEY STAYS because render_fill_polygon_utm is a shared downstream
-# contract (render_layout_map's ripple clip, fencing's zone loop,
+# contract (the retired layout map's ripple clip, fencing's zone loop,
 # road_corridors' pond exclusion, solar's water exclusion, pipeline_
 # context's keypoint distances) and every one of those consumers wants
 # "the water zone's real drawn footprint" -- which the identity gives them
@@ -2472,7 +2472,7 @@ def identify_water_system_candidate_zones(
 ) -> dict:
     """
     Full pipeline entry point: fetches the DEM (unless one is passed in —
-    e.g. reused from generate_full_report.py already fetching it, or
+    e.g. reused from the retired narrated report's own fetch, or
     supplied directly in a test), identifies production-area candidates,
     and returns:
 

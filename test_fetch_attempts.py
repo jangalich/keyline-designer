@@ -24,9 +24,8 @@ publishing to the standard the record needs:
      itself is section 3 of test_run_diagnostics.py's fetch group, where
      the session machinery lives.)
   4  A MODULE WITH SEVERAL HELPERS REPORTS THE LAYER. farm_roads queries
-     three road layers per fetch and imagery makes three helper calls;
-     the published count is the LAYER's total, with the per-helper
-     breakdown beside it.
+     three road layers per fetch; the published count is the LAYER's
+     total, with the per-helper breakdown beside it.
   5  SLEEP IS PUBLISHED WHERE THERE IS A LOOP TO MEASURE IT, and its
      absence is reported where there is not.
   6  THE RECORD CARRIES IT -- see test_run_diagnostics.py section 15,
@@ -67,7 +66,6 @@ fetch_attempts.RETRY_PAUSE_SECONDS = RETRY_PAUSE_SECONDS
 ONE_PAUSE_MS = RETRY_PAUSE_SECONDS * 1000.0
 TWO_PAUSES_MS = 2 * ONE_PAUSE_MS
 import hydrology_data
-import imagery_data
 import run_diagnostics
 import soil_data
 
@@ -359,12 +357,11 @@ print(
 # =========================================================================
 #
 # A LAYER'S COUNT MUST DESCRIBE THE LAYER, not whichever helper wrote
-# last. farm_roads queries THREE road layers per fetch through one helper;
-# imagery makes THREE helper calls (one STAC search and two band reads)
-# through another. Published per-helper only, the imagery layer's count
-# would be the last band read's -- 1, or 3 if that read alone retried --
-# and the two-thirds of the wait spent on the search and the first band
-# would vanish.
+# last. farm_roads queries THREE road layers per fetch through one helper.
+# Published per-helper only, the layer's count would be the last road
+# layer's -- 1, or 3 if that query alone retried -- and two-thirds of the
+# wait would vanish. (The Sentinel-2 imagery layer, which made three helper
+# calls of its own, was retired with the narrated report.)
 #
 # BOTH SHAPES ARE HELD HERE: several CALLS that each succeed first time,
 # and several calls one of which retries. `calls` beside `attempts` is
@@ -401,70 +398,13 @@ assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["calls"] == 
 assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["attempts"] == 5
 assert _late_sleep >= TWO_PAUSES_MS, _late_sleep
 
-# --- (c) imagery: three helper calls, the SECOND band read retrying ------
-#
-# get_imagery_summary_for_boundary() calls _search_scenes() (which owns no
-# loop of its own -- it hands its budget to _retry) and then _retry twice
-# more for the red and near-infrared bands. The failure is induced in the
-# band READ, so the search succeeds first time and one band read does not.
-
-class _Item:
-    id = "S2A_TEST"
-    properties = {"datetime": "2026-01-01T00:00:00Z", "eo:cloud_cover": 1.0}
-    assets = {
-        "B04": type("A", (), {"href": "https://example.invalid/red.tif"})(),
-        "B08": type("A", (), {"href": "https://example.invalid/nir.tif"})(),
-    }
-
-
-class _Search:
-    def items(self):
-        return [_Item()]
-
-
-class _Catalog:
-    @staticmethod
-    def open(*args, **kwargs):
-        return _Catalog()
-
-    def search(self, **kwargs):
-        return _Search()
-
-
-import numpy as _np  # noqa: E402 -- only this section needs it
-
-_band_calls = {"n": 0}
-
-
-def _flaky_band(href, polygon, timeout):
-    """The RASTER READ, failing twice on its second invocation. This is
-    _retry()'s operation(timeout) -- the transport boundary for a band."""
-    _band_calls["n"] += 1
-    if 2 <= _band_calls["n"] <= 3:
-        raise OSError("induced at the raster read")
-    return _np.full((4, 4), 2000.0, dtype="float32")
-
-
-fetch_attempts.clear()
-with patch.object(imagery_data, "Client", _Catalog), patch.object(
-    imagery_data, "_read_clipped_band", _flaky_band
-):
-    _summary = imagery_data.get_imagery_summary_for_boundary(BOUNDARY)
-_imagery_attempts, _imagery_sleep, _imagery_detail = _published(imagery_data)
-
-# 1 search + 1 red + (2 failed + 1 good) nir = 5 attempts across 3 CALLS.
-assert _imagery_attempts == 5, (_imagery_attempts, _imagery_detail)
-assert _imagery_detail["helpers"]["imagery_data._retry"]["calls"] == 3, _imagery_detail
-assert _imagery_detail["helpers"]["imagery_data._retry"]["attempts"] == 5, _imagery_detail
-assert _imagery_sleep >= TWO_PAUSES_MS, _imagery_sleep
-assert _summary is not None
-
 # THE ATTRIBUTION IS TO THE HELPER THAT OWNS THE LOOP, and reported as
-# such. imagery_data._search_scenes declares a max_retries budget but has
-# no loop -- it passes it to _retry -- so its attempts are counted under
-# _retry and never under it. run_diagnostics._retry_helpers() says which
+# such. canopy_height_data._search_hag_items declares a max_retries budget
+# but has no loop -- it passes it to _retry -- so its attempts are counted
+# under _retry and never under it. run_diagnostics._retry_helpers() says which
 # of the eight functions a `max_retries` parameter finds are loops.
-# SIX MODULES NOW, NOT FIVE. canopy_cover_data.py is the NLCD Tree Canopy
+# FIVE MODULES (SIX UNTIL THE SENTINEL-2 IMAGERY LAYER WAS RETIRED WITH
+# THE NARRATED REPORT). canopy_cover_data.py is the NLCD Tree Canopy
 # Cover fallback -- the canopy layer's second source, reached from
 # canopy_height_data only where lidar HAG is ABSENT for a parcel. It
 # retries like every other network-backed module here, and its attempts
@@ -476,7 +416,6 @@ _helpers = run_diagnostics._retry_helpers(
         soil_data,
         hydrology_data,
         farm_roads_data,
-        imagery_data,
         canopy_height_data,
         canopy_cover_data,
     ]
@@ -488,7 +427,6 @@ assert _loops == [
     "canopy_height_data._retry",
     "farm_roads_data._query_road_layer",
     "hydrology_data._query_layer",
-    "imagery_data._retry",
     "soil_data._run_sda_query",
 ], _loops
 assert _pass_through == [
@@ -502,16 +440,13 @@ assert _pass_through == [
     "canopy_height_data._search_hag_items",
     "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
-    "imagery_data._search_scenes",
 ], _pass_through
 
 print(
     f"4 [test 4]. THE LAYER, NOT THE LAST HELPER: farm_roads queried its 3 ROAD_LAYERS and "
     f"published attempts=3 over calls=3; with the THIRD layer's transport failing twice it "
     f"published attempts={_late_attempts} over calls=3 and {_late_sleep:.0f} ms of sleep -- "
-    f"1+1+3, not the 3 the last helper call made. imagery made 3 _retry calls (one STAC search, "
-    f"two band reads) with one band read failing twice and published attempts="
-    f"{_imagery_attempts} over calls=3. Of the {len(_helpers)} functions a max_retries parameter "
+    f"1+1+3, not the 3 the last helper call made. Of the {len(_helpers)} functions a max_retries parameter "
     f"finds, {len(_loops)} own a counting loop and {len(_pass_through)} hand their budget to one "
     f"({', '.join(_pass_through)}) -- so their attempts are counted under the loop, and "
     f"retry_helpers says which is which."
@@ -603,8 +538,8 @@ assert fetch_attempts.PUBLISHED_ATTRIBUTES == (
 
 # AND fetch_attempts DOES NOT IMPORT run_diagnostics, in the loaded
 # module. The publisher must work in a process that never imported the
-# reader -- generate_full_report.py and render_layout_map.py fetch
-# outside any session.
+# reader -- the batch path (pipeline_context.build_pipeline_context) and
+# the diagnostics fetch outside any session.
 assert "run_diagnostics" not in vars(fetch_attempts), sorted(vars(fetch_attempts))
 
 # EVERY RETRYING LAYER ENTRY POINT IS WRAPPED, asked of the LOADED
@@ -618,7 +553,6 @@ _wrapped = [
     soil_data.get_soil_geometries_for_polygon,
     hydrology_data.get_water_features_for_boundary,
     farm_roads_data.get_farm_roads_for_boundary,
-    imagery_data.get_imagery_summary_for_boundary,
     canopy_height_data.get_canopy_height_for_boundary,
 ]
 for _entry in _wrapped:
@@ -749,11 +683,9 @@ print(
 assert _helpers["soil_data._run_sda_query"]["max_retries_default"] == 2
 assert _helpers["hydrology_data._query_layer"]["max_retries_default"] == 2
 assert _helpers["farm_roads_data._query_road_layer"]["max_retries_default"] == 2
-assert _helpers["imagery_data._retry"]["max_retries_default"] == 2
 assert _helpers["canopy_height_data._retry"]["max_retries_default"] == 2
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
-assert _helpers["imagery_data._search_scenes"]["max_retries_default"] == 2
 # THE CANOPY FALLBACK'S BUDGET IS THE CANOPY LAYER'S, not a second one.
 # By the time NLCD Tree Canopy Cover runs it is the LAST canopy source
 # there is for the parcel, and a failure there fails the whole session --
@@ -817,8 +749,8 @@ assert _through_wrapper == _through_original, (_through_wrapper, _through_origin
 
 print(
     f"8 [test 8]. THE LOOPS ARE UNCHANGED: all {len(_helpers)} declared max_retries budgets read off the loaded "
-    f"functions are what they were (2 on each of the six counting loops and on "
-    f"imagery's own pass-through, 5 on each of the canopy layer's four), attempts() yields exactly range("
+    f"functions are what they were (2 on each of the five counting loops, 5 on each of the "
+    f"canopy layer's four), attempts() yields exactly range("
     f"n + 1) for budgets 0-5 both inside a ledger and outside one, the transport still sees the "
     f"progressive timeouts {_seen_timeouts} across three attempts, the last attempt's own "
     f"exception instance still escapes untouched, and the wrapped entry point returns by value "

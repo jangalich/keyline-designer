@@ -1,86 +1,117 @@
 """
 test_session_report_route.py
 
-THE REPORT, ASKED FOR OVER HTTP, FOR A SESSION THE OWNER COMMITTED.
+THE SITE DATA REPORT, ASKED FOR OVER HTTP, FOR A SESSION THE OWNER COMMITTED.
 
 Offline, through the real routes on the real parcel. A session is created,
 every step generated and committed exactly as a client would, and then
 POST /api/sessions/<id>/report is called on Flask's own test client and
 polled to a downloadable PDF.
 
-WHAT IS MOCKED IS THE CLAUDE CALL AND THE NETWORK, AND NOTHING ELSE.
-offline_harness.install() refuses every outbound request;
-fencing_step_fixture.Harness patches the fetch boundaries the session path
-reaches; and generate_full_report.generate_scale_of_permanence_report is
-replaced by a function returning fixed markdown -- the narrative's CONTENT
-is test_session_report.py's subject, and what this file is about is the
-route, the job, the failures and the bytes. Everything else runs: the real
-session_design read, the real layout map render, the real weasyprint pass.
+THE JOB PRODUCES THE SITE DATA REPORT (site_report.generate_session_site_
+report_pdf) -- the narrated generator it replaced, and its Claude call, are
+retired. WHAT IS MOCKED IS THE NETWORK, AND NOTHING ELSE: offline_harness.
+install() refuses every outbound request, fencing_step_fixture.Harness
+patches the Layer 1 fetch boundaries the session path reaches, and the
+REPORT LAYER is served through the route's own report_fetch_cache seam
+(session_api.Dependencies) from the reference fixtures
+(overview_reference_fixture.report_data()) -- counted, and made to fail on
+demand. Everything else runs: the real session context, eight real
+sections, the real WeasyPrint pass.
 
 THE SEVEN CASES:
 
   1. A FULLY COMMITTED SESSION reports: 202 with a job id, polled to a
-     result carrying a download URL, fetched to a PDF.
+     result carrying a download URL, fetched to a PDF; the report layer is
+     fetched ONCE. With no property label the cover carries the parcel's
+     coordinates -- never an invented placeholder title.
   2. A SESSION WITH ANY STEP UNCOMMITTED IS REFUSED SYNCHRONOUSLY -- 409
-     naming what is missing, and NO JOB IS CREATED. The job runner holds
-     exactly as many jobs after the refusal as before it, which is the
-     assertion that makes "synchronously" mean something.
-  3. AN EXPIRED SESSION fails with session_design.WORKING_DATA_EXPIRED
-     VERBATIM on the wire, carrying `session_expired`, and is
-     DISTINGUISHABLE from a source failure by a key rather than by prose.
-  4. A CLAUDE FAILURE AND AN IMAGERY FAILURE both poll to a failed job
-     whose message does not suggest retrying differently.
+     naming what is missing, and NO JOB IS CREATED.
+  3. AN EVICTED SESSION REPORTS. The session cache's entry dropped, and
+     then the Layer 1 fetch cache too -- the user who comes back the next
+     day -- and the report still completes: the context is rebuilt from the
+     Design Document, and nothing answers `session_expired`.
+  4. A REQUIRED REPORT-LAYER FAILURE (Daymet) polls to a failed job
+     carrying `failed_layer`; ANY OTHER FAILURE polls to GENERATION_FAILED.
+     Neither suggests retrying differently, neither leaks the raiser's text,
+     and neither names a narrative service that no longer exists.
   5. THE PDF IS A REAL PDF -- the %PDF- header, the %%EOF trailer, the
      page count, and the Content-Type and Content-Disposition it was
      served under.
-  6. generate_full_report() AND build_pipeline_context() ARE UNCHANGED,
-     and the batch path's own PDF entry point still assembles from them.
+  6. THE NARRATED REPORT IS GONE: its modules are not importable and the
+     job names only the site report.
   7. THE REPORT IS NOT A SEVENTH STEP: STEP_ORDER is untouched, the
      registry has no report entry, and no document grows a report status.
 """
 
+import importlib.util
+import inspect
 import json
-import os
 import re
-import tempfile
 import time
 import zlib
+from unittest.mock import patch as mock_patch
 
 import offline_harness
 
 offline_harness.install()
 
 import design_document  # noqa: E402
-import generate_full_report  # noqa: E402
 import job_runner  # noqa: E402
+import overview_reference_fixture  # noqa: E402
+import report_data  # noqa: E402
 import session_api  # noqa: E402
 import session_cache  # noqa: E402
-import session_design  # noqa: E402
 import session_report  # noqa: E402
+import site_report  # noqa: E402
 import step_registry  # noqa: E402
 from fencing_step_fixture import Harness, Session  # noqa: E402
-from unittest.mock import patch as mock_patch  # noqa: E402
 
 POLL_INTERVAL_SECONDS = 0.05
 POLL_TIMEOUT_SECONDS = 900.0
 
-# The narrative the mocked Claude call returns. REAL MARKDOWN with real
-# headings, because it goes through markdown -> HTML -> weasyprint for
-# real and a one-line string would make "the PDF has several pages" a
-# claim about the fixture rather than about the assembly.
-STUB_NARRATIVE = "\n\n".join(
-    ["# Scale of Permanence Report"]
-    + [
-        f"## {index}. {heading}\n\n" + ("This section's narrative body. " * 40)
-        for index, heading in enumerate(
-            [
-                "Climate", "Landform", "Water", "Access", "Vegetation",
-                "Structures", "Subdivision", "Soil",
-            ],
-            start=1,
-        )
-    ]
+# THE REPORT LAYER, from the reference fixtures -- built once: every report
+# in this file is on the same boundary, and a ReportData is a value.
+#
+# TWO LAYERS DEGRADED, because this session is not the reference session.
+# The commits here run the real orchestrator on fencing_step_fixture's
+# SYNTHETIC bench-and-drainage DEM (108x98 cells); the report fixtures were
+# captured on the real DEM (108x96). NLCD land cover and the forest type
+# group are rasters on the DEM grid and cannot be laid over a different
+# one, so each is passed as absent -- the degraded path every section
+# already renders. The whole report's content on the reference session is
+# test_whole_report.py's subject.
+#
+# THE SOIL SURVEY IS KEPT, and is the point of a case of its own: its rows
+# describe the REAL survey's map units, none of which this synthetic
+# session has, so the survey ANSWERS with nothing for this parcel. That
+# used to leave the Soils section's properties table empty with no
+# statement beside it, and the render raised; soils_section now states
+# that the service answered with no major component here.
+FIXTURE_REPORT_DATA = overview_reference_fixture.report_data(
+    nlcd_landcover=None, forest_type_group=None,
 )
+
+
+class ReportLayer:
+    """
+    The report layer behind the route's report_fetch_cache seam: a real
+    session_cache.FetchCache over a fetch function that serves the fixture
+    ReportData, COUNTS every fetch, and raises `raises` when set. A real
+    cache, so "fetched once per boundary" is the cache's own behaviour and
+    a failure is not cached -- exactly as in production.
+    """
+
+    def __init__(self, raises=None):
+        self.raises = raises
+        self.calls = 0
+        self.cache = session_cache.FetchCache(fetch_function=self._fetch)
+
+    def _fetch(self, boundary):
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return FIXTURE_REPORT_DATA
 
 
 def pdf_objects(pdf_bytes: bytes) -> bytes:
@@ -111,36 +142,6 @@ def pdf_objects(pdf_bytes: bytes) -> bytes:
     return b"".join(parts)
 
 
-class ClaudeStub:
-    """
-    generate_full_report's own reference to generate_scale_of_permanence_
-    report, replaced. PATCHED ON generate_full_report, NOT ON report_
-    generator: that module is imported `from report_generator import ...`,
-    so the name the session path actually calls is the one bound over there.
-    """
-
-    def __init__(self, raises=None):
-        self.raises = raises
-        self.calls = 0
-
-    def __enter__(self):
-        def call(*args, **kwargs):
-            self.calls += 1
-            if self.raises is not None:
-                raise self.raises
-            return STUB_NARRATIVE
-
-        self._patch = mock_patch.object(
-            generate_full_report, "generate_scale_of_permanence_report", call
-        )
-        self._patch.start()
-        return self
-
-    def __exit__(self, *exc_info):
-        self._patch.stop()
-        return False
-
-
 class Http:
     """
     Flask's test client over session_api's own blueprint, bound to a
@@ -152,15 +153,17 @@ class Http:
     a precondition bug.
     """
 
-    def __init__(self, session):
+    def __init__(self, session, report_layer=None):
         self.session = session
         self.reports = session_report.ReportStore(max_reports=8)
+        self.report_layer = report_layer or ReportLayer()
         self.deps = session_api.Dependencies(
             store=session.store,
             fetch_cache=session.fetch_cache,
             cache=session.cache,
             runner=session.runner,
             reports=self.reports,
+            report_fetch_cache=self.report_layer.cache,
         )
         self.client = session_api.create_app(self.deps).test_client()
 
@@ -237,7 +240,7 @@ def commit_everything(session):
 
 
 print("=" * 72)
-print("test_session_report_route.py -- the report, over HTTP, for a committed session")
+print("test_session_report_route.py -- the site data report, over HTTP, for a committed session")
 print("=" * 72)
 
 
@@ -281,6 +284,7 @@ with Harness() as HARNESS:
     assert JOBS_AFTER == JOBS_BEFORE, (
         f"a refused report must create NO job -- runner went from {JOBS_BEFORE} to {JOBS_AFTER}"
     )
+    assert HTTP.report_layer.calls == 0, "a refused report fetches no report layer"
     # IT NAMES WHAT IS MISSING, every one of them, with its actual status.
     assert [entry["step_id"] for entry in REFUSAL_BODY["uncommitted_steps"]] == [
         "water", "roads", "trees", "structures", "fencing",
@@ -324,9 +328,16 @@ with Harness() as HARNESS:
     # ==================================================================
     # 1 + 5. THE HAPPY PATH, AND THE BYTES
     # ==================================================================
-    print("\n[test 1]. A FULLY COMMITTED SESSION: 202, polled to a PDF")
+    print("\n[test 1]. A FULLY COMMITTED SESSION: 202, polled to the site data report")
 
-    with ClaudeStub() as CLAUDE:
+    LABELS = []
+    _real_cover_label = site_report.cover_label
+
+    def _recording_cover_label(data, label):
+        LABELS.append(_real_cover_label(data, label))
+        return LABELS[-1]
+
+    with mock_patch.object(site_report, "cover_label", _recording_cover_label):
         ACCEPTED = HTTP.report(property_label="5614 N Montour Rd, Gibsonia, PA 15044")
         assert ACCEPTED.status_code == 202, (ACCEPTED.status_code, ACCEPTED.get_json())
         ACCEPTED_BODY = ACCEPTED.get_json()
@@ -341,10 +352,11 @@ with Harness() as HARNESS:
     RESULT = DONE["result"]
     assert sorted(RESULT) == ["download_url", "filename", "report_id", "size_bytes"], RESULT
     assert RESULT["download_url"] == f"/api/reports/{RESULT['report_id']}", RESULT
-    assert RESULT["filename"] == "scale-of-permanence-report.pdf", RESULT
-    assert CLAUDE.calls == 1, f"the narrative is generated exactly once, not {CLAUDE.calls}"
+    assert RESULT["filename"] == "site-data-report.pdf", RESULT
+    assert HTTP.report_layer.calls == 1, f"the report layer is fetched exactly once, not {HTTP.report_layer.calls}"
+    assert LABELS == ["5614 N Montour Rd, Gibsonia, PA 15044"], LABELS
     print(f"   202 -> {POLLS} polls over {REPORT_SECONDS:.1f}s -> {RESULT['download_url']} "
-          f"({RESULT['size_bytes'] / 1024:.0f} KB)")
+          f"({RESULT['size_bytes'] / 1024:.0f} KB); report layer fetched {HTTP.report_layer.calls}x")
     print("   PASS")
 
     print("\n[test 5]. THE PDF IS A REAL PDF -- the bytes, not just a 200")
@@ -359,20 +371,17 @@ with Harness() as HARNESS:
     assert PDF_BYTES[:5] == b"%PDF-", PDF_BYTES[:32]
     assert b"%%EOF" in PDF_BYTES[-2048:], PDF_BYTES[-64:]
     assert len(PDF_BYTES) == RESULT["size_bytes"], (len(PDF_BYTES), RESULT["size_bytes"])
-    # REAL PAGES: the cover, the narrative, and the full-bleed map page.
+    # REAL PAGES: the cover and eight sections run to twenty-odd pages; a
+    # render that lost a section, or the narrated document's handful, would
+    # not reach this.
     PDF_OBJECTS = pdf_objects(PDF_BYTES)
     PAGE_COUNT = len(re.findall(rb"/Type\s*/Page[^s]", PDF_OBJECTS))
-    assert PAGE_COUNT >= 3, f"a report is a cover, narrative pages and a map page; found {PAGE_COUNT}"
-    # AND THE MAP PAGE IS A REAL IMAGE: an embedded image XObject, which is
-    # the rendered layout map and nothing else on this document carries one.
-    assert re.search(rb"/Subtype\s*/Image", PDF_OBJECTS), (
-        "the final page must carry the rendered layout map as an embedded image"
-    )
+    assert PAGE_COUNT >= 20, f"the site data report is twenty-odd pages; found {PAGE_COUNT}"
     # SERVED AS A DOWNLOAD, with the name a browser saves.
     assert DOWNLOAD.mimetype == "application/pdf", DOWNLOAD.mimetype
     DISPOSITION = DOWNLOAD.headers.get("Content-Disposition", "")
-    assert "attachment" in DISPOSITION and "scale-of-permanence-report.pdf" in DISPOSITION, DISPOSITION
-    print(f"   {len(PDF_BYTES)} bytes, %PDF- header, %%EOF trailer, {PAGE_COUNT} pages, an embedded map image")
+    assert "attachment" in DISPOSITION and "site-data-report.pdf" in DISPOSITION, DISPOSITION
+    print(f"   {len(PDF_BYTES)} bytes, %PDF- header, %%EOF trailer, {PAGE_COUNT} pages")
     print(f"   Content-Type {DOWNLOAD.mimetype}; Content-Disposition {DISPOSITION}")
     print("   PASS")
 
@@ -384,163 +393,124 @@ with Harness() as HARNESS:
     assert HTTP.download("/api/reports/not-a-real-report-id").status_code == 404
     print("   the link is re-fetchable; an unknown report id is a 404")
 
+    # NO LABEL: THE COVER CARRIES THE COORDINATES. The frontend sends none,
+    # and the route used to substitute "Property Design Report" -- a
+    # placeholder title that would print on a site data report's cover. A
+    # second report on the same boundary is also the report layer's cache
+    # hit: no second fetch.
+    print("\n[test 1b]. NO PROPERTY LABEL: the cover prints the parcel's coordinates")
+    LABELS.clear()
+    with mock_patch.object(site_report, "cover_label", _recording_cover_label):
+        accepted = HTTP.report()
+        assert accepted.status_code == 202, accepted.get_json()
+        UNLABELLED, _ = HTTP.poll(accepted.get_json()["job_id"])
+    assert UNLABELLED["status"] == job_runner.STATUS_DONE, UNLABELLED
+    assert len(LABELS) == 1 and re.fullmatch(r"\d+\.\d{4}° N, \d+\.\d{4}° W", LABELS[0]), LABELS
+    assert "Report" not in LABELS[0]
+    assert HTTP.report_layer.calls == 1, "the second report on the same land is a report-layer cache hit"
+    print(f"   cover label: {LABELS[0]}; report layer still fetched {HTTP.report_layer.calls}x")
+    print("   PASS")
+
     # ==================================================================
-    # 4. A CLAUDE FAILURE AND AN IMAGERY FAILURE
+    # 4. A REQUIRED-LAYER FAILURE, AND ANY OTHER FAILURE
     # ==================================================================
-    print("\n[test 4]. A CLAUDE FAILURE and an IMAGERY FAILURE poll to a failed job that does not "
-          "suggest retrying differently")
+    print("\n[test 4]. A REQUIRED REPORT-LAYER FAILURE carries failed_layer; ANY OTHER failure is "
+          "GENERATION_FAILED; neither suggests retrying differently")
 
     FAILURE_BODIES = {}
 
-    # (a) THE CLAUDE CALL. A RuntimeError is what report_generator raises
-    # for a missing key and what the SDK surfaces for an API failure.
-    with ClaudeStub(raises=RuntimeError("Claude API request failed: 529 overloaded")):
-        accepted = HTTP.report()
-        assert accepted.status_code == 202, accepted.get_json()
-        FAILURE_BODIES["claude"], _ = HTTP.poll(accepted.get_json()["job_id"])
+    # (a) DAYMET, the one REQUIRED report layer, did not answer. A new
+    # report-layer cache (a failure is never cached; a fresh one also means
+    # no earlier success can be served).
+    DAYMET_DOWN = report_data.ReportDataIncompleteError(
+        "report layer 'daymet_daily' (climate records) failed: 503 from daymet.ornl.gov",
+        *report_data.LAYER_CLIMATE,
+        report_data.ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE,
+    )
+    FAILING_HTTP = Http(SESSION, report_layer=ReportLayer(raises=DAYMET_DOWN))
+    accepted = FAILING_HTTP.report()
+    assert accepted.status_code == 202, accepted.get_json()
+    FAILURE_BODIES["daymet"], _ = FAILING_HTTP.poll(accepted.get_json()["job_id"])
 
-    # (b) THE IMAGERY. render_layout_map() swallows a basemap TILE outage by
-    # design (it falls back to a neutral fill), so the failure modelled here
-    # is the render itself going down -- the case that actually reaches the
-    # job.
-    with ClaudeStub(), mock_patch.object(
-        __import__("generate_pdf_report"),
-        "render_layout_map",
-        side_effect=OSError("imagery pipeline unavailable"),
-    ):
+    # (b) EVERYTHING ELSE: the renderer itself going down.
+    with mock_patch.object(site_report, "generate_site_report_pdf",
+                           side_effect=OSError("weasyprint: libpango went away")):
         accepted = HTTP.report()
         assert accepted.status_code == 202, accepted.get_json()
-        FAILURE_BODIES["imagery"], _ = HTTP.poll(accepted.get_json()["job_id"])
+        FAILURE_BODIES["renderer"], _ = HTTP.poll(accepted.get_json()["job_id"])
 
     for kind, body in FAILURE_BODIES.items():
         assert body["status"] == job_runner.STATUS_FAILED, (kind, body)
         error = body["error"]
-        # IT NAMES ITSELF as the kind the user cannot act on.
-        assert error["report_failed"] == {"actionable": False}, (kind, error)
         assert "session_expired" not in error, (kind, error)
-        assert error["error"] == session_report.GENERATION_FAILED, (kind, error)
-        # IT DOES NOT INVITE A DIFFERENT ATTEMPT. There is nothing different
-        # to do, and copy that implies otherwise sends the user back through
-        # their design looking for a mistake they did not make.
+        assert "report_failed" in error, (kind, error)
         prose = error["error"].lower()
-        for forbidden in ("try again", "retry", "reopen", "recommit", "different", "check your"):
+        # IT DOES NOT INVITE A DIFFERENT ATTEMPT, AND DOES NOT BLAME THE DESIGN.
+        for forbidden in ("try again", "reopen", "recommit", "different", "check your"):
             assert forbidden not in prose, f"{kind}: the message must not say {forbidden!r} -- {prose}"
-        # AND IT DOES NOT BLAME THE DESIGN.
         assert "unharmed" in prose, (kind, prose)
+        # NOR DOES IT NAME WHAT IS NOT THERE. The narrated report's message
+        # blamed "the narrative service or the map imagery"; neither exists.
+        assert "narrative" not in prose and "imagery" not in prose, (kind, prose)
         # NEVER A TRACEBACK: the raiser's own text stays server-side.
-        assert "529" not in json.dumps(error) and "imagery pipeline" not in json.dumps(error), error
-    print(f"   claude:  {FAILURE_BODIES['claude']['error']['error']}")
-    print(f"   imagery: same prose, same report_failed {FAILURE_BODIES['imagery']['error']['report_failed']}")
+        assert "503" not in json.dumps(error) and "libpango" not in json.dumps(error), (kind, error)
+
+    DAYMET_ERROR = FAILURE_BODIES["daymet"]["error"]
+    assert DAYMET_ERROR["failed_layer"] == {
+        "type": "climate", "label": "climate records",
+        "reason": report_data.ReportDataIncompleteError.REASON_SOURCE_UNAVAILABLE,
+    }, DAYMET_ERROR
+    assert DAYMET_ERROR["report_failed"] == {"actionable": True}, DAYMET_ERROR
+    RENDERER_ERROR = FAILURE_BODIES["renderer"]["error"]
+    assert RENDERER_ERROR == {"error": session_report.GENERATION_FAILED, "report_failed": {"actionable": False}}
+    print(f"   daymet:   {DAYMET_ERROR['error']}")
+    print(f"             failed_layer {DAYMET_ERROR['failed_layer']}")
+    print(f"   renderer: {RENDERER_ERROR['error']}")
     print("   PASS")
 
     # ==================================================================
-    # 3. AN EXPIRED SESSION
+    # 3. AN EVICTED SESSION REPORTS
     # ==================================================================
-    print("\n[test 3]. AN EXPIRED SESSION fails with WORKING_DATA_EXPIRED verbatim, distinguishable "
-          "from a source failure")
+    print("\n[test 3]. AN EVICTED SESSION -- session cache and Layer 1 fetch cache both dropped -- "
+          "still reports")
 
     # THE EVICTION, exactly as the LRU/idle-timeout would do it: the tier-2
-    # entry is dropped and the Design Document is untouched, so the session
-    # still reads as fully committed and the report is still accepted.
+    # entry is dropped and the Design Document is untouched. And the Layer 1
+    # fetch cache too, so the rebuild refetches Layer 1 -- the next-day case.
     assert SESSION.cache.discard(SESSION.id) is True
+    SESSION.fetch_cache.clear()
     assert SESSION.stored()["steps"]["water"]["status"] == design_document.STATUS_COMMITTED
+    REBUILDS = []
+    _real_rebuild = session_cache.rebuild_session_context
 
-    with ClaudeStub() as EXPIRED_CLAUDE:
+    def _recording_rebuild(document, fetch_cache):
+        REBUILDS.append(document["session_id"])
+        return _real_rebuild(document, fetch_cache)
+
+    with mock_patch.object(session_cache, "rebuild_session_context", _recording_rebuild):
         accepted = HTTP.report()
-        # STILL A 202. The precondition is the document's, and the document
-        # is intact -- the eviction is only discoverable by reading tier 2,
-        # which is the job's work.
         assert accepted.status_code == 202, accepted.get_json()
-        EXPIRED_BODY, _ = HTTP.poll(accepted.get_json()["job_id"])
+        EVICTED, _ = HTTP.poll(accepted.get_json()["job_id"])
 
-    assert EXPIRED_BODY["status"] == job_runner.STATUS_FAILED, EXPIRED_BODY
-    EXPIRED_ERROR = EXPIRED_BODY["error"]
-    # THE SENTENCE, VERBATIM, ON THE WIRE. Not paraphrased by the route and
-    # not re-worded here: it is session_design's own constant, written to be
-    # shown to the person who has to act on it.
-    assert session_design.WORKING_DATA_EXPIRED in EXPIRED_ERROR["error"], EXPIRED_ERROR
-    assert (
-        session_design.WORKING_DATA_EXPIRED
-        == "this session's working data has expired; reopen and recommit to generate a report"
-    )
-    # IT NAMES ITSELF, and the remedy is a KEY rather than prose to parse.
-    assert EXPIRED_ERROR["session_expired"]["remedy"] == "reopen_and_recommit", EXPIRED_ERROR
-    assert EXPIRED_ERROR["session_expired"]["session_id"] == SESSION.id, EXPIRED_ERROR
-    assert EXPIRED_ERROR["session_expired"]["step_id"] in design_document.STEP_ORDER, EXPIRED_ERROR
-    assert "report_failed" not in EXPIRED_ERROR, EXPIRED_ERROR
-    # THE CLAUDE CALL NEVER RAN. The design build raises before it -- so an
-    # expired session costs nothing and, more importantly, the failure is
-    # the eviction rather than whatever the narrative would have done.
-    assert EXPIRED_CLAUDE.calls == 0, "an expired session must fail BEFORE the Claude call"
-
-    # DISTINGUISHABLE FROM A SOURCE FAILURE BY A KEY, not by prose -- the
-    # whole point, and the assertion that proves a client can branch.
-    assert set(EXPIRED_ERROR) & {"session_expired", "report_failed"} == {"session_expired"}
-    for kind, body in FAILURE_BODIES.items():
-        assert set(body["error"]) & {"session_expired", "report_failed"} == {"report_failed"}, kind
-        assert body["error"]["error"] != EXPIRED_ERROR["error"], kind
-    print(f"   message: {EXPIRED_ERROR['error'][:130]}...")
-    print(f"   session_expired {EXPIRED_ERROR['session_expired']}; the Claude call never ran")
+    assert EVICTED["status"] == job_runner.STATUS_DONE, EVICTED
+    assert REBUILDS == [SESSION.id], f"the context must be rebuilt from the document, once: {REBUILDS}"
+    assert SESSION.id in SESSION.cache, "the rebuilt context is back in the session cache"
+    EVICTED_PDF = HTTP.download(EVICTED["result"]["download_url"]).data
+    assert EVICTED_PDF[:5] == b"%PDF-" and len(re.findall(rb"/Type\s*/Page[^s]", pdf_objects(EVICTED_PDF))) >= 20
+    print(f"   rebuilt once from the Design Document; {len(EVICTED_PDF)} bytes; no session_expired")
     print("   PASS")
 
 
 # ======================================================================
-# 6. THE BATCH PATH IS UNTOUCHED
+# 6. THE NARRATED REPORT IS GONE
 # ======================================================================
-print("\n[test 6]. generate_full_report() and build_pipeline_context() are UNCHANGED; the batch path still works")
+print("\n[test 6]. THE NARRATED REPORT IS GONE: not importable, and the job names only the site report")
 
-import inspect  # noqa: E402
-
-import generate_pdf_report  # noqa: E402
-import pipeline_context  # noqa: E402
-
-assert generate_full_report.build_pipeline_context is pipeline_context.build_pipeline_context
-assert list(inspect.signature(generate_full_report.generate_full_report).parameters) == [
-    "boundary_coordinates", "anchor_lon_lat",
-]
-assert list(inspect.signature(pipeline_context.build_pipeline_context).parameters)[:2] == [
-    "boundary_coordinates", "anchor_lon_lat",
-]
-assert "context.narrative_data" in inspect.getsource(generate_full_report.generate_full_report)
-# The session entry point kept its own signature too -- report_from_design()
-# is its BODY, split at one seam, not a second entry point that replaced it.
-assert list(inspect.signature(generate_full_report.generate_session_report).parameters) == [
-    "session_id", "store", "fetch_cache", "cache",
-]
-assert "report_from_design" in inspect.getsource(generate_full_report.generate_session_report)
-
-# THE BATCH PDF ENTRY POINT: same name, same signature, and it still calls
-# the batch narrative and the batch layer fetch -- neither of which the
-# session path touches.
-assert list(inspect.signature(generate_pdf_report.generate_full_report_pdf).parameters) == [
-    "boundary_coordinates", "output_path", "anchor_lon_lat", "property_label", "map_image_path",
-]
-BATCH_SOURCE = inspect.getsource(generate_pdf_report.generate_full_report_pdf)
-assert "generate_full_report(boundary_coordinates, anchor_lon_lat)" in BATCH_SOURCE, BATCH_SOURCE
-assert "fetch_layout_layers(boundary_coordinates" in BATCH_SOURCE, BATCH_SOURCE
-assert "session" not in BATCH_SOURCE.lower(), "the batch path did not grow a session mode"
-
-# AND THE SHARED HALF ACTUALLY ASSEMBLES. _write_pdf() is what both entry
-# points end on, and it is exercised here against the same stub narrative
-# and a real PNG -- so "the batch path still works" is a PDF on disk rather
-# than a signature check.
-import matplotlib  # noqa: E402
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-
-with tempfile.TemporaryDirectory() as tmpdir:
-    map_png = os.path.join(tmpdir, "map.png")
-    figure = plt.figure(figsize=(8.5, 11))
-    figure.savefig(map_png, dpi=60)
-    plt.close(figure)
-    batch_pdf = generate_pdf_report._write_pdf(
-        STUB_NARRATIVE, map_png, os.path.join(tmpdir, "batch.pdf"), "A Batch Property"
-    )
-    batch_bytes = open(batch_pdf, "rb").read()
-    assert batch_bytes[:5] == b"%PDF-" and b"%%EOF" in batch_bytes[-2048:]
-    assert len(re.findall(rb"/Type\s*/Page[^s]", pdf_objects(batch_bytes))) >= 3, "cover, narrative, map"
-    print(f"   the shared assembly still writes a real PDF ({len(batch_bytes)} bytes) for the batch path")
+for retired in ("generate_full_report", "generate_pdf_report", "report_generator", "render_layout_map"):
+    assert importlib.util.find_spec(retired) is None, f"{retired} is still importable"
+JOB_SOURCE = inspect.getsource(session_report.run_report_job)
+assert "site_report.generate_session_site_report_pdf(" in JOB_SOURCE, JOB_SOURCE
+print("   four modules retired; run_report_job calls site_report.generate_session_site_report_pdf")
 print("   PASS")
 
 
@@ -570,8 +540,8 @@ print("   PASS")
 print("\n" + "=" * 72)
 print(
     "test_session_report_route.py: POST /api/sessions/<id>/report is a JOB over a\n"
-    "FULLY COMMITTED session; an uncommitted step is a synchronous 409 with no job;\n"
-    "an expired session and a source failure are told apart by the key each carries;\n"
-    "and the thing the client downloads is a real PDF. The report is not a step."
+    "FULLY COMMITTED session producing the SITE DATA REPORT; an uncommitted step is a\n"
+    "synchronous 409 with no job; an evicted session rebuilds and reports; a required-\n"
+    "layer failure carries failed_layer; and the download is a real PDF. Not a step."
 )
 print("=" * 72)

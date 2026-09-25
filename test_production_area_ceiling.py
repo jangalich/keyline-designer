@@ -333,8 +333,8 @@ print(
 # The real bug this wiring fixes: optimize_production_areas()'s own STEP 1 call used to
 # pass compute_step1_eligible_cells() only 4 positional arguments, leaving
 # tree_root_zone_mask_utm on its "skip this gate" sentinel default -- so canopy exclusion
-# was NEVER active on this entry point (the one render_layout_map.py/tree_zone_
-# candidates.py actually use), even after the gate was hardened everywhere else.
+# was NEVER active on this entry point (the one tree_zone_candidates.py uses,
+# as the retired layout map did), even after the gate was hardened everywhere else.
 # =====================================================================
 
 canopy_gate_grid_size = 20  # 20x20 @ 5m = 100x100m, comfortably above MIN_PRODUCTION_AREA_ACRES

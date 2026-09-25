@@ -8,8 +8,7 @@ section 2.4).
 Script-style, per this repo's convention: run it directly
 (`python test_wire_translation.py`), assertions inline, printed section
 headers. No network, no DEM fetch, no basemap -- every input is a synthetic
-internal-shape fixture built here, and every entry point
-render_layout_map.fetch_layout_layers() would reach out to is mocked.
+internal-shape fixture built here.
 
 FIVE THINGS THIS FILE EXISTS TO PROVE
 
@@ -20,15 +19,8 @@ FIVE THINGS THIS FILE EXISTS TO PROVE
      underneath it, which is the exact drift the shared schema exists to
      prevent.
 
-  2. PARITY -- the most important check in this file. fetch_layout_layers()
-     must return what it returned before the refactor routed its
-     road_corridor layer through the boundary. Asserted as a live
-     invariant rather than a frozen blob: its road_corridor is asserted
-     EQUAL to identify_road_corridor_candidates()' own zones_geojson
-     features (the exact expression the function used to return), and
-     every other key is asserted to be the SAME OBJECT it was read from.
-     A frozen expected-output file would rot; this keeps holding as the
-     fixture changes, and fails the moment the two paths diverge.
+  2. (retired) PARITY of the matplotlib layout map's fetch_layout_layers(),
+     retired with that renderer and the narrated report.
 
   3. NO DOUBLE REPROJECTION. For every layer whose internal objects already
      carry a stored WGS84 form, the emitted coordinates are asserted EQUAL
@@ -51,7 +43,6 @@ FIVE THINGS THIS FILE EXISTS TO PROVE
 """
 
 import json
-from unittest.mock import patch as mock_patch
 
 import numpy as np
 from rasterio.warp import transform as warp_transform
@@ -449,8 +440,8 @@ def _exclusion_result(dem, boundary, *, mode="populated"):
 
 
 def build_fixture(*, empty=False):
-    """Every internal shape one PipelineContext holds, plus the two extra
-    KSOP results fetch_layout_layers() makes its own calls for."""
+    """Every internal shape one PipelineContext holds, plus the road and
+    solar KSOP results the wire translates."""
     from parcel_data import ParcelData
     from pipeline_context import PipelineContext
     from road_corridors import corridors_to_geojson
@@ -528,7 +519,6 @@ def build_fixture(*, empty=False):
         soil_geometries={},
         water_features={"streams": [], "water_bodies": []},
         farm_roads=[],
-        climate_summary={},
         canopy_height={
             "array": np.zeros((SIZE, SIZE), dtype=np.float32),
             "resolution_meters": RES,
@@ -536,7 +526,6 @@ def build_fixture(*, empty=False):
             "origin_y": ORIGIN_Y,
             "crs": CRS,
         },
-        imagery_summary={},
         irradiance={"status": "no_api_key"},
     )
 
@@ -595,20 +584,6 @@ def outbound_collections(fx):
         ),
         "tree_zones": wt.tree_zones_to_feature_collection(ctx.tree_zone_patches),
     }
-
-
-def drive_fetch_layout_layers(fx):
-    """The real fetch_layout_layers(), with every network-backed and KSOP
-    entry point mocked out -- nothing below it runs."""
-    import render_layout_map as rlm
-
-    with mock_patch.object(rlm, "fetch_parcel_data", return_value=fx["parcel_data"]), \
-         mock_patch.object(rlm, "build_pipeline_context", return_value=fx["context"]), \
-         mock_patch.object(rlm, "identify_road_corridor_candidates", return_value=fx["road_result"]), \
-         mock_patch.object(rlm, "identify_solar_candidate_zones", return_value=fx["solar_result"]), \
-         mock_patch.object(rlm, "identify_fencing", return_value={"fencing": "SENTINEL"}), \
-         mock_patch.object(rlm, "compute_contour_lines", return_value=["CONTOUR_SENTINEL"]):
-        return rlm.fetch_layout_layers(fx["coords"], anchor_lon_lat=fx["coords"][0])
 
 
 def _coord_pairs(geometry):
@@ -685,82 +660,15 @@ print("  Every layer in the branch's inventory has an outbound function.")
 
 
 # ======================================================================
-# 2. PARITY -- fetch_layout_layers() output is unchanged
+# 2. (RETIRED) PARITY -- fetch_layout_layers()
 # ======================================================================
+#
+# This section drove the matplotlib layout map's fetch_layout_layers() and
+# asserted its return dict unchanged by the road-corridor refactor. That
+# function was retired with the narrated report; nothing produces that dict
+# now. Numbering kept so the sections below keep the numbers cited elsewhere.
 
-print()
-print("=" * 70)
-print("2. PARITY -- fetch_layout_layers() before vs after the refactor")
-print("=" * 70)
-
-layers = drive_fetch_layout_layers(POPULATED)
 ctx = POPULATED["context"]
-
-assert sorted(layers.keys()) == sorted([
-    "dem", "exclusion_zones", "production_areas", "water_zone", "road_corridor",
-    "tree_zone_result", "structure_site", "keypoints", "water_features",
-    "contour_lines", "fencing_result",
-    # THE TWO PLURAL KEYS the committed-design branch added. On THIS path
-    # they are derived from the two singulars beside them and carry nothing
-    # new -- build_pipeline_context() picks one water zone and one structure
-    # site, so each list is that one or empty. They exist because a SESSION's
-    # committed design can hold several of either (session_design.
-    # layout_layers()), and render_layout_map() iterates the plural so one
-    # drawing path serves both.
-    "water_zones", "structure_sites",
-]), sorted(layers.keys())
-assert layers["water_zones"] == [layers["water_zone"]]
-assert layers["structure_sites"] == [layers["structure_site"]]
-print("  Return dict keys unchanged but for the two plural keys, each the singular beside it.")
-
-# road_corridor is THE key this branch re-routed. Asserted equal to the
-# exact expression the function used to return -- identify_road_corridor_
-# candidates()' own zones_geojson features -- so "goes through the
-# boundary now" and "returns the same bytes" are both proven at once.
-was = POPULATED["road_result"]["zones_geojson"]["features"]
-assert layers["road_corridor"] == was, "road_corridor drifted from the pre-refactor expression"
-assert len(layers["road_corridor"]) == 2, "both branches must be emitted, trunk AND spur"
-# ...and not merely equal by accident: the fallback flag that only the
-# context carries has to have reached the notes.
-assert all(
-    "fallback" in f["properties"]["confidence_notes"].lower()
-    for f in layers["road_corridor"]
-), "hydric_floodplain_is_fallback=True did not reach the emitted confidence_notes"
-print(f"  road_corridor: {len(layers['road_corridor'])} feature(s), byte-identical to "
-      f"identify_road_corridor_candidates()' own zones_geojson.")
-
-# structure_site deliberately still comes off solar's own zones_geojson --
-# see render_layout_map.fetch_layout_layers()' docstring for why it cannot
-# be rebuilt from the context field.
-assert layers["structure_site"] == POPULATED["solar_result"]["zones_geojson"]["features"][0]
-print("  structure_site: unchanged (still solar's own zones_geojson feature 0).")
-
-# Every remaining key is the SAME OBJECT it was read from -- nothing was
-# copied, converted, rounded or re-derived on the way out.
-assert layers["dem"] is ctx.dem
-assert layers["exclusion_zones"] is ctx.exclusion_zones
-assert layers["production_areas"] is ctx.production_areas
-assert layers["water_zone"] is ctx.selected_water_zone
-assert layers["keypoints"] is ctx.keypoints
-assert layers["tree_zone_result"]["patches"] is ctx.tree_zone_patches
-assert layers["water_features"] is POPULATED["parcel_data"].water_features
-print("  Every other layer: the identical object off the context/parcel data, not a copy.")
-
-# And the same on the empty fixture -- an all-empty parcel must not take a
-# different code path out.
-empty_layers = drive_fetch_layout_layers(EMPTY)
-assert empty_layers["road_corridor"] == EMPTY["road_result"]["zones_geojson"]["features"] == []
-assert empty_layers["structure_site"] is None
-assert empty_layers["production_areas"] == []
-assert empty_layers["water_zone"] is None
-# EMPTY, not [None]: the plural key is the singular's one-element list only
-# when there IS one.
-assert empty_layers["water_zones"] == []
-assert empty_layers["structure_sites"] == []
-print("  Empty parcel: same result through the same path (road_corridor [], "
-      "structure_site None -- fetch_layout_layers()' own established contract).")
-
-print("\n  PARITY RESULT: fetch_layout_layers() output is UNCHANGED by this branch.")
 
 
 # ======================================================================
@@ -1023,5 +931,4 @@ print(f"  {len(forwards)} moved helper(s): each module's own name still works an
 print()
 print("=" * 70)
 print("All wire_translation checks passed.")
-print("PARITY: fetch_layout_layers() output is geometrically and byte-for-byte IDENTICAL.")
 print("=" * 70)

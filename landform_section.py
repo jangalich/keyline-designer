@@ -881,6 +881,14 @@ def build_landform_section(terrain: TerrainInputs, tokens: Optional[dict] = None
         import site_report
 
         tokens = site_report.TOKENS
+    # COMPUTED AGAIN HERE, KNOWINGLY -- NOT A BUG, AND NOT FREE TO REMOVE.
+    # parcel_contours() runs once per section map: Site overview, Landform,
+    # Water, Access, Trees, Soils and Design, seven times per report over the
+    # same DEM and interval. About 0.06 s a time and no network
+    # (diagnose_report_generation_time.py), so the repeat costs under half a
+    # second and cannot fail on a flaky source. Sharing one result means
+    # threading it through every section's builder; worth doing only if the
+    # report's compute ever matters beside its fetches.
     contours = report_map.parcel_contours(terrain.dem, terrain.boundary_polygon_utm)
     classified = classify_cells(terrain)
     class_geometries = slope_class_geometries(terrain, classified["slope_counts"])

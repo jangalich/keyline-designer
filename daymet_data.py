@@ -16,9 +16,9 @@ most recent complete calendar year, distributed under NASA's EOSDIS data use
 policy: no restriction on use, citation required. It replaces Open-Meteo for
 the SITE DATA REPORT specifically (decision D5 of site-data-report-proposal.md:
 Open-Meteo's free tier is non-commercial and the report is a paid product).
-Layer 1's Open-Meteo climate_summary is NOT replaced by this module -- see
-parcel_data.py, which is untouched; that fetch retires with the narrated
-report under decision D4.
+Layer 1's Open-Meteo fetch was never replaced by this module; it was
+removed outright when the narrated report, its only reader, retired
+(decision D4; see parcel_data.py).
 
 WHAT COMES BACK. The service returns a CSV with a header block -- the
 point's latitude/longitude, its Lambert Conformal Conic coordinates, the
@@ -51,7 +51,7 @@ test_daymet_data.py / test_climate_report.py that fails if it is ignored):
 
   3. EVERYTHING IS METRIC. degC, mm/day, W/m^2, seconds. The dict stores
      what the service returned; unit conversion belongs at the formatting
-     boundary, the same rule report_generator.py already applies.
+     boundary, the same rule the retired narrated report applied.
 
 COLUMNS ARE LOOKED UP BY NAME, NEVER BY POSITION. The service orders
 columns alphabetically by variable name, not in request order -- the

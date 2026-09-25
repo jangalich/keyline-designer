@@ -360,9 +360,9 @@ def is_disqualifying_soil_condition(hydric_rating: Optional[str]) -> Optional[st
     genuine wetland (hydric) soil should hard-disqualify a production
     zone. "Poorly/very-poorly drained but non-hydric" ground is arguably
     still workable, just difficult, and belongs on the graded-quality side
-    of that line, not the absolute-disqualification side (drainagecl is
-    still surfaced elsewhere in this pipeline as a quality signal — see
-    report_generator.py's narrative use of it — just not as a hard
+    of that line, not the absolute-disqualification side (drainagecl was
+    surfaced elsewhere in this pipeline as a quality signal — in the
+    retired narrated report's narrative — just not as a hard
     exclusion here).
 
     This is an EXCLUSION check, not a graded score — see

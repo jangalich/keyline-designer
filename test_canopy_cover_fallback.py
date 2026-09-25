@@ -408,8 +408,6 @@ _OTHER_LAYERS = {
     "get_soil_geometries_for_polygon": {"type": "FeatureCollection", "features": []},
     "get_water_features_for_boundary": {"streams": [], "ponds": []},
     "get_farm_roads_for_boundary": [],
-    "get_climate_summary_for_point": {"annual_precip_mm": 1100},
-    "get_imagery_summary_for_boundary": {"scene_id": "fixture"},
     "get_regional_irradiance_baseline": {"status": "no_api_key"},
 }
 

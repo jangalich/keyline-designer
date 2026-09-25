@@ -8,7 +8,19 @@ pipeline walk would have chosen for them.
     build_session_design(session_id, store) -> SessionDesign
     layout_layers(design)                   -> the fetch_layout_layers() dict
 
-WHY THIS EXISTS. generate_full_report.py and render_layout_map.
+--- NO PRODUCTION CONSUMER NOW -------------------------------------------
+
+The narrated report, its PDF assembly and Claude call, and the matplotlib
+layout map this module fed were retired when the report job switched to
+the site data report (site_report.py), whose Design section reads the
+committed steps off the Design Document directly (design_record.py). What is still read
+from here is SessionWorkingDataExpiredError, which session_report.
+error_payload() maps. This module is kept, unchanged in behaviour, and is
+retired in a branch of its own -- deleting it in the same change that
+removed its only reader is how a live dependency is found in production
+rather than in review. What follows describes it as it was built.
+
+WHY THIS EXISTS. The narrated report's generator and the layout map's
 fetch_layout_layers() both ran pipeline_context.build_pipeline_context():
 every KSOP step recomputed from the boundary, every winner picked by the
 pipeline's own ranking. On the BATCH path that is exactly right -- there is
@@ -86,8 +98,8 @@ guess:
   block -- build_narrative_data() already ran once per access point, so
   reading the committed network's block is a lookup, not a filter.
 
-  FENCING has no PipelineContext field at all; render_layout_map.
-  fetch_layout_layers() computes it after the context is built, through its
+  FENCING has no PipelineContext field at all; the layout map's
+  fetch_layout_layers() computed it after the context was built, through its
   own identify_fencing() call. In a session fencing IS a step, so the
   design reads its COMMITTED fence lines and the map draws those. A session
   whose fencing step is not committed draws no fence -- that is the honest
@@ -96,7 +108,7 @@ guess:
 
 --- HOW EACH NARRATIVE BLOCK IS MADE COMMITTED-ONLY ---------------------
 
-report_generator.py formats each data section from the producing module's
+The narrated report formatted each data section from the producing module's
 `narrative_data` block. Those blocks narrate a CANDIDATE SET -- every
 surviving zone, every scored patch -- so forwarding one whole would put a
 candidate the user DECLINED into the report. Each step therefore takes the
@@ -146,7 +158,7 @@ module's contracts, not a preference:
 EVERY BLOCK CARRIES A `commitment` SUB-BLOCK on top (COMMITMENT_KEY),
 purely additive, under the narrative_data convention's own additive rule:
 which step it came from, how many candidates the run produced, how many the
-user committed, and whether the commit was EMPTY. report_generator.py reads
+user committed, and whether the commit was EMPTY. The narrated report read
 it to lead each section with the decision -- and an empty commit is the
 case that needs it most, because every formatter's own "nothing here" text
 describes a gap in the DATA, which is exactly the wrong thing to say about
@@ -154,8 +166,9 @@ a user who decided there would be no pond.
 
 --- THE ACCESS POINT ----------------------------------------------------
 
-generate_full_report() takes `anchor_lon_lat` and validates it against the
-boundary, because on the batch path there is nothing else to get it from.
+The narrated report's generator took `anchor_lon_lat` and validated it
+against the boundary, because on the batch path there was nothing else to
+get it from.
 In a session it is already committed and already validated: it is the roads
 step's own user input, checked at generate (Consumed/UserInput.validate)
 and again at commit (step_orchestrator.validate_commit_inputs). So the
@@ -225,12 +238,14 @@ class SessionWorkingDataExpiredError(Exception):
 # or renames anything -- which is the narrative_data convention's own rule
 # for adding to one of these.
 #
-# IMPORTED RATHER THAN RE-SPELLED. report_generator.py is the only reader,
-# and a marker whose producer and consumer each carry their own copy of the
-# string is a marker that silently stops working the day one of them is
-# renamed -- which would show up as a report quietly narrating candidate
-# sets again, the exact failure this module exists to prevent.
-from report_generator import COMMITTED_DESIGN_KEY as COMMITMENT_KEY
+# DECLARED HERE SINCE THE NARRATED REPORT WAS RETIRED. It used to be
+# imported from the narrated report, its only reader, so producer and
+# consumer could not drift apart. That reader is gone -- the site data
+# report's Design section reads committed steps off the Design Document
+# (design_record.py), not this module -- so the marker is written and
+# currently read by nothing. It stays, unchanged, until this module is
+# retired in its own branch, where what is actually left can be seen.
+COMMITMENT_KEY = "commitment"
 
 
 def _commitment(step_id: str, candidate_count: int, committed_count: int) -> dict:
@@ -306,7 +321,7 @@ class SessionDesign:
     anchor_lon_lat: Optional[tuple]
 
     # Keyed exactly like pipeline_context.PipelineContext.narrative_data, so
-    # generate_scale_of_permanence_report() takes it unchanged.
+    # the retired narrated report's generator took it unchanged.
     narrative_data: dict
 
     # Which steps the document says are committed. A step that is not here
@@ -759,17 +774,17 @@ def build_session_design(
 
 def layout_layers(design: SessionDesign) -> dict:
     """
-    The committed design in render_layout_map.fetch_layout_layers()' own
-    return shape -- so render_layout_map(boundary, path, layers=...) draws
-    THE USER'S DESIGN and nothing else changes about how it draws.
+    The committed design in the retired layout map's fetch_layout_layers()
+    return shape -- so that map's renderer (boundary, path, layers=...) drew
+    THE USER'S DESIGN and nothing else changed about how it drew.
 
     NO KSOP CALL AND NO FETCH. fetch_layout_layers() runs
     build_pipeline_context() and then makes three more calls of its own
     (roads, solar, fencing); this makes none. The only computation here is
     contour_lines.compute_contour_lines() over the DEM already in hand,
     which is the same pure-numpy pass that function does on the batch path
-    and reaches no network. (The basemap tiles render_layout_map() fetches
-    are unchanged -- that is imagery for the map, and the only network this
+    and reaches no network. (The basemap tiles the retired layout map fetched
+    were unchanged -- that is imagery for the map, and the only network this
     whole path touches.)
 
     TWO NEW PLURAL KEYS, and they are the map half of two of the four shape

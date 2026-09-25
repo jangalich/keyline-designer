@@ -1,12 +1,15 @@
 """
 api.py
 
-A thin web API wrapping generate_full_report.py, so the frontend (running
-in a browser) can trigger the full pipeline over HTTP instead of you
-running it manually in a terminal.
+The web API the frontend (running in a browser) calls: the geocoder, the
+production-zone spike, the health check, and the interactive session
+surface below.
 
-This doesn't replace any of the existing modules — it just exposes the
-same generate_full_report() function as a web endpoint.
+THE BATCH REPORT ROUTES ARE GONE. /api/generate-report and /api/generate-
+report-pdf ran the retired narrated report's generator over a bare
+boundary; both were retired with it, and the frontend called neither. The
+report a user receives is the site data report, produced by the session
+surface's POST /api/sessions/<sid>/report (session_report.py).
 
 THE INTERACTIVE SESSION SURFACE mounts here too, as session_api.py's
 blueprint: /api/sessions, its per-step generate/commit/reopen/layers verbs,
@@ -27,15 +30,12 @@ Run locally with:
 Then it's reachable at http://localhost:5000
 """
 
-import os
 import re
-import tempfile
 
-from flask import Flask, after_this_request, request, jsonify, send_file
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 import session_api
-from generate_full_report import generate_full_report
 from geocode import geocode_address
 from production_zone_payload import (
     LayerFetchError,
@@ -45,49 +45,10 @@ from production_zone_payload import (
 app = Flask(__name__)
 
 
-def _parse_access_point(data: dict) -> tuple[float, float]:
-    """
-    Pulls the required 'access_point' field out of a request body and
-    validates its shape -- a single [lon, lat] pair, same convention as
-    'boundary' coordinates. Raises ValueError with a caller-facing message
-    on anything missing/malformed; callers turn that into a 400, same
-    "fail loud, don't fake a good result" pattern the rest of this
-    pipeline uses for a bad/missing anchor point (see road_corridors.
-    validate_access_point_on_boundary(), which handles the separate
-    geometric check -- is it actually on the boundary -- once the pipeline
-    itself runs).
-    """
-    if "access_point" not in data:
-        raise ValueError(
-            "Request must include an 'access_point' field: a single [lon, lat] point "
-            "where the property meets a road along its boundary."
-        )
-
-    access_point = data["access_point"]
-
-    if (
-        not isinstance(access_point, (list, tuple))
-        or len(access_point) != 2
-        or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in access_point)
-    ):
-        raise ValueError("'access_point' must be a [longitude, latitude] pair of numbers.")
-
-    return (float(access_point[0]), float(access_point[1]))
-
-
 def _parse_boundary(data: dict) -> list:
     """
     Pulls and validates the required 'boundary' field, raising ValueError
-    with a caller-facing message -- same shape and same convention as
-    _parse_access_point() above, and the caller turns it into a 400.
-
-    /api/generate-report and /api/generate-report-pdf still carry their own
-    inline copies of these two checks. That duplication is REAL and is left
-    in place deliberately: collapsing it would mean editing the request
-    handling of the two endpoints the existing boundary -> access point ->
-    PDF flow runs through, and this branch adds a parallel path rather than
-    disturbing that one. Worth folding together in a branch that is allowed
-    to touch them.
+    with a caller-facing message; the caller turns it into a 400.
     """
     if not data or "boundary" not in data:
         raise ValueError("Request must include a 'boundary' field.")
@@ -146,164 +107,13 @@ def geocode_endpoint():
         return jsonify({"error": f"Geocoding failed: {str(e)}"}), 500
 
 
-@app.route("/api/generate-report", methods=["POST"])
-def generate_report_endpoint():
-    """
-    Expects a JSON body like:
-        {
-            "boundary": [[lon, lat], [lon, lat], ...],
-            "access_point": [lon, lat]
-        }
-    ("access_point" is required -- the real point where the property meets
-    a road along its boundary; road-corridor routing starts from it.)
-
-    Returns:
-        { "report": "..." }  on success
-        { "error": "..." }   on failure, with an appropriate HTTP status
-    """
-    data = request.get_json(silent=True)
-
-    if not data or "boundary" not in data:
-        return jsonify({"error": "Request must include a 'boundary' field."}), 400
-
-    boundary = data["boundary"]
-
-    if not isinstance(boundary, list) or len(boundary) < 3:
-        return jsonify({"error": "Boundary must be a list of at least 3 [lon, lat] points."}), 400
-
-    try:
-        access_point = _parse_access_point(data)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    try:
-        # generate_full_report expects a list of (lon, lat) tuples; JSON
-        # gives us lists, but Python's tuple-unpacking in the downstream
-        # functions works the same either way, so no conversion needed.
-        report = generate_full_report(boundary, access_point)
-        return jsonify({"report": report})
-
-    except ValueError as e:
-        # Covers validate_access_point_on_boundary()'s own rejection of an
-        # access_point that isn't actually on this boundary.
-        return jsonify({"error": str(e)}), 400
-
-    except RuntimeError as e:
-        # Covers the missing ANTHROPIC_API_KEY case specifically
-        return jsonify({"error": str(e)}), 500
-
-    except Exception as e:
-        return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
-
-
-@app.route("/api/generate-report-pdf", methods=["POST"])
-def generate_report_pdf_endpoint():
-    """
-    Expects a JSON body like:
-        {
-            "boundary": [[lon, lat], ...],
-            "access_point": [lon, lat],
-            "property_label": "..."
-        }
-    ("access_point" is required -- the real point where the property meets
-    a road along its boundary; road-corridor routing starts from it, same
-    convention as "boundary" coordinates. "property_label" is optional --
-    a display label for the report's cover page, e.g. the geocoded
-    address; defaults to a generic label.)
-
-    Returns the assembled PDF (the existing narrative Scale of Permanence
-    report, unchanged, plus the new final-page static layout map) as a
-    binary file download, or { "error": "..." } with an appropriate HTTP
-    status on failure.
-
-    This is a NEW, SEPARATE endpoint from /api/generate-report rather
-    than an addition to that endpoint's response -- the return type here
-    is fundamentally different (a binary PDF file, not JSON), so folding
-    it into the existing response would mean either always paying the
-    map-rendering + PDF-assembly cost for callers who only want the
-    narrative text, or awkwardly base64-encoding a PDF into a JSON field.
-    A separate endpoint also means the frontend's "Generate Report"
-    button (which calls /api/generate-report today) is completely
-    unaffected by this addition -- wiring the button to PDF output is a
-    deliberate, separate next step, not part of this change.
-    """
-    data = request.get_json(silent=True)
-
-    if not data or "boundary" not in data:
-        return jsonify({"error": "Request must include a 'boundary' field."}), 400
-
-    boundary = data["boundary"]
-
-    if not isinstance(boundary, list) or len(boundary) < 3:
-        return jsonify({"error": "Boundary must be a list of at least 3 [lon, lat] points."}), 400
-
-    try:
-        access_point = _parse_access_point(data)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    property_label = data.get("property_label") or "Property Design Report"
-
-    try:
-        tmp_dir = tempfile.mkdtemp(prefix="keyline-report-")
-        pdf_path = os.path.join(tmp_dir, "scale_of_permanence_report.pdf")
-
-        # WEASYPRINT IS IMPORTED HERE, NOT AT MODULE SCOPE. generate_pdf_report
-        # imports weasyprint, which links libpango at import time; on a machine
-        # without those system libraries the import raises. At module scope
-        # that made the ENTIRE API unimportable -- every session route, the
-        # production-zone spike and /api/health included -- because one
-        # endpoint's rendering toolchain was missing. A test process that
-        # touches no PDF could not so much as `import api`, which is why
-        # test_session_api.py's section 10 could not run locally.
-        #
-        # Deferred to the one route that actually renders a PDF, the failure
-        # lands where the capability is used: a request to this endpoint on a
-        # box without libpango 500s with the ImportError, and nothing else on
-        # the app is affected. The endpoint's behaviour is otherwise unchanged
-        # -- same function, same arguments; the import is simply paid on first
-        # call rather than at startup, and cached in sys.modules after that.
-        from generate_pdf_report import generate_full_report_pdf
-
-        generate_full_report_pdf(boundary, pdf_path, access_point, property_label=property_label)
-
-        @after_this_request
-        def _cleanup_temp_pdf(response):
-            try:
-                os.remove(pdf_path)
-                os.rmdir(tmp_dir)
-            except OSError:
-                pass
-            return response
-
-        return send_file(
-            pdf_path,
-            mimetype="application/pdf",
-            as_attachment=True,
-            download_name="scale_of_permanence_report.pdf",
-        )
-
-    except ValueError as e:
-        # Covers validate_access_point_on_boundary()'s own rejection of an
-        # access_point that isn't actually on this boundary.
-        return jsonify({"error": str(e)}), 400
-
-    except RuntimeError as e:
-        # Covers the missing ANTHROPIC_API_KEY case specifically
-        return jsonify({"error": str(e)}), 500
-
-    except Exception as e:
-        return jsonify({"error": f"PDF report generation failed: {str(e)}"}), 500
-
-
 @app.route("/api/production-zones", methods=["POST"])
 def production_zones_endpoint():
     """
     Expects a JSON body like:
         { "boundary": [[lon, lat], [lon, lat], ...] }
 
-    NO 'access_point'. Unlike /api/generate-report and
-    /api/generate-report-pdf, nothing on this path routes a road, so
+    NO 'access_point'. Nothing on this path routes a road, so
     requiring the anchor point road routing starts from would be demanding a
     decision the user has not been asked to make yet. This step runs on a
     traced boundary alone.

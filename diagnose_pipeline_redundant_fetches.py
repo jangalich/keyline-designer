@@ -166,10 +166,10 @@ ambiguity artifact.
 --- What this does NOT do ---
 
 Does not modify pipeline_context.py or any of the 6 dependency modules --
-read-only. Does not wire into generate_full_report.py -- that entry point
-doesn't share pipeline_context.py's overrides yet (see pipeline_context.
-py's own module docstring), so a generate_full_report.py variant of this
-script is separate, later work once that wiring exists.
+read-only. Did not wire into the retired narrated report's generator --
+that entry point didn't share pipeline_context.py's overrides (see
+pipeline_context.py's own module docstring), so a variant of this script
+for it was left as later work, now moot with that generator retired.
 
 Exits non-zero (a real assert, not a printed warning) if ANY PRIMARY
 count exceeds its expected value, so this is callable from a shell

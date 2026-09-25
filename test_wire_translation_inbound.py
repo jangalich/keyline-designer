@@ -399,8 +399,8 @@ else:
 # Every field a `production_areas=` consumer reads, present and typed. The
 # list is the AST-verified read set across water_survey_areas.py,
 # road_corridors.py, solar_suitability.py, tree_zone_candidates.py,
-# water_candidate_zones.py, pipeline_context.py and render_layout_map.py --
-# see the branch report's consumer table.
+# water_candidate_zones.py, pipeline_context.py and the since-retired layout
+# map -- see the branch report's consumer table.
 CONSUMER_READ_FIELDS = {
     "id": int,
     "polygon_utm": (Polygon, MultiPolygon),

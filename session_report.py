@@ -9,10 +9,9 @@ THE REPORT, AS A THING THE OWNER OF A SESSION CAN ASK FOR.
     error_payload(exc)                          -> the job's `failed` payload
     ReportStore                                 -> the produced PDFs, by id
 
-generate_full_report.generate_session_report() already builds the narrative
-from the session's committed design, and generate_pdf_report.
-generate_session_report_pdf() already assembles the PDF around it. Both are
-Python-callable only. This module is what makes them reachable over HTTP --
+site_report.generate_session_site_report_pdf() builds the site data report
+for a session -- eight sections, the contents and the back matter -- and is
+Python-callable only. This module is what makes it reachable over HTTP --
 the preconditions, the job, the failure shapes and the place the finished
 file lives -- and session_api.py wires it to two routes.
 
@@ -48,36 +47,35 @@ client has to POLL to discover is the wrong story -- it says the work was
 accepted when it never could be, and it arrives as a failure that reads
 like the report broke.
 
---- THE TWO FAILURES ARE DIFFERENT IN KIND ------------------------------
+--- THE FAILURES ARE DIFFERENT IN KIND ---------------------------------
 
-EXPIRED WORKING DATA is ACTIONABLE. session_design.
-SessionWorkingDataExpiredError means the committed design is intact in the
-Design Document and this session's tier-2 cache entry is gone; the user
-reopens the steps and recommits, and the report works. Its payload carries
-`session_expired`, and the message is the module's own sentence verbatim
-(session_design.WORKING_DATA_EXPIRED) -- it was written to be shown.
+A REQUIRED REPORT-TIME SOURCE THAT DID NOT ANSWER. report_data.
+ReportDataIncompleteError -- Daymet, the one REQUIRED report layer --
+carries `failed_layer {type, label, reason}`, the shape the frontend
+already renders for a generate and a session creation, with
+`report_failed` beside it so a client that knows only the generic shape
+still reads a report failure. See _failed_layer_payload(). A DEGRADABLE
+layer never fails the report; its section says what is missing.
 
-EVERYTHING ELSE IS NOT. The Claude call failing, a basemap tile server not
-answering, weasyprint falling over: none of it is something the user can
-fix by retrying differently, and none of it means their design is wrong.
-Its payload carries `report_failed`, and the prose says what happened and
-that the design is unharmed. It does NOT invite a different attempt,
-because there is no different attempt to make.
+EVERYTHING ELSE. A report-time source outside the table, a rebuild whose
+Layer 1 refetch did not answer, WeasyPrint falling over: none of it is
+something the user can fix by retrying differently, and none of it means
+their design is wrong. Its payload carries `report_failed`, and the prose
+says what happened and that the design is unharmed.
+
+EXPIRED WORKING DATA -- session_design.SessionWorkingDataExpiredError,
+carrying `session_expired` -- is still mapped, and nothing on the site
+report's path raises it: an evicted session context is REBUILT from the
+Design Document (session_manager.get_session_context), and the Design
+section reads the committed steps off the document, never the cache. The
+mapping stays until session_design itself is retired, because the
+frontend branches on the key and the two go together.
 
 TOLD APART BY A KEY EACH CARRIES, never by one they lack -- step_
 orchestrator.error_payload()'s rule, for its reason: a client reading "no
 session_expired" as "must be the other kind" is one new failure mode away
 from telling a user to reopen and recommit against something a recommit
 cannot touch.
-
-A THIRD SHAPE, FOR THE SITE DATA REPORT'S OWN DATA LAYER. report_data.
-ReportDataIncompleteError -- a REQUIRED report-time source (Daymet) that
-did not answer -- carries `failed_layer {type, label, reason}`, the shape
-the frontend already renders for a generate and a session creation, with
-`report_failed` beside it so a client that knows only the two shapes above
-still reads a report failure. See _failed_layer_payload(). Nothing raises
-it on the job today (site_report.py is not yet wired into run_report_job);
-the mapping is here so the day it is, the failure has its words.
 
 --- SERVING THE FILE ----------------------------------------------------
 
@@ -140,7 +138,7 @@ REPORT_URL_PREFIX = "/api/reports"
 # What the browser saves it as. Not the report id: a user with two reports
 # in their downloads folder wants two files they can tell apart by property
 # and date, and neither is in a token.
-DOWNLOAD_FILENAME = "scale-of-permanence-report.pdf"
+DOWNLOAD_FILENAME = "site-data-report.pdf"
 
 PDF_MIME_TYPE = "application/pdf"
 
@@ -149,9 +147,9 @@ PDF_MIME_TYPE = "application/pdf"
 # assert that it does not tell them to try again differently -- there is
 # nothing different to try.
 GENERATION_FAILED = (
-    "The report could not be generated. Something outside your design did not "
-    "respond -- the narrative service or the map imagery. Your committed design "
-    "is unharmed and nothing about it needs to change."
+    "The report could not be generated. One of the public data services it "
+    "reads did not respond, or the document could not be assembled. Your "
+    "committed design is unharmed and nothing about it needs to change."
 )
 
 
@@ -356,43 +354,54 @@ def run_report_job(
     fetch_cache=None,
     cache=None,
     reports: Optional[ReportStore] = None,
-    property_label: str = "Property Design Report",
+    property_label: Optional[str] = None,
+    report_fetch_cache=None,
 ) -> dict:
     """
     THE REPORT JOB'S `done` RESULT:
 
         {"report_id": ..., "download_url": "/api/reports/<id>",
-         "filename": "scale-of-permanence-report.pdf", "size_bytes": N}
+         "filename": "site-data-report.pdf", "size_bytes": N}
 
     A URL AND NOT THE BYTES -- see the module docstring. `filename` is what
     the download route sets as the attachment name and is here so a client
     can label the link before it fetches; `size_bytes` is what it takes to
     show a real "12.4 MB" beside it rather than a hopeful one.
 
-    WEASYPRINT IS IMPORTED INSIDE THIS FUNCTION, api.py's reason verbatim:
-    generate_pdf_report imports weasyprint, which links libpango at import
-    time, so at module scope one missing system library would make this
-    module unimportable and take every session route down with it. Paid on
-    the first report instead, where the capability is used.
+    THE SITE DATA REPORT. site_report.generate_session_site_report_pdf():
+    the report layer through the report fetch cache (`report_fetch_cache`,
+    None for the process-wide one -- a test passes its own), the session
+    context through get_session_context() -- a hit, or a REBUILD from the
+    Design Document for a session the cache has let go -- and the PDF.
+
+    `property_label` None prints the centroid on the cover
+    (site_report.cover_label). No invented label: a placeholder title on
+    a site data report's cover is a visible error.
+
+    WEASYPRINT IS IMPORTED ONLY WHEN THE PDF IS WRITTEN (inside site_report.
+    generate_site_report_pdf()): it links libpango at import time, so at
+    module scope one missing system library would make this module
+    unimportable and take every session route down with it.
 
     RAISES rather than returning a failure. This runs on a job thread and
     job_runner.submit() turns whatever comes out of it into the job's
     `failed` state through error_payload() below -- which is where the two
     kinds of failure are told apart.
     """
-    from generate_pdf_report import generate_session_report_pdf
+    import site_report
 
     if reports is None:
         reports = DEFAULT_REPORT_STORE
 
     report_id, pdf_path = reports.new_path()
-    generate_session_report_pdf(
+    site_report.generate_session_site_report_pdf(
         session_id,
         store,
         pdf_path,
+        property_label=property_label,
+        report_fetch_cache=report_fetch_cache,
         fetch_cache=fetch_cache,
         cache=cache,
-        property_label=property_label,
     )
     return {
         "report_id": report_id,
@@ -406,12 +415,18 @@ def error_payload(exc: BaseException) -> dict:
     """
     One exception -> the payload a failed report job carries.
 
-    TWO SHAPES, EACH NAMING ITSELF (the module docstring's argument):
+    THREE SHAPES, EACH NAMING ITSELF (the module docstring's argument):
+
+        {"error": ..., "failed_layer": {"type", "label", "reason"},
+         "report_failed": {"actionable": bool}}
+
+        {"error": GENERATION_FAILED, "report_failed": {"actionable": false}}
 
         {"error": <session_design's own sentence>,
          "session_expired": {"session_id", "step_id", "remedy": "reopen_and_recommit"}}
 
-        {"error": GENERATION_FAILED, "report_failed": {"actionable": false}}
+    The last is not raised on the site report's path (the module
+    docstring); it is mapped until session_design is retired.
 
     THE EXPIRED MESSAGE IS THE RAISER'S, VERBATIM -- str(exc), which carries
     session_design.WORKING_DATA_EXPIRED inside it. That sentence was written
@@ -487,7 +502,8 @@ def submit_report(
     cache=None,
     runner: Optional[job_runner.JobRunner] = None,
     reports: Optional[ReportStore] = None,
-    property_label: str = "Property Design Report",
+    property_label: Optional[str] = None,
+    report_fetch_cache=None,
 ):
     """
     Check the preconditions, then submit the report job. Returns the Job.
@@ -516,6 +532,7 @@ def submit_report(
             cache=cache,
             reports=reports,
             property_label=property_label,
+            report_fetch_cache=report_fetch_cache,
         ),
         on_error=error_payload,
     )

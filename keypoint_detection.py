@@ -781,8 +781,8 @@ def identify_keypoints(
             'valleys_geojson': FeatureCollection,    # layer="valley" (diagnostic)
         }
 
-    'keypoints' is the raw geometry-first list (the shape render_layout_map.py
-    and the report generator consume directly); 'keypoints_geojson' is its
+    'keypoints' is the raw geometry-first list (the shape the report generator
+    consumes directly, as the retired layout map did); 'keypoints_geojson' is its
     schema-conformant GeoJSON wrapping for map/vector output.
 
     This path needs the network for the DEM fetch alone; the offline unit

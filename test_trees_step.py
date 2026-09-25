@@ -731,8 +731,8 @@ validate_feature_collection(OUTBOUND)
 
 # THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NO GEOMETRY BESIDE IT, and
 # the equality is asserted rather than tolerated. build_trees_payload() used to add
-# `display_only_smoothed_outline`, and it no longer does: render_layout_map.py
-# draws the tree hatch from the cell-union footprint verbatim ("no hull, no
+# `display_only_smoothed_outline`, and it no longer does: the retired layout
+# map drew the tree hatch from the cell-union footprint verbatim ("no hull, no
 # opening, no smoothing of any kind"), so a smoothed outline on a tree feature
 # made the interactive map disagree with the printed one instead of agreeing
 # with it -- and the smooth is anti-extensive, so what it moved it moved off
@@ -1528,7 +1528,7 @@ print(
     "\n12. REGRESSION: run the other test files separately -- test_step_registry.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_tree_zone_candidates.py, "
-    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_render_layout_map.py, "
+    "test_session_api.py, test_solar_suitability.py, test_fencing.py, test_design_section.py, "
     "test_tree_zone_geometry_validity.py, test_tree_zone_render_footprint.py."
 )
 print("\nAll trees step checks passed.")

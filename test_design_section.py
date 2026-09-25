@@ -98,8 +98,8 @@ LAYERS = {spec["id"]: spec for spec in MAP["layers"]}
 print("1. no colour literal outside site_report.TOKENS")
 # The stylesheet, every report template, the report's renderers (the map
 # and the chart), this section's builder, the record and the imagery
-# module. render_layout_map.py is the narrated report's and is NOT here:
-# it is left exactly as it was until D4 retires it.
+# module. The matplotlib layout map was the narrated report's and is NOT
+# here: it was left exactly as it was until D4 retired it.
 checked = [os.path.join(HERE, "templates", "report", "report.css")]
 for root, _, files in os.walk(os.path.join(HERE, "templates", "report")):
     checked += [os.path.join(root, f) for f in files if f.endswith(".html")]
@@ -312,7 +312,7 @@ print("3. what this map must NOT draw: keypoints and the five exclusion zones")
 # constrain DRAWING: on the interactive map they tell the user where they
 # may work, and at commit there is nothing left to draw. They are also the
 # five heaviest layers in the set; five textures under eight design layers
-# would make the design unreadable. render_layout_map.py draws them as a
+# would make the design unreadable. The retired layout map drew them as a
 # leftover from the interactive work; this map does not. It is a RENDERING
 # exclusion, not a data one: the exclusions stay in the payload and the
 # pipeline still needs them.

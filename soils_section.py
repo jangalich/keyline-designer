@@ -703,8 +703,18 @@ def _unavailable_reason(inputs: sd.SoilsInputs, layer: str) -> str:
 
 
 def build_survey_unavailable(inputs: sd.SoilsInputs) -> list:
+    """What stands where the properties table would be. TWO CASES, and the
+    statement says which: the survey layer did not answer (or has no data
+    here), or it ANSWERED and described no dominant major component for any
+    map unit on this parcel -- the survey rows then belong to other units,
+    and there is no row to print. The second used to reach the template with
+    no statement at all, and the render raised."""
+    if inputs.soil_survey is None:
+        reason = _unavailable_reason(inputs, "soil_survey")
+    else:
+        reason = "answered, but described no major component for the map units on this parcel"
     return ["The soil survey's detailed properties are not shown: the Soil Data Access service ",
-            _unavailable_reason(inputs, "soil_survey"),
+            reason,
             ". The map unit polygons, their drainage class, hydrologic group, saturated conductivity, farmland "
             "classification and K factor above come from the session's own soil readings and are unaffected; the "
             "map unit symbols, the surface horizon's properties, the land capability class and the T factor are not "
@@ -712,8 +722,13 @@ def build_survey_unavailable(inputs: sd.SoilsInputs) -> list:
 
 
 def build_geology_unavailable(inputs: sd.SoilsInputs) -> list:
-    return ["The bedrock geology is not shown: the USGS State Geologic Map Compilation ",
-            _unavailable_reason(inputs, "bedrock_geology"), "."]
+    """The survey's two cases, for the same reason (build_survey_unavailable):
+    no answer, or an answer that maps no unit here."""
+    if inputs.bedrock_geology is None:
+        reason = _unavailable_reason(inputs, "bedrock_geology")
+    else:
+        reason = "answered, but maps no geologic unit under this parcel"
+    return ["The bedrock geology is not shown: the USGS State Geologic Map Compilation ", reason, "."]
 
 
 # ======================================================================
@@ -805,9 +820,24 @@ def build_soils_section(inputs: sd.SoilsInputs, tokens: Optional[dict] = None) -
         tokens = site_report.TOKENS
     derived = sd.derive(inputs)
     parcel = inputs.boundary_polygon_utm
+    # COMPUTED AGAIN HERE, KNOWINGLY -- NOT A BUG, AND NOT FREE TO REMOVE.
+    # parcel_contours() runs once per section map: Site overview, Landform,
+    # Water, Access, Trees, Soils and Design, seven times per report over the
+    # same DEM and interval. About 0.06 s a time and no network
+    # (diagnose_report_generation_time.py), so the repeat costs under half a
+    # second and cannot fail on a flaky source. Sharing one result means
+    # threading it through every section's builder; worth doing only if the
+    # report's compute ever matters beside its fetches.
     contours = report_map.parcel_contours(inputs.dem, parcel)
     rendered = report_map.render_map(parcel, build_map_layers(derived, contours), tokens)
     missed = unlabelled_units(rendered, derived)
+    # THE STATEMENT FOLLOWS THE TABLE, NOT THE LAYER. The template prints the
+    # unavailable statement whenever the table (or the geology line) is
+    # absent, so each is built exactly then -- a layer that answered with
+    # nothing usable for this parcel leaves the table empty just as an absent
+    # layer does, and must not reach the template with no statement.
+    properties_table = build_properties_table(derived)
+    geology = build_geology(derived)
     return {
         "number": section_number(SECTION_NAME),
         "name": SECTION_NAME,
@@ -818,20 +848,20 @@ def build_soils_section(inputs: sd.SoilsInputs, tokens: Optional[dict] = None) -
         "map_caption": build_map_caption(derived, missed),
         "map_unit_table": build_map_unit_table(derived),
         "map_unit_caption": build_map_unit_caption(derived),
-        "properties_table": build_properties_table(derived),
+        "properties_table": properties_table,
         "properties_caption": build_properties_caption(derived),
         "soil_test": build_soil_test_statement(derived),
         "profile_water": build_profile_water(derived),
-        "survey_unavailable": build_survey_unavailable(inputs) if inputs.soil_survey is None else None,
+        "survey_unavailable": None if properties_table else build_survey_unavailable(inputs),
         "capability_table": build_capability_table(derived),
         "capability_caption": build_capability_caption(derived),
         "farmland_table": build_farmland_table(derived),
         "farmland_caption": build_farmland_caption(derived),
         "erosion_table": build_erosion_table(derived),
         "erosion_caption": build_erosion_caption(derived),
-        "geology": build_geology(derived),
+        "geology": geology,
         "geology_caption": build_geology_caption(derived) if derived.geology and derived.geology["units"] else [],
-        "geology_unavailable": build_geology_unavailable(inputs) if inputs.bedrock_geology is None else None,
+        "geology_unavailable": None if geology else build_geology_unavailable(inputs),
         "cross_reference": build_cross_reference(inputs),
         "sources": build_sources(inputs, derived),
         "methods": build_methods(inputs, derived),

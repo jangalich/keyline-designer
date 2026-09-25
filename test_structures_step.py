@@ -723,8 +723,8 @@ import json
 assert json.loads(json.dumps(FLAGS)) == FLAGS
 
 # THE WIRE FORM IS REPRODUCIBLE FROM THE RESULT, byte for byte -- which is
-# exactly what render_layout_map.fetch_layout_layers() could not do from
-# context.selected_structure_site before.
+# exactly what the retired layout map's fetch_layout_layers() could not
+# do from context.selected_structure_site before.
 assert solar_suitability.candidates_to_geojson(GENERATED, **FLAGS) == RESULT["zones_geojson"]
 rebuilt = wire_translation.selected_structure_site_to_feature_collection(
     RESULT["selected_structure_site"], **FLAGS
@@ -1845,7 +1845,7 @@ print(
     "test_wire_translation.py, test_wire_translation_inbound.py, test_step_orchestrator.py, "
     "test_step_commit.py, test_water_step.py, test_roads_step.py, test_trees_step.py, "
     "test_solar_suitability.py, test_solar_suitability_pipeline.py, test_solar_road_fallback.py, "
-    "test_tree_zone_candidates.py, test_session_api.py, test_fencing.py, test_render_layout_map.py, "
+    "test_tree_zone_candidates.py, test_session_api.py, test_fencing.py, test_design_section.py, "
     "test_pipeline_context.py."
 )
 print("\nAll structures step checks passed.")

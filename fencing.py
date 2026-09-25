@@ -38,13 +38,13 @@ types get real computed geometry here:
   road corridor sited) this collapses cleanly back to the drawn-boundary-
   only behavior. No fence
   type/height/material guidance, which is explicitly out of scope (see
-  report_generator.py's step 7 framing).
+  the retired narrated report's step 7 framing).
 
   WATER ZONE EXCLUSION FENCING -- water_candidate_zones.py's own SINGLE
   selected water system candidate (water_suitability.select_optimal_
   water_zone()'s rank-1 answer) already carries a real, already-computed
   fill footprint (render_fill_polygon_utm -- the SAME display-quality
-  polygon render_layout_map.py already draws that zone's own fill from),
+  polygon the retired layout map drew that zone's own fill from),
   not raw DEM cells -- so this fences it in with the SAME "buffer a real
   feature, output its outline" recipe STREAM EXCLUSION FENCING above
   already uses. Buffered outward by a fixed distance (WATER_ZONE_FENCE_
@@ -70,13 +70,13 @@ scheme (how a producer intends to divide and rotate production ground),
 not a real, already-sited or already-scored feature footprint the way
 every fence type above does, even the candidate-stage water/tree zone
 layers (a real, already-computed scored candidate is not the same thing
-as a not-yet-decided planning scheme). That gets narrative-only treatment
+as a not-yet-decided planning scheme). That got narrative-only treatment
 instead, reasoned by Claude at report time from structured context
 already computed by earlier steps (water candidate zones, production
 zones, tree zone candidates, valley/ridge delineation, road corridors,
-building placement) -- same pattern report_generator.py already uses for
-tradeoff narration elsewhere in the report. See report_generator.py's
-step 7 system-prompt guidance for exactly how that narrative is framed.
+building placement) -- same pattern the retired narrated report used for
+tradeoff narration elsewhere in that report. Its step 7 system-prompt
+guidance framed exactly how that narrative read.
 The water and tree zone EXCLUSION fences above stay fully independent
 closed loops of their own regardless: where a zone sits inside the
 developed footprint with real clearance, its fence is a separate nested
@@ -412,8 +412,9 @@ def find_boundary_fencing(
          stays genuinely independent. (The convex hull in step 4 can move
          the boundary fence line off a zone edge that is itself non-convex
          or recessed relative to the overall hull -- the render-time
-         coincidence-trim in render_layout_map.py, not this function,
-         suppresses any resulting doubled line.)
+         coincidence-trim (the retired layout map's, now in fence_display_
+         geometry.py), not this function, suppresses any resulting doubled
+         line.)
 
       4. hulled = protective_core.convex_hull, then clipped =
          hulled.intersection(boundary_polygon_utm). The convex hull is what
@@ -677,7 +678,7 @@ def find_water_zone_fencing(
     Pure geometric core -- no network I/O. Takes the selected water zone's
     own already-computed render_fill_polygon_utm (water_candidate_zones.
     find_candidate_zones()'s own real fill footprint, the SAME polygon
-    render_layout_map.py already draws that zone's fill from) and returns a
+    the retired layout map drew that zone's fill from) and returns a
     closed fence line buffer_meters outside its edge (see
     _buffer_fill_polygon_to_fence_line()'s own docstring for the recipe and
     the "no sensible fallback" reasoning on an unexpected buffer result).
@@ -928,8 +929,8 @@ def identify_fencing(
     caller that already fetched it). Same independent-fetch pattern
     every other pipeline module in this codebase uses (each fetches what
     it needs rather than sharing state across pipeline stages) --
-    generate_full_report.py's own hydrology fetch for the WATER SUPPLY
-    section is untouched by this. dem, likewise, is fetched here if not
+    the retired narrated report's own hydrology fetch for its WATER SUPPLY
+    section was untouched by this. dem, likewise, is fetched here if not
     already supplied (get_dem_for_boundary()) -- identify_boundary_
     fencing() needs one to build boundary_polygon_utm and reproject its
     result (see that function's own docstring), same optional-dem pattern
@@ -949,7 +950,7 @@ def identify_fencing(
     selected_water_zone_render_fill_polygon_utm is water_candidate_
     zones.find_candidate_zones()'s own already-computed render_fill_
     polygon_utm for the single selected water zone -- the SAME real fill
-    footprint render_layout_map.py already draws that zone's fill from,
+    footprint the retired layout map drew that zone's fill from,
     NOT re-derived here. If not supplied, this fetches it itself via
     water_suitability.fetch_and_select_optimal_water_zone(dem=dem) -- NOT
     a re-run of water-zone siting/scoring logic, just this module's own
@@ -1375,7 +1376,7 @@ def build_narrative_data(
     WHAT IS MEASURED. Every fence's LENGTH, in FEET at one decimal, off the
     UTM geometry the fence was actually computed in (metres), through the
     same _feet() boundary road_corridors.py uses for a road's length. Feet
-    because the report narrates imperial throughout (report_generator.py:
+    because the retired narrated report was imperial throughout (its prompt:
     "Report all measurements in feet, acres, inches, and °F") and because
     the only fence-adjacent length precedent in this codebase -- a road
     branch's length_ft / total_length_ft -- is feet at one decimal.

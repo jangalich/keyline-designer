@@ -4,7 +4,8 @@ elevation_data.py
 DEMOTED, NOT DELETED: nothing on the pipeline path calls this module any
 more. get_elevation_grid() was the thirteenth layer parcel_data.fetch_
 parcel_data() fetched, and it existed for ONE SENTENCE in the report --
-report_generator._format_elevation_summary()'s min/max/relief line. It
+the retired narrated report's min/max/relief line (its _format_elevation_
+summary()). It
 cost 42.8 s, 31.8 s and 118.8 s across three timed cold session creations,
 65-90% of the entire fetch wait, because a 6x6 lattice is 36 SEQUENTIAL
 EPQS point requests with a time.sleep(0.3) between each (10.8 s of pure

@@ -58,11 +58,8 @@ What this file proves, in order:
      GROUND -- at the shared 5.0m buffer a road crossing the parcel
      excludes the cells within 5m of its centerline, where the old 0.0
      buffer (computed inline as the contrast) excluded nothing.
-  9. THE LAYER ACTUALLY RENDERS, and does so under its two constraints:
-     beneath every feature layer (above only the basemap/halo backdrop,
-     which covers off-parcel ground this layer never touches), and
-     contributing exactly ONE legend entry. Read off a real render, not
-     off the constants.
+  9. (retired) The layer's render on the matplotlib layout map, retired
+     with that renderer.
 """
 
 import inspect
@@ -1108,146 +1105,13 @@ print(
 
 
 # ===========================================================================
-# 9. THE LAYER ACTUALLY RENDERS -- BENEATH EVERYTHING, ONE LEGEND ENTRY
+# 9. (RETIRED) THE LAYER RENDERED ON THE MATPLOTLIB LAYOUT MAP
 # ===========================================================================
-#
-# Two constraints from this layer's own brief, both checked against a real
-# render rather than against the constants: it must sit BELOW every other
-# layer's zorder (it is the map's ground layer, not another feature), and it
-# must contribute exactly ONE legend entry.
-
-import os  # noqa: E402
-import tempfile  # noqa: E402
-
-from rasterio.warp import transform as warp_transform  # noqa: E402
-
-import render_layout_map as rlm  # noqa: E402
-
-_m_xs, _m_ys = _o_boundary.exterior.coords.xy
-_m_lons, _m_lats = warp_transform(_o_dem["crs"], "EPSG:4326", list(_m_xs), list(_m_ys))
-_m_boundary_coordinates = list(zip(_m_lons, _m_lats))
-
-_m_layers = {
-    "dem": _o_dem,
-    "exclusion_zones": _o_result,
-    "production_areas": [],
-    "water_zone": None,
-    "road_corridor": [],
-    "tree_zone_result": {"patches": []},
-    "structure_site": None,
-    "keypoints": [],
-    "water_features": {"streams": [], "water_bodies": []},
-    "contour_lines": [],
-    "fencing_result": {"fencing_geojson": {"type": "FeatureCollection", "features": []}},
-}
-
-_drawn = []
-_orig_plot_polygon = rlm.plot_polygon
-_orig_legend = rlm.plt.Axes.legend
-_legend_labels = []
-
-
-def _recording_plot_polygon(geom, **kwargs):
-    _drawn.append({"facecolor": kwargs.get("facecolor"), "zorder": kwargs.get("zorder")})
-    return _orig_plot_polygon(geom, **kwargs)
-
-
-def _recording_legend(self, *args, **kwargs):
-    legend = _orig_legend(self, *args, **kwargs)
-    _legend_labels[:] = [text.get_text() for text in legend.get_texts()]
-    return legend
-
-
-with mock_patch.object(rlm, "plot_polygon", _recording_plot_polygon), \
-     mock_patch.object(rlm.plt.Axes, "legend", _recording_legend), \
-     tempfile.TemporaryDirectory() as _tmpdir:
-    rlm.render_layout_map(
-        _m_boundary_coordinates, os.path.join(_tmpdir, "layout_map.png"), layers=_m_layers
-    )
-
-_exclusion_draws = [d for d in _drawn if d["facecolor"] == rlm.EXCLUSION_ZONE_COLOR]
-assert _exclusion_draws, (
-    "the exclusion union must actually be DRAWN -- no patch was plotted in EXCLUSION_ZONE_COLOR"
-)
-# Everything else this render drew, split at the BACKDROP boundary. The
-# basemap (or its neutral fallback fill, zorder 1) and the halo mask (zorder
-# 10) are backdrop treatments, not KSOP layers: the basemap is the ground the
-# whole map sits on, and the halo washes OFF-parcel ground this layer never
-# covers. The exclusion layer belongs above those two and below everything
-# else -- see EXCLUSION_ZONE_ZORDER's own comment.
-_BACKDROP_ZORDER_CEILING = 10
-_backdrop_zorders = [
-    d["zorder"]
-    for d in _drawn
-    if d["facecolor"] != rlm.EXCLUSION_ZONE_COLOR
-    and d["zorder"] is not None
-    and d["zorder"] <= _BACKDROP_ZORDER_CEILING
-]
-_feature_zorders = [
-    d["zorder"]
-    for d in _drawn
-    if d["facecolor"] != rlm.EXCLUSION_ZONE_COLOR
-    and d["zorder"] is not None
-    and d["zorder"] > _BACKDROP_ZORDER_CEILING
-]
-assert _backdrop_zorders, "fixture sanity: this render must draw a backdrop to sit above"
-for _draw in _exclusion_draws:
-    assert _draw["zorder"] == rlm.EXCLUSION_ZONE_ZORDER
-    for _z in _feature_zorders:
-        assert _draw["zorder"] < _z, (
-            f"the exclusion layer must sit BELOW every feature layer -- it draws at {_draw['zorder']} but "
-            f"a feature draws at {_z}"
-        )
-    for _z in _backdrop_zorders:
-        assert _draw["zorder"] > _z, (
-            f"the exclusion layer must sit ABOVE the basemap/halo backdrop (it covers ON-parcel ground, "
-            f"which the halo is not meant to touch) -- it draws at {_draw['zorder']}, backdrop at {_z}"
-        )
-# The feature layers that draw as lines rather than polygons carry their own
-# zorders as module constants; assert against those directly, since this
-# fixture deliberately draws none of them.
-for _layer_zorder in (20, 40, 41, 42, 42.5, 42.8, rlm.EXCLUSION_FENCE_ZORDER, rlm.FENCE_ZORDER):
-    assert rlm.EXCLUSION_ZONE_ZORDER < _layer_zorder, (
-        f"exclusion zorder {rlm.EXCLUSION_ZONE_ZORDER} must be below every feature layer -- found a layer "
-        f"at {_layer_zorder} (streams 20, production contours 40, water ripples 41, road 42/42.5, tree "
-        "hatch 42.8, the exclusion/boundary fences)"
-    )
-
-assert _legend_labels.count(rlm.LEGEND_LABEL_EXCLUSION) == 1, (
-    f"the exclusion layer must contribute EXACTLY ONE legend entry -- got {_legend_labels}"
-)
-assert _legend_labels[0] == rlm.LEGEND_LABEL_EXCLUSION, (
-    "it leads the legend, being the ground layer everything else sits on -- got "
-    f"{_legend_labels}"
-)
-
-# ...and a layers dict with no exclusion result at all still renders, drawing
-# no exclusion patch and contributing no legend entry.
-_m_layers_without = dict(_m_layers)
-del _m_layers_without["exclusion_zones"]
-_drawn.clear()
-_legend_labels.clear()
-with mock_patch.object(rlm, "plot_polygon", _recording_plot_polygon), \
-     mock_patch.object(rlm.plt.Axes, "legend", _recording_legend), \
-     tempfile.TemporaryDirectory() as _tmpdir:
-    rlm.render_layout_map(
-        _m_boundary_coordinates, os.path.join(_tmpdir, "layout_map_no_exclusion.png"), layers=_m_layers_without
-    )
-assert not [d for d in _drawn if d["facecolor"] == rlm.EXCLUSION_ZONE_COLOR], (
-    "a layers dict built before this layer existed must simply draw no exclusion layer, not fail"
-)
-assert rlm.LEGEND_LABEL_EXCLUSION not in _legend_labels, (
-    "a feature that drew nothing contributes no legend entry"
-)
-
-print(
-    f"RENDERED: the exclusion union draws as flat {rlm.EXCLUSION_ZONE_COLOR} fill at alpha "
-    f"{rlm.EXCLUSION_ZONE_ALPHA}, no edge stroke, zorder {rlm.EXCLUSION_ZONE_ZORDER} -- below the streams "
-    f"(20) and every KSOP layer above them -- contributing exactly one legend entry "
-    f"({rlm.LEGEND_LABEL_EXCLUSION!r}). A layers dict without the key renders with no exclusion layer and "
-    "no legend entry."
-)
-
+# This section drove the matplotlib layout map and asserted the exclusion
+# layer drew beneath every other layer with one legend entry. That renderer
+# was retired with the narrated report; the site data report's layout map
+# (design_section, report_map) draws no exclusion layer. Numbering kept so
+# the sections below keep the numbers other files cite.
 
 
 from rasterio.warp import transform_geom as _rg_transform_geom  # noqa: E402

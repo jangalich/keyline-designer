@@ -4,10 +4,10 @@ reference_fixture.py
 THE ONE REAL PARCEL EVERY STEP TEST RUNS ON, DEFINED ONCE.
 
 5614 N Montour Rd, Gibsonia, PA -- ~13.2 acres, UTM zone 17N -- the drawn
-boundary from generate_full_report.py, which test_session_manager.py,
-test_step_orchestrator.py, test_step_commit.py, test_session_api.py and
-every step test since (water, roads, trees, structures, fencing, the run
-diagnostics) carried as their own verbatim copy, each followed by the
+boundary from the retired narrated report's generator, which
+test_session_manager.py, test_step_orchestrator.py, test_step_commit.py,
+test_session_api.py and every step test since (water, roads, trees,
+structures, fencing, the run diagnostics) carried as their own verbatim copy, each followed by the
 same six lines projecting it to UTM. Ten copies of one fact is nine
 chances for it to drift; this module is the fact.
 
@@ -41,6 +41,14 @@ REAL_BOUNDARY = [
     (-79.9827466, 40.6458894),
     (-79.9838258, 40.6458343),
 ]
+
+# The reference parcel's access point, for manual/__main__ runs ONLY
+# (solar_suitability.py and tree_zone_candidates.py). It lived in
+# the layout map as _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT until
+# that module was retired; every production entry point takes a real
+# anchor_lon_lat from the client instead. Not for any other property, and
+# not for any production call path.
+REFERENCE_ANCHOR_LON_LAT = (-79.98356157031265, 40.64303511679458)
 
 _mean_lon = sum(lon for lon, _ in REAL_BOUNDARY) / len(REAL_BOUNDARY)
 _mean_lat = sum(lat for _, lat in REAL_BOUNDARY) / len(REAL_BOUNDARY)

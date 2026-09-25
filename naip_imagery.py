@@ -11,8 +11,8 @@ render time into the map's own UTM extent.
     underlay(block, crs, extent, meters_per_pt)   -> {href, extent_utm, ...}
     format_acquired(block)                        -> "21 June 2022"
 
-WHY NAIP, AND NOT THE TILES THE OLD LAYOUT MAP DREW. render_layout_map.py
-composites USGS Imagery Only tiles, and that service publishes no
+WHY NAIP, AND NOT THE TILES THE OLD LAYOUT MAP DREW. The retired matplotlib
+map composited USGS Imagery Only tiles, and that service publishes no
 acquisition date -- its only date is the cache's refresh. A map someone
 carries into the field three years from now has to say what year its
 photograph is, so the source has to know. Every NAIP item on Microsoft's

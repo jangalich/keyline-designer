@@ -949,10 +949,33 @@ def get_flow_accumulation_for_dem(dem: dict) -> np.ndarray:
     return compute_flow_accumulation(filled, flow_to_row, flow_to_col)
 
 
+def flow_pass(dem: dict) -> tuple:
+    """
+    THE ONE FLOW PASS: fill -> flow direction -> flow accumulation over
+    `dem`, returned as (filled, flow_to_row, flow_to_col, accumulation).
+
+    ONE PRODUCER, FORWARDED. delineate_valleys() and keypoint_detection.
+    detect_keypoints() both need all four arrays, and each self-computes
+    them when none is handed in. A caller running both -- the terrain
+    warm-up, build_pipeline_context() -- runs this once and passes the
+    tuple to delineate_valleys(flow=) and its four members to
+    detect_keypoints(), so the fill, the most expensive step of either,
+    runs once rather than twice. Forwarding valleys= alone was not enough:
+    detect_keypoints() still refilled the DEM to get the arrays the
+    valleys were traced on.
+    """
+    filled = fill_and_resolve(dem["array"])
+    flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
+    accumulation = compute_flow_accumulation(filled, flow_to_row, flow_to_col)
+    return filled, flow_to_row, flow_to_col, accumulation
+
+
 def delineate_valleys(
     dem: dict,
     min_stream_area_acres: float = MIN_STREAM_CONTRIBUTING_AREA_ACRES,
     min_primary_valley_area_acres: float = MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES,
+    *,
+    flow: Optional[tuple] = None,
 ) -> list[dict]:
     """
     Runs the full fill -> flow direction -> flow accumulation -> threshold
@@ -972,10 +995,9 @@ def delineate_valleys(
     so gradient/distance math is exact); geometry_wgs84 is only for
     output/display.
     """
-    array = dem["array"]
-    filled = fill_and_resolve(array)
-    flow_to_row, flow_to_col = compute_flow_direction(filled, dem["resolution_meters"])
-    accumulation = compute_flow_accumulation(filled, flow_to_row, flow_to_col)
+    # flow= is flow_pass()'s own tuple over this same dem, forwarded by a
+    # caller that also hands it to detect_keypoints(); None computes it here.
+    filled, flow_to_row, flow_to_col, accumulation = flow if flow is not None else flow_pass(dem)
 
     area_per_cell = cell_area_acres(dem)
     contributing_area_acres = accumulation * area_per_cell

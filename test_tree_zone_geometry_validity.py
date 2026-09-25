@@ -909,9 +909,9 @@ print(
 
 # --- 7. TREE FEATURES CARRY NO DISPLAY OUTLINE -------------------------
 #
-# The smoothing pass, removed. render_layout_map.py does NOT smooth tree zones
-# -- it smooths the production fill, because contour clipping against a 5 m
-# staircase shows there, and draws the tree hatch from the cell-union footprint
+# The smoothing pass, removed. The retired layout map did NOT smooth tree zones
+# -- it smoothed the production fill, because contour clipping against a 5 m
+# staircase shows there, and drew the tree hatch from the cell-union footprint
 # verbatim. Section 4 measured what the smooth was doing to the arms.
 
 for feature in TREES_PAYLOAD["tree_zones"]["features"]:
@@ -928,7 +928,7 @@ for feature in _production_features:
 
 # AND PRODUCTION'S OUTLINE IS STILL THE LAYOUT MAP'S, byte for byte -- the
 # property the removal must not have disturbed. Asserted against a literal
-# transcription of the expression render_layout_map.py evaluates, not against a
+# transcription of the retired layout map's expression, not against a
 # second call to the shared helper.
 from raster_grid import angular_smooth_polygon  # noqa: E402  (local to this claim)
 
@@ -955,8 +955,7 @@ print(
     f"{sum(len(f['properties']) for f in TREES_PAYLOAD['tree_zones']['features']) // len(TREES_PAYLOAD['tree_zones']['features'])} "
     f"properties each, so the absence is about this key), while all "
     f"{len(_production_features)} production feature(s) still carry theirs -- and all "
-    f"{_byte_identical} of those are WKB-IDENTICAL to the expression render_layout_map.py "
-    f"evaluates for the PDF."
+    f"{_byte_identical} of those are WKB-IDENTICAL to the display-outline rule's own expression."
 )
 
 
@@ -965,7 +964,7 @@ print(
     "this file's fixture), test_tree_zone_candidates.py, test_display_outline.py, "
     "test_tree_zone_render_footprint.py, test_wire_translation.py, "
     "test_wire_translation_inbound.py, test_step_commit.py, test_step_orchestrator.py, "
-    "test_render_layout_map.py, test_production_fill_smoothing.py, test_fencing.py."
+    "test_design_section.py, test_production_fill_smoothing.py, test_fencing.py."
 )
 
 print("\nAll tree-zone geometry validity checks passed.")

@@ -2,8 +2,9 @@
 
 Backend services for the regenerative farm design tool. Fetches public
 climate and geospatial data (climate, soil, elevation, hydrology) for a
-given property boundary and generates a narrative Scale of Permanence
-report using the Claude API.
+given property boundary, runs the interactive design session over it, and
+produces the site data report (`site_report.py`) for a finished design.
+The narrated Scale of Permanence report and its Claude call are retired.
 
 ## What's built and working
 
@@ -16,10 +17,6 @@ report using the Claude API.
   it today (see `get_water_features_geojson()` and `get_soil_data_as_geojson()`
   respectively); other layers convert to it in later passes. See
   `test_feature_schema.py` for an offline (no-network) validation example.
-- `climate_data.py` — fetches historical wind, rainfall, and temperature
-  data from Open-Meteo (free, no API key). Prevailing wind and rainfall
-  intensity feed directly into the report's design reasoning; temperature
-  is included as reference context.
 - `soil_data.py` — fetches SSURGO soil survey data from USDA's Soil Data
   Access API, for either a single point or a full parcel boundary.
   `get_soil_data_as_geojson()` additionally fetches each map unit's actual
@@ -628,11 +625,14 @@ report using the Claude API.
   `_fetch_existing_road_features_utm()`, which
   `identify_road_corridor_candidates()` itself uses) and had no other
   caller left once `scenario_generation.py` was gone.
-- `report_generator.py` — combines all of the above and calls the Claude
-  API to generate the narrative Scale of Permanence report.
-- `generate_full_report.py` — the full end-to-end pipeline: give it a
-  boundary once, it runs every data-fetching step and generates the
-  final report. This is the main script to run for a real test.
+- **Retired: the narrated report.** `report_generator.py` (the Claude
+  call), `generate_full_report.py`, `generate_pdf_report.py` and the
+  matplotlib layout map `render_layout_map.py` are gone, with the batch
+  routes `/api/generate-report` and `/api/generate-report-pdf`. The report
+  job produces the site data report (`site_report.py`) instead, and Layer
+  1 no longer fetches the two layers only that report read: Open-Meteo's
+  climate summary (`climate_data.py`) and the Sentinel-2 imagery summary
+  (`imagery_data.py`).
 - `parcel_boundary.py` — fetches legal parcel boundaries from Allegheny
   County's GIS system specifically. Superseded by manual boundary drawing
   (see below) as the actual product approach, but kept as a working
@@ -829,14 +829,15 @@ Needs internet access (won't run in a fully offline sandbox). Setup:
 
 ```
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY="sk-ant-..."
 export NREL_API_KEY="..."  # optional -- only needed for irradiance_data.py's regional baseline note
-python3 generate_full_report.py
+python3 api.py             # the web API, sessions and the report job included
 ```
 
-Individual modules can also be run standalone (`python3 climate_data.py`,
-etc.) to test just one data layer without triggering a full report /
-Claude API call — useful when only testing a new or changed module.
+The whole site data report renders offline from the reference fixtures
+with `python3 diagnose_whole_report.py [out_dir]`, and live, by stage,
+with `python3 diagnose_report_generation_time.py warm|cold [out_dir]`.
+Individual data modules can also be run standalone (`python3
+soil_data.py`, etc.) to test just one layer.
 
 ### Running the regression suite
 
@@ -974,7 +975,7 @@ tool (built with Leaflet).
   shading — it has no vegetation/canopy signal at all (no DSM-derived
   canopy height model exists in this pipeline yet). A real canopy height
   model, or a per-pixel NDVI overlay reprojected onto the DEM grid (using
-  `imagery_data.py`'s already-merged Sentinel-2 fetch — NOT the separate,
+  a Sentinel-2 fetch like the retired `imagery_data.py`'s — NOT the separate,
   still-unmerged NLCD/NDVI branch), would be a meaningfully better shading
   signal and is a reasonable next step once the DEM-only version is
   validated against real tree cover on the ground.
@@ -1127,7 +1128,7 @@ tool (built with Leaflet).
 
 Once ready, this backend deploys to Render or Railway (connected to this
 GitHub repo), giving it a live URL with real internet access to reach
-USDA/USGS/Open-Meteo APIs. The frontend (separate repo) deploys to
+USDA/USGS/NOAA/NASA public APIs. The frontend (separate repo) deploys to
 Vercel.
 
 ### Design Documents need a persistent disk
@@ -1180,13 +1181,13 @@ what the diff shows.
 
 #### Fetch timing
 
-A session creation waits on `parcel_data.fetch_parcel_data()` — thirteen
+A session creation waits on `parcel_data.fetch_parcel_data()` — ten
 sequential fetches, no threading and no async — and that wait is most of the
 minutes it takes. The record's first event is a `fetch` event carrying, per
 layer: its wall time, the callable that was timed, whether the call raised
 and with what. Beside them: the total, whether the fetch ran at all or the
 boundary was already in the fetch cache (a warm creation records
-`layers: null`, never thirteen zeroes), `irradiance`'s own `status` — the
+`layers: null`, never ten zeroes), `irradiance`'s own `status` — the
 one deliberately non-hard-failing layer, so a degraded baseline is recorded
 as degraded and never as a failure — and, on a failure, the exception type,
 its message, and `ParcelDataIncompleteError`'s own `layer`/`label`.
@@ -1196,10 +1197,10 @@ hard-failed layer creates no session at all — nothing persisted, nothing
 cached — so the record is the only evidence that run ever happened. Its
 `header.session_id` is the id that creation generated and then discarded.
 
-**Attempt counts are not available and the record says so.** Five modules
+**Attempt counts are not available and the record says so.** Four modules
 behind these layers retry internally (`soil_data._run_sda_query` and the
 private `_retry()`/`_query_*` copies in `hydrology_data`,
-`farm_roads_data`, `imagery_data`, `canopy_height_data`); each counts
+`farm_roads_data`, `canopy_height_data`); each counts
 attempts in a local variable and returns only the final payload, so a layer
 that succeeded on attempt 3 after two two-second pauses is indistinguishable
 from one that succeeded on attempt 1. Every layer row therefore records

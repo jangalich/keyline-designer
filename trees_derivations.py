@@ -528,6 +528,15 @@ def derive_limitations(inputs: TreesInputs, hydric: dict) -> dict:
 
 
 def derive(inputs: TreesInputs) -> TreesDerived:
+    # COMPUTED AGAIN HERE, KNOWINGLY -- NOT A BUG, AND NOT FREE TO REMOVE.
+    # The map-unit cell grid (grid_bookkeeping + derive_hydric) runs once in
+    # each section that reads it: Water, Access, Trees and Soils, four times
+    # per report, over the same Layer 1 rows, to the same answer (test_soils_
+    # derivations.py holds the partitions equal). Measured at about 0.05-0.1 s
+    # a time and no network (diagnose_report_generation_time.py), so the repeat
+    # costs under half a second and cannot fail on a flaky source. Sharing one
+    # result means threading it through every section's inputs; worth doing
+    # only if the report's compute ever matters beside its fetches.
     cells = wd.grid_bookkeeping(inputs)
     canopy = derive_canopy(inputs, cells)
     hydric = wd.derive_hydric(inputs, cells)
