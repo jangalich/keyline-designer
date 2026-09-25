@@ -42,6 +42,14 @@ REAL_BOUNDARY = [
     (-79.9838258, 40.6458343),
 ]
 
+# The reference parcel's access point, for manual/__main__ runs ONLY
+# (solar_suitability.py and tree_zone_candidates.py). It lived in
+# render_layout_map.py as _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT until
+# that module was retired; every production entry point takes a real
+# anchor_lon_lat from the client instead. Not for any other property, and
+# not for any production call path.
+REFERENCE_ANCHOR_LON_LAT = (-79.98356157031265, 40.64303511679458)
+
 _mean_lon = sum(lon for lon, _ in REAL_BOUNDARY) / len(REAL_BOUNDARY)
 _mean_lat = sum(lat for _, lat in REAL_BOUNDARY) / len(REAL_BOUNDARY)
 CRS = f"EPSG:{_utm_epsg_for_lonlat(_mean_lon, _mean_lat)}"

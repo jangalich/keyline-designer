@@ -2858,15 +2858,14 @@ if __name__ == "__main__":
 
     # Manual-testing-only reference anchor -- imported here, not at module
     # level, so this stays a __main__-only test fixture rather than a
-    # production dependency (see render_layout_map.py's own module
-    # docstring for this constant).
-    from render_layout_map import _PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+    # production dependency (see reference_fixture.REFERENCE_ANCHOR_LON_LAT).
+    from reference_fixture import REFERENCE_ANCHOR_LON_LAT
 
     print("Identifying solar structure candidates for property boundary...\n")
 
     try:
         result = identify_solar_candidate_zones(
-            property_boundary, anchor_lon_lat=_PLACEHOLDER_REFERENCE_PROPERTY_ANCHOR_LON_LAT
+            property_boundary, anchor_lon_lat=REFERENCE_ANCHOR_LON_LAT
         )
         print(summarize_solar_candidate_zones(result))
     except Exception as e:

@@ -32,8 +32,8 @@ files cover:
      get_elevation_grid() would have built for a boundary, reads the DEM at
      exactly those points, and compares that answer against the masked DEM
      answer over the same boundary. This is NOT the live comparison (that
-     needs both real services -- see diagnose_elevation_source_and_fetch_
-     cost.py, which runs it against USGS for real); it isolates the two
+     needs both real services, and its diagnostic was retired with the
+     narrated report whose sentence it compared); it isolates the two
      mechanisms that make the lattice disagree even when both sources agree
      perfectly on every point:
 
@@ -45,15 +45,15 @@ files cover:
      Both are demonstrated on a synthetic terrain whose peak and pit sit
      where the lattice does not look.
 
-  4. The report's elevation sentence renders from those figures, and says
-     what it is really counting.
+The report sentence this range once fed (the narrated report's
+elevation line) was retired with the narrated report; the range itself is still
+read by report_map.parcel_contours() for every section's contour interval.
 """
 
 import numpy as np
 from shapely.geometry import Point, Polygon
 
 import raster_grid
-import report_generator
 from raster_grid import cells_in_polygon, elevation_range_in_polygon
 
 # --- a DEM in dem_data.get_dem_for_boundary()'s own dict shape ---------
@@ -204,8 +204,7 @@ print(
 # quadrant of the bounding box off-parcel. Both readings are taken from THIS
 # SAME ARRAY -- there is no second elevation service here and no vertical
 # datum question -- so every difference below is the LATTICE's geometry, not
-# a disagreement between USGS products. The live version of this comparison
-# is diagnose_elevation_source_and_fetch_cost.py.
+# a disagreement between USGS products.
 
 _terrain = np.zeros((ROWS, COLS), dtype="float32")
 for _r in range(ROWS):
@@ -288,30 +287,5 @@ print(
     f"parcel's real low point sits between its nodes."
 )
 
-
-# =====================================================================
-# 5. THE REPORT'S SENTENCE
-# =====================================================================
-#
-# WHAT IT SAYS NOW. "across 36 sample points" was true of a lattice and is
-# false of a DEM read: nothing is sampled, and the count is cells inside
-# the boundary. A sentence that kept the old wording over the new source
-# would be a lie the report tells about its own basis.
-
-_sentence = report_generator._format_elevation_summary(_dem_answer)
-
-assert "sample point" not in _sentence, _sentence
-assert "DEM cells inside the boundary" in _sentence, _sentence
-assert f"across {_dem_answer['cell_count']} DEM cells" in _sentence, _sentence
-assert "~5m resolution" in _sentence, _sentence
-assert "945ft to 1066ft" in _sentence, _sentence          # 288.0 m / 325.0 m
-assert "total relief: 121ft" in _sentence, _sentence
-assert " m " not in _sentence and "m to " not in _sentence, "the sentence reads in feet"
-
-# The empty outcome renders as no-data, exactly as an empty grid used to.
-assert report_generator._format_elevation_summary({}) == "No elevation data available."
-assert report_generator._format_elevation_summary(None) == "No elevation data available."
-
-print(f"5. THE REPORT'S ELEVATION SENTENCE, from the DEM:\n     {_sentence}")
 
 print("\nAll DEM elevation summary checks passed.")

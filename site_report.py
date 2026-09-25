@@ -9,8 +9,9 @@ ReportData, through Jinja2 and WeasyPrint to a PDF.
     generate_session_site_report_pdf(session_id, store, path, ...)
                                                     -> the PDF for a session
 
-This is the replacement for generate_pdf_report.py's narrated document
-(site-data-report-proposal.md). It carries all eight sections -- Site
+This replaced the narrated document the report job used to produce
+(site-data-report-proposal.md); that generator and its Claude call are
+retired. It carries all eight sections -- Site
 overview, Climate, Landform, Water & hydrology, Access, Trees & forestry,
 Soils & geology and Design -- the cover with its contents, the back
 matter, and the foundation every section composes: the tokens,
@@ -57,12 +58,9 @@ footer beside the page number, through CSS string-set from two hidden
 elements, so user input reaches the page margin as escaped text and never
 as a CSS string.
 
-NOT YET WIRED INTO THE REPORT JOB. session_report.run_report_job() still
-produces generate_pdf_report.py's narrated document; this module's
-generate_session_site_report_pdf() is the Python-callable entry the job
-switches to when the report has enough sections to replace it (see
-site-data-report-proposal.md's build sequence). session_report.
-error_payload() already knows this layer's failure shape.
+THE REPORT JOB PRODUCES THIS. session_report.run_report_job() calls
+generate_session_site_report_pdf(); session_report.error_payload() maps
+this layer's failure shape (a REQUIRED report layer's failed_layer).
 """
 
 import os

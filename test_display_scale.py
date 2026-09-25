@@ -34,7 +34,6 @@ import numpy as np
 from shapely.geometry import box
 
 import display_scale
-import report_generator
 import water_survey_areas as wsa
 from display_scale import (
     DISPLAY_SCALE_MAX,
@@ -335,7 +334,9 @@ print(
 # arguing ABOUT the conversion must stay legal, and only real arithmetic
 # counts.
 
-_AUDITED = (wsa, report_generator)
+# The narrated report's formatters were the second audited module until
+# that report was retired; the site data report prints no suitability.
+_AUDITED = (wsa,)
 _SCORE_WORDS = (
     "suitability",
     "mean_score",
@@ -434,13 +435,13 @@ print(
 
 
 # ======================================================================
-# 5. PANEL / REPORT / DIAGNOSTIC AGREE
+# 5. PANEL / DIAGNOSTIC AGREE
 # ======================================================================
-# Three renderings of one zone, off one fixture. They may word it
-# differently; they may not disagree about the number.
+# Two renderings of one zone, off one fixture. They may word it
+# differently; they may not disagree about the number. (The narrated
+# report's prose was the third until that report was retired.)
 
 _summary = summarize_water_survey_areas(_result)
-_prose = report_generator._format_water_survey_areas_summary(_narrative)
 
 for _zone_record in _result["zones"]:
     _shown = to_display_scale(_zone_record["mean_suitability"])
@@ -450,22 +451,11 @@ for _zone_record in _result["zones"]:
 
     if _zone_record["survey_type"] == SURVEY_TYPE_EMBANKMENT:
         _diagnostic_phrase = f"compartment mean {_shown}{DISPLAY_SCALE_UNIT}"
-        _prose_phrase = (
-            f"compartment mean {_shown}{DISPLAY_SCALE_UNIT}, max "
-            f"{to_display_scale(_zone_record['max_suitability'])}{DISPLAY_SCALE_UNIT}"
-        )
     else:
         _diagnostic_phrase = f"mean {_shown}{DISPLAY_SCALE_UNIT}"
-        _prose_phrase = (
-            f"member-cell mean suitability {_shown}{DISPLAY_SCALE_UNIT} (max "
-            f"{to_display_scale(_zone_record['max_suitability'])}{DISPLAY_SCALE_UNIT})"
-        )
     assert _diagnostic_phrase in _summary, (
         f"the diagnostic table must show the panel's own figure: {_diagnostic_phrase!r} not in\n"
         f"{_summary}"
-    )
-    assert _prose_phrase in _prose, (
-        f"the report prose must show the panel's own figure: {_prose_phrase!r}"
     )
 
 # The scale a reader reads the panel value against is converted through
@@ -481,7 +471,7 @@ assert (_scales["suitability"]["min"], _scales["suitability"]["max"]) == (
 )
 
 print(
-    f"5. AGREEMENT: on one fixture, the panel row, the diagnostic table and the report prose print "
+    f"5. AGREEMENT: on one fixture, the panel row and the diagnostic table print "
     f"the same converted figure for every one of {len(_result['zones'])} zone(s), and the scales "
     f"block's endpoints and per-type ceilings "
     f"({_scales['suitability']['parcel_observed_max']}) are the same conversion."

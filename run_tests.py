@@ -50,7 +50,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # early and the wall clock is bounded by the longest file, not by the
 # order of the alphabet.
 FULL_ONLY = (
-    "test_session_report.py",
     "test_run_diagnostics.py",
     "test_roads_step.py",
     "test_water_step.py",
@@ -87,7 +86,6 @@ FULL_ONLY = (
     "test_session_manager.py",
     "test_fence_display_geometry.py",
     "test_step_orchestrator.py",
-    "test_render_layout_map.py",
     "test_eligible_union.py",
     "test_pipeline_context.py",
     "test_road_corridors_pipeline.py",

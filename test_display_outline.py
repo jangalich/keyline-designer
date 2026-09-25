@@ -7,9 +7,10 @@ that it is a rendering and nothing else.
 
 TREE FEATURES NO LONGER CARRY IT, and section 1 asserts the absence beside
 water's and roads'. A tree zone IS a cell union, so it is the one layer where
-the staircase argument applied and the answer is still no: render_layout_map.py
-draws the tree hatch from the cell-union footprint verbatim, so smoothing a
-tree feature made the two maps disagree rather than agree -- and the smooth is
+the staircase argument applied and the answer is still no: the printed layout
+map (design_section.py) draws the tree hatch from the feature's own unsmoothed
+geometry, so smoothing a tree feature would make the two maps disagree rather
+than agree -- and the smooth is
 anti-extensive, measured here at 19.56% of a 0.32 ac candidate with 255.7 m^2
 removed and NOTHING added, which is the thin-arm deletion the tree layer
 refuses a morphological opening in order to prevent. The measurement itself
@@ -39,12 +40,12 @@ Sections (the branch's numbered backend tests in brackets):
           water and road features do not -- water and roads because neither
           is a cell union, trees because the layout map does not smooth
           them and the smooth ate their thin arms.
-  2  [2]  ONE IMPLEMENTATION, BYTE-IDENTICAL. The shipped outline is exactly
-          what render_layout_map.py computes for the same zone -- asserted
-          three ways: the function is the same object, the renderer holds no
+  2  [2]  ONE IMPLEMENTATION, BYTE-IDENTICAL. The shipped outline is the one
+          smoothing rule, and the printed layout map draws it rather than a
+          second answer -- asserted three ways: the payload builder calls the
+          same function object, the printed map (design_section.py) holds no
           smoothing call of its own, and the geometry is WKB-identical to a
-          literal transcription of the expression the renderer used to
-          evaluate inline.
+          literal transcription of the rule's expression.
   3  [3]  THE REAL GEOMETRY IS UNTOUCHED. polygon_utm and
           render_fill_polygon_utm are WKB-identical across a payload build,
           and the feature's own `geometry` is the unsmoothed opening.
@@ -80,7 +81,6 @@ from shapely.geometry import mapping, shape
 
 import display_outline
 import production_zone_payload
-import render_layout_map
 import step_orchestrator
 import wire_translation
 from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY
@@ -134,10 +134,10 @@ assert PRODUCTION_FEATURES and TREE_FEATURES and WATER_FEATURES and ROAD_FEATURE
 # A TREE ZONE IS A CELL UNION AND STILL MUST NOT CARRY IT, which is why it is
 # asserted here beside water and roads rather than beside production. The
 # staircase is real on a tree candidate; the smooth is wrong anyway, for two
-# reasons that are separate and each sufficient. render_layout_map.py does not
-# smooth tree zones -- it draws the tree hatch from the cell-union footprint
-# verbatim and smooths only the production fill, which its contour clip runs
-# against -- so the field made the interactive map disagree with the printed
+# reasons that are separate and each sufficient. The printed layout map
+# (design_section.py) does not smooth tree zones -- it draws the tree hatch from
+# the feature's own geometry and reads the display outline for production only
+# -- so the field would make the interactive map disagree with the printed
 # one, which is the opposite of what it exists for. And the smooth is
 # ANTI-EXTENSIVE: on this same parcel it removed 255.7 m^2 from a 0.32 ac
 # candidate and added nothing, 19.56% of the zone, off the thin arms the tree
@@ -179,14 +179,14 @@ print(
 
 # --- 2 [test 2]. ONE IMPLEMENTATION, BYTE-IDENTICAL --------------------
 #
-# THE CLAIM: the outline on the wire is the geometry render_layout_map.py
-# smooths for the PDF, not a second answer that happens to look like it.
+# THE CLAIM: the outline on the wire is the one smoothing rule, and the PDF's
+# layout map draws that outline rather than a second answer that happens to
+# look like it.
 # Asserted three ways, because "one implementation" is a claim about the code
 # and "byte-identical" is a claim about the output, and neither implies the
 # other.
 
 # (a) THE SAME FUNCTION OBJECT. Not two functions that agree today.
-assert render_layout_map.smoothed_display_outline is display_outline.smoothed_display_outline
 assert (
     production_zone_payload.smoothed_display_outline is display_outline.smoothed_display_outline
 )
@@ -200,22 +200,22 @@ assert not hasattr(step_orchestrator, "_with_display_only_outlines"), (
     "step_orchestrator still holds the tree outline builder"
 )
 
-# (b) THE RENDERER HOLDS NO SMOOTHING CALL OF ITS OWN. A source read rather
-#     than an import check: an import it does not use would pass the check
-#     above while a second inline angular_smooth_polygon() sat below it.
-_renderer_source = open("render_layout_map.py").read()
+# (b) THE PRINTED MAP HOLDS NO SMOOTHING CALL OF ITS OWN. A source read: the
+#     site data report's layout map (design_section.py) draws the shipped
+#     property (section 4 pins its one use), and a second inline
+#     angular_smooth_polygon() there would be a second answer.
+_renderer_source = open("design_section.py").read()
 _code_lines = [
     line for line in _renderer_source.splitlines()
     if "angular_smooth_polygon" in line and not line.lstrip().startswith("#")
 ]
-# The only surviving mention is inside the module docstring's own prose.
 assert all(
     "(" not in line.split("angular_smooth_polygon")[1][:1] for line in _code_lines
 ), _code_lines
 
 # (c) BYTE-IDENTICAL OUTPUT, against a LITERAL TRANSCRIPTION of the expression
-#     render_layout_map.py used to evaluate inline before the shared helper
-#     existed:
+#     the retired matplotlib layout map evaluated inline before the shared
+#     helper existed -- the rule's own definition:
 #
 #         angular_smooth_polygon(
 #             patch["render_fill_polygon_utm"],
@@ -267,12 +267,12 @@ for feature in PRODUCTION_FEATURES:
     _utm_identical += 1
 
 print(
-    f"2 [test 2]. ONE IMPLEMENTATION: render_layout_map.smoothed_display_outline IS "
-    f"display_outline.smoothed_display_outline (and so is the one the payload builder calls, "
-    f"the only one left); "
-    f"render_layout_map.py holds no angular_smooth_polygon() call of its own; and all "
+    f"2 [test 2]. ONE IMPLEMENTATION: the payload builder calls "
+    f"display_outline.smoothed_display_outline, the only one; "
+    f"design_section.py (the printed layout map) holds no angular_smooth_polygon() call of its "
+    f"own; and all "
     f"{_utm_identical} zone outline(s) are WKB-IDENTICAL to a literal transcription of the "
-    f"expression that renderer used to evaluate inline -- "
+    f"rule's expression -- "
     f"angular_smooth_polygon(render_fill_polygon_utm, {display_outline.DISPLAY_OUTLINE_SIMPLIFY_TOLERANCE_CELLS} "
     f"cell x {CELL_M:.2f} m, {display_outline.DISPLAY_OUTLINE_CHAIKIN_ITERATIONS} Chaikin pass)"
     f".intersection(polygon_utm) -- with the wire carrying it through each payload's own "
@@ -616,7 +616,7 @@ print(
     "(run above, as this file's fixture), test_production_fill_smoothing.py, "
     "test_production_zone_payload.py, test_step_orchestrator.py, test_step_commit.py, "
     "test_wire_translation.py, test_wire_translation_inbound.py, test_water_step.py, "
-    "test_roads_step.py, test_render_layout_map.py, test_tree_zone_geometry_validity.py."
+    "test_roads_step.py, test_design_section.py, test_tree_zone_geometry_validity.py."
 )
 
 print("\nAll display outline checks passed.")

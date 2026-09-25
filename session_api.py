@@ -162,6 +162,10 @@ class Dependencies:
     # session_report.DEFAULT_REPORT_STORE, the same convention as the three
     # above -- and the `is None` check that makes it safe is in that module.
     reports: Optional[session_report.ReportStore] = None
+    # The report layer's fetch cache (report_data.fetch_report_data, by
+    # boundary). None is report_data.default_report_fetch_cache(), resolved
+    # in site_report.generate_session_site_report_pdf().
+    report_fetch_cache: Optional[session_cache.FetchCache] = None
 
     def resolved_store(self) -> document_store.DocumentStore:
         return self.store if self.store is not None else default_store()
@@ -900,13 +904,17 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
 
         and the client fetches `download_url` (GET /api/reports/<id> below)
         for the bytes. Optional body: {"property_label": "..."} -- the cover
-        page's subtitle, an address if the client has geocoded one.
+        page's label, an address if the client has geocoded one. Absent, the
+        cover prints the parcel's centroid (site_report.cover_label()); no
+        placeholder title is invented here.
 
-        A JOB BECAUSE IT IS THE LONGEST OPERATION IN THE PRODUCT: the full
-        narrative through Claude, the layout map render and its basemap
-        imagery. Well past what a request should hold a connection open for,
-        and the same 202-and-poll shape a generate already uses -- one
-        polling path on the client, not two.
+        A JOB BECAUSE IT IS THE LONGEST OPERATION IN THE PRODUCT: the site
+        data report fetches twenty-one report-time layers, derives eight
+        sections and renders them through WeasyPrint -- about a minute, most
+        of it the fetches (diagnose_report_generation_time.py). Well past
+        what a request should hold a connection open for, and the same
+        202-and-poll shape a generate already uses -- one polling path on
+        the client, not two.
 
         NOT A SEVENTH STEP. There is no `report` in STEP_ORDER, no registry
         entry and no status on the document: it has no candidates, nothing
@@ -928,10 +936,10 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
         -- generate_step_endpoint()'s own argument, and here it costs
         nothing extra because the preconditions need the document anyway.
 
-        WHAT THE CLIENT POLLS FOR is a failure it cannot prevent: the Claude
-        call, the imagery, the renderer -- or an EXPIRED session, which is
-        the one it can act on. session_report.error_payload() keeps those
-        two apart by the key each carries.
+        WHAT THE CLIENT POLLS FOR is a failure it cannot prevent: a public
+        data source that did not answer (the REQUIRED one carries
+        `failed_layer`), or the renderer. session_report.error_payload()
+        keeps the shapes apart by the key each carries.
         """
         job = session_report.submit_report(
             session_id,
@@ -940,8 +948,8 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
             cache=deps.cache,
             runner=deps.runner,
             reports=deps.reports,
-            property_label=_json_body().get("property_label")
-            or "Property Design Report",
+            property_label=_json_body().get("property_label") or None,
+            report_fetch_cache=deps.report_fetch_cache,
         )
         return jsonify({"job_id": job.id, "status": job.status}), 202
 
