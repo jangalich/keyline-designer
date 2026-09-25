@@ -39,8 +39,9 @@ The one check that needs explaining is closure. This codebase's
 convention is IMPLICIT closure -- soil_data.coordinates_to_wkt_polygon()
 closes an open ring itself ("If the input isn't already closed, this
 closes it automatically"), shapely's Polygon() does the same, and the
-real drawn property boundary in generate_full_report.py is itself
-implicitly closed: its last vertex sits ~0.9 m from its first, not on it.
+real drawn property boundary (reference_fixture.py, once the retired
+narrated report's) is itself implicitly closed: its last vertex sits
+~0.9 m from its first, not on it.
 Demanding a duplicated closing vertex would reject this project's own
 real input, so both forms are accepted here.
 

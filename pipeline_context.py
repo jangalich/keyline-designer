@@ -19,8 +19,8 @@ identify_road_corridor_candidates(), solar_suitability.
 identify_solar_candidate_zones(), and tree_zone_candidates.
 identify_tree_zone_candidates() (three of the identify_*_candidate*()
 consumer functions) directly now that prior branches made those entry
-points override-capable; it does NOT call report_generator.py, generate_
-full_report.py, or fencing.py's own identify_*_candidate*() consumer
+points override-capable; it did NOT call the retired narrated report's
+modules, and does not call fencing.py's own identify_*_candidate*() consumer
 function -- that module doesn't have overrides yet, so wiring it in is
 later, separate work. See KNOWN LIMITATIONS below for the remaining gaps
 this surfaced -- in particular #4, now RESOLVED, a genuine, MEASURED
@@ -228,8 +228,8 @@ FIELD NOTES
   narrative can quote directly), captured here keyed by module, one
   line per module, off calls this function already makes. It
   deliberately does NOT meet this context's own sizing principle
-  (nothing downstream COMPUTES off it -- only report_generator.py's
-  formatting functions read it), which is exactly why it is its own
+  (nothing downstream COMPUTES off it -- only the retired narrated
+  report's formatting functions read it), which is exactly why it is its own
   clearly separate field rather than folded into the KSOP fields above:
   a future reader can tell at a glance which fields are load-bearing
   for computation and which exist purely to feed the narrative. The
@@ -458,7 +458,7 @@ class PipelineContext:
     # clearly separate field rather than folded into the fields above: every
     # other field here is load-bearing for downstream KSOP computation
     # (this context's own sizing principle), while nothing computes off this
-    # one -- only report_generator.py reads it. See the narrative_data
+    # one -- only the retired narrated report read it. See the narrative_data
     # convention doc for this distinction.
     narrative_data: dict[str, dict | None]
 
@@ -506,8 +506,8 @@ def _attach_keypoint_feature_relationships(
           on this property -- no distance or differential keys.
 
     Distances use render_fill_polygon_utm for BOTH features -- the same
-    geometry render_layout_map.py actually draws (production contour texture
-    is clipped to it; the water ripple texture is drawn from it), NOT the
+    geometry the retired layout map actually drew (production contour texture
+    was clipped to it; the water ripple texture was drawn from it), NOT the
     scoring/eligibility geometry_wgs84 -- matching the render_fill_area_acres
     discipline production_areas_to_geojson() now uses. All geometry here is
     UTM meters (keypoint 'point_utm' and each feature's
@@ -569,8 +569,8 @@ def build_pipeline_context(
 ) -> PipelineContext:
     """
     Computes every shared upstream input multiple KSOP pipeline steps
-    need, exactly once. Does not call report_generator.py, generate_full_
-    report.py, or fencing.py's own identify_*_candidate*() consumer
+    need, exactly once. Did not call the retired narrated report's modules,
+    and does not call fencing.py's own identify_*_candidate*() consumer
     function -- that module doesn't have overrides yet, so wiring it in is
     later, separate work.
 
@@ -609,9 +609,9 @@ def build_pipeline_context(
     dem is optional -- same None-falls-back-to-self-fetch convention every
     other override in this pipeline uses (see e.g. production_area_
     ceiling.identify_optimized_production_areas()). A caller that already
-    fetched a DEM for this exact boundary (e.g. render_layout_map.
-    fetch_layout_layers(), which passes parcel_data.dem straight through --
-    its own dem= parameter is gone, having been unused since it started
+    fetched a DEM for this exact boundary (e.g. the retired layout map's
+    fetch_layout_layers(), which passed parcel_data.dem straight through --
+    its own dem= parameter was gone, having been unused since it started
     reading the DEM off ParcelData) passes it through here instead of
     paying for a second, redundant fetch.
 

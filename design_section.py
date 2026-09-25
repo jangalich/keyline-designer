@@ -8,9 +8,9 @@ on its land, then what the user committed at each step, in STEP_ORDER.
     build_map_layers(inputs, record)                           -> [report_map layer, ...]
     build_design_section(inputs, tokens)                       -> the section dict
 
-THE LAYOUT MAP IS REBUILT, NOT ADOPTED. render_layout_map.py (matplotlib,
-Web Mercator, fourteen colour literals) stays exactly as it is for the
-narrated report until D4 retires it. This map is report_map's vector SVG
+THE LAYOUT MAP IS REBUILT, NOT ADOPTED. The matplotlib layout map (Web
+Mercator, fourteen colour literals) stayed exactly as it was for the
+narrated report until D4 retired it. This map is report_map's vector SVG
 in the pipeline's UTM zone, every colour a token, over NAIP photography.
 
 THE INTERACTIVE MAP'S VOCABULARY, IN ITS ACTIVE STATE, FOR EVERY LAYER AT
@@ -104,7 +104,7 @@ both absent and says why:
                      DRAWING; on the interactive map they tell the user
                      where they may work, and at commit that job ended.
                      They are also the five heaviest layers in the set.
-                     render_layout_map.py draws them as a leftover; this
+                     The retired layout map drew them as a leftover; this
                      map does not. A RENDERING exclusion only -- they stay
                      in the payload and the pipeline still needs them.
 

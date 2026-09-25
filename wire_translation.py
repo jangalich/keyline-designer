@@ -32,8 +32,8 @@ TWO CONSUMERS, NOT ONE. Every function here is written for both:
 
   1. The interactive session's per-layer endpoints (later branches) -- one
      layer at a time, on demand, for map display and editing.
-  2. render_layout_map.fetch_layout_layers() (exists today) -- the batch
-     layout-map path.
+  2. the retired layout map's fetch_layout_layers() (existed then) -- the
+     batch layout-map path.
 
 So each function takes ONE layer's already-computed internal value(s) and
 nothing else: no PipelineContext, no ParcelData, no fetch, no orchestration.
@@ -52,7 +52,7 @@ this pipeline already carry `geometry_wgs84`, built ONCE at the object's own
 birth against the DEM's CRS. This module WRAPS that stored form in the
 feature_schema envelope -- it does not rebuild it. Reprojecting a second
 time is wasted work AND a genuine source of drift from the geometry
-render_layout_map.py draws (transform_geom is not exactly idempotent across
+the retired layout map drew (transform_geom is not exactly idempotent across
 a round trip). The three places that DO reproject here are the three where
 no stored WGS84 form exists at all, each flagged at its own function:
 
@@ -525,7 +525,7 @@ def production_areas_to_feature_collection(patches: Optional[list[dict]]) -> dic
                 "area_acres": p["area_acres"],
                 "representative_elevation_m": round(p["representative_elevation_m"], 1),
                 # Acreage of the geometry the MAP actually draws (the bounded
-                # morphological opening render_layout_map.py clips production
+                # morphological opening the retired layout map clipped production
                 # contour texture to), NOT the full cell-union footprint
                 # area_acres reports. render_fill_polygon_utm is always a
                 # subset of polygon_utm, so this is <= area_acres for every
@@ -1606,8 +1606,8 @@ def selected_structure_site_to_feature_collection(
     on the site dict, on PipelineContext, or on identify_solar_candidate_
     zones()'s return dict. Called without them, this emits a
     geometrically-correct Feature whose confidence_notes describe the
-    DEFAULT run, not the one that produced this site. render_layout_map.
-    fetch_layout_layers() therefore still reads its structure_site Feature
+    DEFAULT run, not the one that produced this site. The retired layout
+    map's fetch_layout_layers() therefore read its structure_site Feature
     off identify_solar_candidate_zones()'s own zones_geojson, which is the
     only place those flags survive -- see that function's own comment.
     """
@@ -2491,7 +2491,7 @@ def water_zone_union(zones: list[dict]) -> dict:
 # be a second answer.
 #
 # WHAT A CONSUMER READS. Every downstream reader of a committed network
-# (tree_zone_candidates, solar_suitability, fencing, render_layout_map)
+# (tree_zone_candidates, solar_suitability, fencing; once the layout map)
 # reads exactly two network-level fields -- `cells` and
 # `cell_footprint_polygon_utm` -- and both are reconstructed here, so the
 # rehydrated network is a complete answer for all of them.
@@ -2936,7 +2936,7 @@ def rehydrate_tree_zone(feature: dict, dem: dict, zone_id: Optional[int] = None)
     """
     ONE committed tree-zone Feature -> the internal patch dict the
     `tree_zone_patches=` override parameters expect (solar_suitability's
-    tree-zone exclusion, fencing.identify_fencing(), render_layout_map). The
+    tree-zone exclusion, fencing.identify_fencing(), once the layout map). The
     exact counterpart of tree_zones_to_feature_collection() above; see the
     section header for what is derived and what is inherited.
 
@@ -3487,7 +3487,7 @@ def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
     plus ONE DISPLAY-ONLY property, fence_display_geometry.DISPLAY_ONLY_
     FENCE_LINE_PROPERTY ("display_only_fence_line"): the feature's ring
     angular-simplified and, for a zone ring, trimmed where it runs on top of
-    another drawn ring -- the two passes render_layout_map.py has always run
+    another drawn ring -- the two passes the retired layout map ran
     before drawing, computed by that module's ONE function on the wire side
     too, in WGS84, or None where the trim left nothing to draw. NOTHING MAY
     COMPUTE FROM IT: `geometry` stays the real ring, length_ft is read off
@@ -3499,7 +3499,7 @@ def fence_lines_to_feature_collection(fencing_result: Optional[dict]) -> dict:
     loop of it" checkable server-side (see check_fence_type_complete()).
     They are stamped HERE and not in fencing.py's own *_to_geojson()
     helpers, so the batch path's fencing_geojson -- what the layout map
-    draws and test_render_layout_map.py compares -- is byte-identical to
+    drew and its test file compared, both since retired -- is byte-identical to
     what it was. The roads payload rebuilds its collection with network_id
     for the same reason.
 
@@ -3759,7 +3759,7 @@ def production_zone_polygons(patches) -> list:
     """
     The committed production ground as the LIST of render-fill polygons
     fencing.identify_fencing() takes under production_zone_polygons_utm=
-    -- exactly what render_layout_map.fetch_layout_layers() extracts from
+    -- exactly what the retired layout map's fetch_layout_layers() took from
     context.production_areas for the same parameter, so the session path's
     boundary fence protects the same polygons the batch path's does. []
     for an empty landform commit: no production ground in the developed
@@ -3805,8 +3805,8 @@ def selected_road_network_footprint(networks):
     which only the nested tree self-compute reads, and which carries the
     NO_ROAD_CORRIDOR sentinel) and road_corridor_cell_footprint_polygon_
     utm= (the polygon the boundary fence actually protects, which the
-    entry point does NOT derive from the network -- render_layout_map.
-    fetch_layout_layers() extracts it). The registry declares one edge
+    entry point does NOT derive from the network -- the retired layout map's
+    fetch_layout_layers() extracted it). The registry declares one edge
     per shape, both off the roads commit; this is the second edge's
     reduction. None, not the sentinel, for an empty commit: this parameter
     has no self-compute behind it, so None already means "no corridor"

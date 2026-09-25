@@ -1205,7 +1205,7 @@ _ = selected["render_fill_polygon_utm"].buffer(6.096)          # road_corridors 
 _ = unary_union([selected["render_fill_polygon_utm"]])          # solar water_zones union
 _ = selected["render_fill_polygon_utm"] if selected else None   # fencing truthiness guard
 _ = 101.5 - selected["representative_elevation_m"]              # keypoint elevation differential
-_ = f"Water zone {selected['id']}: log line"                    # render_layout_map id branch
+_ = f"Water zone {selected['id']}: log line"                    # retired layout map's id branch
 print("   Contract: the rank-1 compartment carries every consumer access pattern intact.")
 
 # --- terminal-pinch compartment as its type's RANK-1, full compute path ---

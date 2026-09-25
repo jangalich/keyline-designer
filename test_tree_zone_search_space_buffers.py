@@ -3,8 +3,8 @@ test_tree_zone_search_space_buffers.py
 
 Offline (no-network) checks for compute_tree_search_space()'s production/water
 exclusion buffers (TREE_ZONE_PRODUCTION_BUFFER_METERS/TREE_ZONE_WATER_BUFFER_METERS),
-added alongside hatch-only tree-zone rendering (render_layout_map.py, no test
-coverage needed there beyond the existing test_render_layout_map.py plot_polygon()
+added alongside hatch-only tree-zone rendering (in the since-retired layout map,
+which needed no test coverage beyond its own test file's plot_polygon()
 kwarg assertions).
 
 Round-number, hand-verifiable geometry throughout -- same "synthetic fixture a

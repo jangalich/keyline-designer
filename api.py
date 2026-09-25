@@ -6,7 +6,7 @@ production-zone spike, the health check, and the interactive session
 surface below.
 
 THE BATCH REPORT ROUTES ARE GONE. /api/generate-report and /api/generate-
-report-pdf ran generate_full_report.py's narrated report over a bare
+report-pdf ran the retired narrated report's generator over a bare
 boundary; both were retired with it, and the frontend called neither. The
 report a user receives is the site data report, produced by the session
 surface's POST /api/sessions/<sid>/report (session_report.py).

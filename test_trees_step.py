@@ -731,8 +731,8 @@ validate_feature_collection(OUTBOUND)
 
 # THE PAYLOAD CARRIES THE OUTBOUND COLLECTION AND NO GEOMETRY BESIDE IT, and
 # the equality is asserted rather than tolerated. build_trees_payload() used to add
-# `display_only_smoothed_outline`, and it no longer does: render_layout_map.py
-# draws the tree hatch from the cell-union footprint verbatim ("no hull, no
+# `display_only_smoothed_outline`, and it no longer does: the retired layout
+# map drew the tree hatch from the cell-union footprint verbatim ("no hull, no
 # opening, no smoothing of any kind"), so a smoothed outline on a tree feature
 # made the interactive map disagree with the printed one instead of agreeing
 # with it -- and the smooth is anti-extensive, so what it moved it moved off

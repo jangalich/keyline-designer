@@ -723,8 +723,8 @@ import json
 assert json.loads(json.dumps(FLAGS)) == FLAGS
 
 # THE WIRE FORM IS REPRODUCIBLE FROM THE RESULT, byte for byte -- which is
-# exactly what render_layout_map.fetch_layout_layers() could not do from
-# context.selected_structure_site before.
+# exactly what the retired layout map's fetch_layout_layers() could not
+# do from context.selected_structure_site before.
 assert solar_suitability.candidates_to_geojson(GENERATED, **FLAGS) == RESULT["zones_geojson"]
 rebuilt = wire_translation.selected_structure_site_to_feature_collection(
     RESULT["selected_structure_site"], **FLAGS

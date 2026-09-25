@@ -51,7 +51,7 @@ test_daymet_data.py / test_climate_report.py that fails if it is ignored):
 
   3. EVERYTHING IS METRIC. degC, mm/day, W/m^2, seconds. The dict stores
      what the service returned; unit conversion belongs at the formatting
-     boundary, the same rule report_generator.py already applies.
+     boundary, the same rule the retired narrated report applied.
 
 COLUMNS ARE LOOKED UP BY NAME, NEVER BY POSITION. The service orders
 columns alphabetically by variable name, not in request order -- the

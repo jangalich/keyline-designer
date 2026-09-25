@@ -58,9 +58,9 @@ production_areas() docstring for the shared reasoning.
 
 This is a self-contained, standalone pass, same "validate on its own
 first" framing as the rest of this pipeline: NOT wired into
-generate_full_report.py/report_generator.py's prompt in this pass, but
-render_layout_map.py and tree_zone_candidates.py both already consume its
-output shape directly.
+the retired narrated report's prompt in this pass, but
+tree_zone_candidates.py consumes its output shape directly (as the retired
+layout map did).
 
 ELEVATION POSITION IS OWNED HERE, FOR THE WHOLE PIPELINE. ELEVATION_
 POSITION_BANDS below (and _elevation_position(), which reads it) is the
@@ -1408,8 +1408,8 @@ def identify_optimized_production_areas(
     mandatory (no check_canopy flag), via production_area.get_required_
     tree_root_zone_mask_utm() -- the SAME shared fetch-or-raise helper
     production_area.identify_production_areas() itself calls, so this
-    entry point (the one render_layout_map.py and tree_zone_candidates.py
-    actually use) produces the identical eligible-cell geometry that
+    entry point (the one tree_zone_candidates.py actually uses, as did the
+    retired layout map) produces the identical eligible-cell geometry that
     function does, rather than silently omitting the woody-vegetation
     gate on this path the way it used to (a real bug: this function's own
     STEP 1 call previously passed compute_step1_eligible_cells() only 4
@@ -1418,7 +1418,7 @@ def identify_optimized_production_areas(
     exhausted, or canopy_height_data.CanopyCoverageIncompleteError for
     coverage too sparse to trust -- propagates up UNCAUGHT, same hard-fail
     behavior as production_area.identify_production_areas(); callers
-    (render_layout_map.py, tree_zone_candidates.py) are expected to let
+    (tree_zone_candidates.py, and once the retired layout map) are expected to let
     this raise, not catch and degrade it.
 
     canopy_height is an optional pre-fetched override forwarded straight to

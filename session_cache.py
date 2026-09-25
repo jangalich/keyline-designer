@@ -141,7 +141,7 @@ import valley_delineation
 #     hold: the cap on how WRONG a hit can be.
 #
 #   * It is also the precision the real inputs already carry. The drawn
-#     boundary in generate_full_report.py is given to 7 decimals, which
+#     boundary in the retired narrated report was given to 7 decimals, which
 #     is what a browser map hands back. Rounding there is lossless for
 #     genuine input while still collapsing the sub-centimetre noise this
 #     normalization exists for: float64 arithmetic, a WGS84 -> UTM ->

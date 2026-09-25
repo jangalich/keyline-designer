@@ -4,7 +4,7 @@ road_corridors.py
 Computes a suggested road NETWORK from the DEM, for properties that lack
 existing farm road/access data — this REPLACES having Claude infer a
 plausible-sounding corridor in prose during report generation
-(report_generator.py's Farm Roads step used to do exactly that, with an
+(the retired narrated report's Farm Roads step did exactly that, with an
 explicit "no dedicated access data" disclaimer). Same pattern as
 water_candidate_zones.py and solar_suitability.py: the backend computes
 real geometry, Claude narrates from the result.

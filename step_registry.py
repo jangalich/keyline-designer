@@ -2480,8 +2480,8 @@ FENCING = StepDefinition(
     proposal_collection="fence_lines",
     produces=(
         # NOT a PipelineContext field name, and honestly so: the batch
-        # context holds NO fencing at all -- render_layout_map.fetch_layout_
-        # layers() computes it after the context is built, under its own
+        # context holds NO fencing at all -- the retired layout map's fetch_
+        # layout_layers() computed it after the context was built, under its own
         # `fencing_result` key -- so there is no batch name to match. The
         # committed value is the list of fence lines (wire_translation.
         # rehydrate_fence_lines), and, fencing being the last step, no

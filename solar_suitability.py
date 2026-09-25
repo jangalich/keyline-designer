@@ -5,8 +5,8 @@ Solar/structure siting data layer for permanent building placement (Scale
 of Permanence step 6): ranks candidate SITES for a small, fixed-footprint
 solar-generating structure (e.g. a barn or shed with rooftop panels), not
 a large ground-mounted array. This produces RANKED CANDIDATES, not a
-single placement decision — Claude narrates the tradeoffs between them in
-the report (see report_generator.py step 6). Finding "the one best spot"
+single placement decision — Claude narrated the tradeoffs between them in
+the retired narrated report's step 6. Finding "the one best spot"
 is explicitly not this module's job.
 
 --- THIS PASS: THE MEASUREMENT, TWO DRAINAGE GATES, AND THE PANEL ---
@@ -126,7 +126,7 @@ selected road corridor):
       Tier 1 (primary): the property's own single SELECTED road corridor
         (road_corridors.identify_road_corridor_candidates(), given this
         module's own anchor_lon_lat parameter — the real, user-picked
-        access point, threaded down from generate_full_report.py) — its
+        access point, threaded down by the caller) — its
         'cell_footprint_polygon_utm', within ROAD_CORRIDOR_PROXIMITY_METERS
         (15m). This corridor is the real primary source now, not a
         stand-in for missing data.
@@ -2314,7 +2314,7 @@ def identify_solar_candidate_zones(
     thresholds (spacing_meters, max_structure_footprint_acres) -- and until
     this key existed none of them was recorded anywhere a caller could
     read: not on a candidate dict, not on PipelineContext, not on this
-    return. render_layout_map.fetch_layout_layers() therefore read its
+    return. The retired layout map's fetch_layout_layers() therefore read its
     structure_site Feature off THIS call's zones_geojson, the only artifact
     that knew which run produced the notes. 'run_flags' is exactly
     candidates_to_geojson()'s keyword set, so
@@ -2413,7 +2413,7 @@ def identify_solar_candidate_zones(
       Tier 1 (primary) resolution: road_corridors.identify_road_corridor_
         candidates() is called directly here, given this function's own
         anchor_lon_lat parameter (the real, user-picked access point,
-        threaded down from generate_full_report.py — None degrades to no
+        threaded down by the caller — None degrades to no
         corridor, same as identify_road_corridor_candidates() itself
         already handles), and its own 'selected_road_corridor' (None if no
         corridor exists) is used as the road source at ROAD_CORRIDOR_
@@ -2815,7 +2815,7 @@ def fetch_and_select_optimal_structure_site(
     **zone_kwargs,
 ) -> Optional[dict]:
     """
-    Convenience wrapper for callers (e.g. render_layout_map.py) that want
+    Convenience wrapper for callers (e.g. the retired layout map) that want
     a single best solar structure site candidate rather than the full
     ranked FeatureCollection -- identify_solar_candidate_zones() already
     returns candidates rank-ordered best-first (feature 0 = rank 1), so

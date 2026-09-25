@@ -16,9 +16,9 @@ targets that current domain. NLR_PVWATTS_ENDPOINT below is the one place
 that would need updating if that ever changes again.
 
 Requires a free API key (same one covers PVWatts and the broader NREL/NLR
-developer API), set as NREL_API_KEY. Like report_generator.py's
+developer API), set as NREL_API_KEY. Like the retired narrated report's
 ANTHROPIC_API_KEY, this is a real credential requirement, not a network
-flakiness thing — but unlike report_generator.py's hard dependency, a
+flakiness thing — but unlike that report's hard dependency, a
 missing key here just means the irradiance context note is skipped
 (get_regional_irradiance_baseline returns a dict with
 status="no_api_key" and null data values), the same graceful-

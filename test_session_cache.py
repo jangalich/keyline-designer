@@ -35,7 +35,7 @@ from session_cache import (
     normalized_boundary,
 )
 
-# The real drawn property boundary from generate_full_report.py --
+# The real drawn property boundary from the retired narrated report --
 # 5614 N Montour Rd, Gibsonia, PA. Implicitly closed (its last vertex is
 # ~0.9 m from its first, not on it), which is the shape a browser map
 # hands back and the shape the rest of this pipeline already accepts.

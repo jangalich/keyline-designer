@@ -1115,7 +1115,7 @@ def identify_exclusion_zones(
     the module docstring's EXCLUSION SMOOTHING section for the measurement
     that settled it). The key exists so this result is KSOP-shaped like
     every other layer's; it carries the same geometry on purpose, and
-    render_layout_map.py reads it under that name.
+    the retired layout map read it under that name.
 
     eligible_mask, slope_pct AND slope_only_mask ARE PRODUCTION'S INPUT.
     They were emitted so the production integration (module docstring,
@@ -1325,7 +1325,7 @@ def identify_exclusion_zones(
         "excluded_union_utm": excluded_union_utm,
         # The SAME geometry as excluded_union_utm, on purpose -- see this
         # function's docstring. There is no display-only reduction to apply
-        # to an exact cell footprint. render_layout_map.py reads this key.
+        # to an exact cell footprint. The retired layout map read this key.
         "render_fill_polygon_utm": excluded_union_utm,
         "eligible_polygon_utm": eligible_polygon_utm,
         # NOT the same thing as eligible_polygon_utm above, and neither is

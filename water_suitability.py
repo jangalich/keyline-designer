@@ -169,7 +169,7 @@ candidate zones are now scored against smaller, ceiling-trimmed
 production-area geometry -- an intentional correction, not a regression.
 
 This is a self-contained, standalone pass — like production_suitability.py,
-it is NOT wired into generate_full_report.py/report_generator.py in this
+it was NOT wired into the retired narrated report in this
 pass. Validate the ranking on its own first.
 """
 
@@ -1257,7 +1257,7 @@ def fetch_and_select_optimal_water_zone(
     **suitability_kwargs,
 ) -> Optional[dict]:
     """
-    Convenience wrapper for callers (e.g. render_layout_map.py) that want
+    Convenience wrapper for callers (e.g. the retired layout map) that want
     a single best water system candidate zone directly from a boundary --
     fetches the DEM (unless one is passed in) and runs the full
     identify_water_suitability() pipeline, then returns its own

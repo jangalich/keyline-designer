@@ -9,7 +9,7 @@ numpy -- ten thousand rows of arithmetic.
 
 EVERY FIGURE IS DETERMINISTIC AND METRIC. The block stores degC, mm, kWh
 and degree-days exactly as computed; converting to degF and inches is the
-formatting layer's job (report_generator.py's rule, kept). The one
+formatting layer's job (the retired narrated report's rule, kept). The one
 exception is growing degree days, which are DEFINED on a Fahrenheit base
 (50 degF) and are stored as degF-days -- a unit, not a conversion.
 

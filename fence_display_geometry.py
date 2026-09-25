@@ -2,7 +2,7 @@
 fence_display_geometry.py
 
 THE DISPLAY-ONLY FENCE LINE -- ONE implementation of the two passes
-render_layout_map.py has always run over a fence ring before drawing it,
+the retired matplotlib layout map ran over a fence ring before drawing it,
 read by the PDF's layout map and shipped, as a rendering hint and nothing
 else, on the interactive map's fence features.
 
@@ -48,8 +48,8 @@ TWO PASSES, AND THEIR ORDER IS THE SPEC.
   trimmed against anything -- they are only ever an input to the zone rings'
   trim mask, never a target of one.
 
-WHAT IS NOT HERE. render_layout_map.py additionally clips each trimmed zone
-ring to the drawn property polygon and drops pieces shorter than
+WHAT IS NOT HERE. The retired layout map additionally clipped each trimmed
+zone ring to the drawn property polygon and dropped pieces shorter than
 EXCLUSION_FENCE_CLIP_MIN_LENGTH before drawing. Both are render-time
 concerns of the printed page (a buffered zone fill can reach past the parcel
 edge; a tangent crossing can leave a sliver) and stay in the renderer. The
@@ -114,8 +114,8 @@ from raster_grid import angular_simplify_closed_ring
 DISPLAY_ONLY_FENCE_LINE_PROPERTY = "display_only_fence_line"
 
 # The CRS both passes run in, on the wire side as in the renderer -- see THE
-# CRS in the module docstring. render_layout_map.WEB_MERCATOR is this same
-# string; spelled here so this module does not import the renderer.
+# CRS in the module docstring. The retired layout map's WEB_MERCATOR was the
+# same string, spelled here so this module did not import that renderer.
 DISPLAY_CRS = "EPSG:3857"
 
 # DISPLAY-ONLY simplify tolerance for fence rings (pass 1) -- a shapely
@@ -124,7 +124,7 @@ DISPLAY_CRS = "EPSG:3857"
 # corridor's own ROAD_RENDER_SIMPLIFY_TOLERANCE_M (2.5 m) so the DEM-resolution
 # stairstep zigzags a fence line inherits from its own underlying cell/canopy
 # geometry collapse into fewer, longer straight segments rather than just
-# having their corners rounded off. Was render_layout_map.FENCE_RENDER_
+# having their corners rounded off. Was the retired layout map's FENCE_RENDER_
 # ANGULAR_SIMPLIFY_TOLERANCE_M while the PDF was the only consumer, unchanged
 # in value; the renderer imports it from here now so the printed line and the
 # shipped one cannot drift apart. CONFIGURABLE -- tune by eye against a real
@@ -136,7 +136,7 @@ FENCE_RENDER_ANGULAR_SIMPLIFY_TOLERANCE_M = 6.0  # was 4.0
 # another zone's fence. Wide enough to catch NEAR-coincident stretches (where
 # independent simplification left the rings a few metres apart), not just
 # pixel-exact overlap; note that widening it widens the inter-zone gap the
-# symmetric trim leaves too. Was render_layout_map.ZONE_FENCE_BOUNDARY_
+# symmetric trim leaves too. Was the retired layout map's ZONE_FENCE_BOUNDARY_
 # COINCIDENCE_TOLERANCE_M. CONFIGURABLE.
 #
 # 8.0, AND THE 5.0 IT REPLACES WAS NOT WIDE ENOUGH TO FINISH THE JOB. At 5.0
@@ -175,8 +175,8 @@ def simplified_fence_ring(ring, tolerance: float = FENCE_RENDER_ANGULAR_SIMPLIFY
     on each closed ring it holds.
 
     A LineString is one ring and comes back exactly as angular_simplify_
-    closed_ring() returns it -- byte-identical to what render_layout_map.py
-    computed inline, which is the only reason this is not simply that call.
+    closed_ring() returns it -- byte-identical to what the retired layout
+    map computed inline, which is the only reason this is not simply that call.
     A MultiLineString -- a fence around a zone whose bounded render opening
     severed its fill into several parts (fencing._buffer_fill_polygon_to_
     fence_line) -- is simplified PART BY PART and rebuilt, because the

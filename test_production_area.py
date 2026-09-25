@@ -789,7 +789,7 @@ print(
 #     to whichever resulting piece is nearest, so two split zones on a real boundary end up directly
 #     adjacent -- polygon_utm.distance() == 0.0 between them -- while polygon_utm/area_acres continue to
 #     reflect the full, post-reclaim footprint. The visual gap at the pinch is drawn from each piece's own
-#     render_fill_polygon_utm opening instead (see test_render_layout_map.py), not from the reported
+#     render_fill_polygon_utm opening instead (as the retired layout map's tests showed), not from the reported
 #     geometry. ---
 
 p1, p2 = dumbbell_patches

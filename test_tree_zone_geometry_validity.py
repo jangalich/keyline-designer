@@ -909,9 +909,9 @@ print(
 
 # --- 7. TREE FEATURES CARRY NO DISPLAY OUTLINE -------------------------
 #
-# The smoothing pass, removed. render_layout_map.py does NOT smooth tree zones
-# -- it smooths the production fill, because contour clipping against a 5 m
-# staircase shows there, and draws the tree hatch from the cell-union footprint
+# The smoothing pass, removed. The retired layout map did NOT smooth tree zones
+# -- it smoothed the production fill, because contour clipping against a 5 m
+# staircase shows there, and drew the tree hatch from the cell-union footprint
 # verbatim. Section 4 measured what the smooth was doing to the arms.
 
 for feature in TREES_PAYLOAD["tree_zones"]["features"]:
@@ -928,7 +928,7 @@ for feature in _production_features:
 
 # AND PRODUCTION'S OUTLINE IS STILL THE LAYOUT MAP'S, byte for byte -- the
 # property the removal must not have disturbed. Asserted against a literal
-# transcription of the expression render_layout_map.py evaluates, not against a
+# transcription of the retired layout map's expression, not against a
 # second call to the shared helper.
 from raster_grid import angular_smooth_polygon  # noqa: E402  (local to this claim)
 

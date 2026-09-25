@@ -7,7 +7,7 @@ and rebuild paths, run as:
     python test_session_manager.py
 
 REAL COORDINATES, REAL TERRAIN CODE. The boundary is the actual drawn
-property from generate_full_report.py -- 5614 N Montour Rd, Gibsonia, PA
+property from the retired narrated report -- 5614 N Montour Rd, Gibsonia, PA
 (~13.23 acres, UTM 17N) -- not a synthetic rectangle. valley_delineation.
 delineate_valleys(), keypoint_detection.detect_keypoints() and
 exclusion_zones.identify_exclusion_zones() all RUN, for real, over that

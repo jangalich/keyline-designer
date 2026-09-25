@@ -4,9 +4,9 @@ contour_lines.py
 Elevation contour lines over a DEM's full extent -- pure geometry
 computation (no plotting), following this codebase's usual split between
 computation modules (raster_grid.py, valley_delineation.py) and the one
-module that actually touches matplotlib for drawing (render_layout_map.py).
+module that touched matplotlib for drawing (the retired matplotlib layout map).
 
-Built for render_layout_map.py's production-zone rendering style: instead
+Built for the retired layout map's production-zone rendering style: instead
 of a filled/shaded shape, production zones are drawn as contour-line
 texture, clipped per zone at render time (real geometry_wgs84/polygon_utm
 intersection, not a pre-clipped raster) -- see that module's own
@@ -17,7 +17,7 @@ production_area.py's compute_step1_eligible_cells() already established.
 
 Output shape mirrors valley_delineation.delineate_valleys(): one entry
 per contour LEVEL, carrying both real dem['crs']-meter geometry (for
-math/clipping -- render_layout_map.py intersects this directly against
+math/clipping -- the retired layout map intersected this directly against
 each zone's own polygon_utm, same CRS, no reprojection needed first) and
 a WGS84 GeoJSON counterpart (display/API parity with every other layer
 module in this pipeline, even though the current sole consumer clips the
@@ -72,8 +72,8 @@ def compute_contour_lines(dem: dict, interval_meters: float = CONTOUR_INTERVAL_M
     """
     Runs contourpy (matplotlib's own contour-COMPUTATION engine -- an
     unavoidable transitive dependency of matplotlib>=3.8, the exact
-    matplotlib version already required by this pipeline and already
-    used by render_layout_map.py, not a new third-party choice) directly
+    matplotlib version already required by this pipeline and once
+    used by the retired layout map, not a new third-party choice) directly
     against the DEM's own elevation array, over its FULL extent (no
     zone/boundary clipping here -- that happens per zone, at render
     time). contourpy.contour_generator().lines(level) is real, PUBLIC,
@@ -81,8 +81,8 @@ def compute_contour_lines(dem: dict, interval_meters: float = CONTOUR_INTERVAL_M
     Figure/Axes/plotting involved at all -- unlike matplotlib's own
     ContourSet internals (.allsegs / .get_paths()), which have changed
     shape across matplotlib versions. This codebase already avoids
-    relying on that kind of fragile private/internal API elsewhere (see
-    render_layout_map.py's own _extent_based_auto_zoom() docstring,
+    relying on that kind of fragile private/internal API elsewhere (the
+    retired layout map's _extent_based_auto_zoom() docstring said so,
     reimplementing contextily's zoom calculation directly rather than
     importing its private underscore-prefixed function, for the same
     reasoning) -- contourpy's public API is the equivalent right call

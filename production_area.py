@@ -3,7 +3,7 @@ production_area.py
 
 Heuristic identification of candidate production/cultivation area(s) on a
 property from DEM-derived slope — a structured stand-in for the same
-judgment report_generator.py's Scale of Permanence prompt already makes in
+judgment the retired narrated report's Scale of Permanence prompt made in
 prose (the "Land Shape" section: which parts of the property read as
 strong, workable production land versus steep/awkward/marginal ground).
 
@@ -99,14 +99,14 @@ razor-thin sliver gaps in the unary_union'd footprint instead of a fully
 dissolved polygon. polygon_utm/geometry_wgs84 CAN legitimately come back
 as a MultiPolygon: two cells whose real ground squares only touch at a
 shared corner don't merge into one solid Polygon under unary_union.
-render_layout_map.py draws production zones as clipped contour-line
+The retired layout map drew production zones as clipped contour-line
 texture (via contour_lines.py), clipped NOT to geometry_wgs84 but to a
 separate display geometry, render_fill_polygon_utm (cluster_and_gate()'s
 bounded morphological opening of the cell mask; see PART 1 there). That
-field is genuinely consumed downstream, not display-inert: render_layout_
-map.py clips against it, fencing.py derives the developed-footprint fence
+field is genuinely consumed downstream, not display-inert: the retired
+layout map clipped against it, fencing.py derives the developed-footprint fence
 loops from it, and production_areas_to_geojson() reports its acreage as
-render_fill_area_acres. See render_layout_map.py's own docstring for why
+render_fill_area_acres. The retired layout map's docstring explained why
 filled-shape rendering (and the cosmetic hull-smoothing it used to need)
 was replaced by contour texture.
 
@@ -1459,8 +1459,8 @@ def cluster_and_gate(
         no interior is honestly drawn as its own footprint) and the fallback
         is logged once.
 
-        render_layout_map.py clips contour lines against render_fill_
-        polygon_utm -- see that module's own docstring. Computed for EVERY
+        The retired layout map clipped contour lines against render_fill_
+        polygon_utm, as its docstring explained. Computed for EVERY
         cluster, split or not -- geometrically
         equal to polygon_utm when the cluster has no notch or protrusion
         narrower than r (e.g. a clean rectangular field, whose edges the

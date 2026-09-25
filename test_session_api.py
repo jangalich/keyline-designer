@@ -6,7 +6,7 @@ THE HTTP SURFACE, end to end, over Flask's test client. Run as:
     python3 test_session_api.py
 
 REAL COORDINATES, REAL PIPELINE CODE, REAL ROUTES. The boundary is the
-actual drawn property from generate_full_report.py -- 5614 N Montour Rd,
+actual drawn property from the retired narrated report -- 5614 N Montour Rd,
 Gibsonia, PA (~13.23 acres, UTM 17N / EPSG:32617) -- the SAME six lon/lat
 pairs test_session_manager.py (B2), test_wire_translation_inbound.py (B4),
 test_step_orchestrator.py (B5a) and test_step_commit.py (B5b) use, over

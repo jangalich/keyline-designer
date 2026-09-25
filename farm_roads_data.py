@@ -12,9 +12,9 @@ box + buffer approach), just a different data theme (transportation
 instead of hydro) hosted on the map-service host for that theme. Real,
 public road/right-of-way data — this deliberately does NOT try to invent
 or infer a road network from terrain the way production_area.py infers
-production land from slope; report_generator.py's Farm Roads section
-already carries the "no dedicated existing-access data" caveat for
-inferred/proposed routing, but this module gives it something to
+production land from slope; the retired narrated report's Farm Roads section
+carried the "no dedicated existing-access data" caveat for
+inferred/proposed routing, but this module gave it something to
 proximity-check *existing* access against where public road data covers
 the parcel.
 

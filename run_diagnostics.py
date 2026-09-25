@@ -1126,9 +1126,9 @@ def _collect_wire_features(payload, dem) -> tuple:
 # hit instead.
 #
 # A FETCH WITH NO PROBE IS NOT RECORDED, which is the batch paths'
-# answer: generate_full_report.py and render_layout_map.py call
+# answer: the retired narrated report and layout map called
 # fetch_parcel_data() directly, outside any session, with no session id
-# to file a record under. Their layer timers find no probe and cost one
+# to file a record under. Their layer timers found no probe and cost one
 # thread-local attribute lookup.
 
 # THE CONTRACT A FETCH MODULE MUST MEET FOR ITS ATTEMPT COUNT TO BE

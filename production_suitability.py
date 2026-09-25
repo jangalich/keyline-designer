@@ -7,7 +7,7 @@ suitability RANKING to the production-zone clusters STEP 3
 (production_area.cluster_and_gate()) has already identified. This is
 PURELY DESCRIPTIVE/ADVISORY metadata (e.g. ranking which surviving
 fragment is worth prioritizing on a fragmented result, for
-report_generator.py's eventual narrative) -- nothing filters or gates on
+the retired narrated report's eventual narrative) -- nothing filters or gates on
 suitability_score; survival was already decided by STEP 3's pure area
 check.
 

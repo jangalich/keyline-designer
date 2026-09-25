@@ -6,7 +6,7 @@ The COMMIT and REOPEN paths, end to end, run as:
     python test_step_commit.py
 
 REAL COORDINATES, REAL PIPELINE CODE. The boundary is the actual drawn
-property from generate_full_report.py -- 5614 N Montour Rd, Gibsonia, PA
+property from the retired narrated report -- 5614 N Montour Rd, Gibsonia, PA
 (~13.23 acres, UTM 17N / EPSG:32617) -- the SAME six lon/lat pairs
 test_session_manager.py (B2), test_wire_translation_inbound.py (B4) and
 test_step_orchestrator.py (B5a) use, so every figure printed below is

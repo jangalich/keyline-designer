@@ -58,8 +58,8 @@ identify_optimized_production_areas() does NOT -- it owns its own fetch and
 exposes only check_soil / check_roads toggles. Pre-fetching them here would
 move one of the two calls rather than remove it. Closing this properly means
 adding those two overrides to production_area_ceiling.py's entry point, which
-is a change to a pipeline module that render_layout_map.py and
-tree_zone_candidates.py also call, and so is deliberately NOT bundled into
+is a change to a pipeline module that the retired layout map and
+tree_zone_candidates.py also called, and so is deliberately NOT bundled into
 the branch that first exposes this endpoint.
 
 WHAT A FAILURE IS ALLOWED TO SAY
@@ -102,7 +102,7 @@ and they are not interchangeable:
 The footprint is the wrong thing to draw. It reports a suggested acreage
 within a couple of percent of the eligible acreage while its outline is an
 unbroken 5 m staircase hung with one-cell fingers -- ground nobody would
-farm as drawn, presented as a recommendation. render_layout_map.py has
+farm as drawn, presented as a recommendation. The retired layout map
 always clipped the PDF's production texture to the opening for this reason;
 this endpoint shipping the footprint was the interactive map disagreeing
 with the printed one.
@@ -124,7 +124,7 @@ THE DISPLAY-ONLY SMOOTHED OUTLINE
 Every suggested-zone feature also carries
 `properties.display_only_smoothed_outline`: the same opening its `geometry`
 carries, run through display_outline.smoothed_display_outline() -- the function
-render_layout_map.py uses for the PDF's contour clip.
+the retired layout map used for the PDF's contour clip.
 
 WHY IT IS ON THE WIRE AT ALL. A production zone is a union of 5 m DEM cells, so
 its outline is a right-angle staircase. The PDF has never shown that staircase;
@@ -445,8 +445,8 @@ def assemble_production_zone_payload(exclusion: dict, production: dict) -> dict:
     # smoothed rendering of the SAME opening -- computed here, inside the
     # generate, rather than lazily at a layers fetch, so a payload is a payload
     # by the time anything reads it. It is display_outline.py's own function,
-    # the one render_layout_map.py calls for the PDF's contour clip, so the
-    # interactive map and the printed map smooth by one implementation. Nothing
+    # the one the retired layout map called for the PDF's contour clip, so the
+    # interactive map and the printed map smoothed by one implementation. Nothing
     # computes from it; see display_outline.DISPLAY_ONLY_OUTLINE_PROPERTY.
     drawn = {
         int(patch["id"]): {
@@ -586,7 +586,7 @@ def _display_only_outline_wgs84(patch: dict, wire: dict) -> Optional[dict]:
     THE SAME SHAPE THE FEATURE'S OWN GEOMETRY IS. The wire geometry for a
     production zone is the opening (render_fill_geometry_wgs84), so the outline
     smooths render_fill_polygon_utm and re-clips to polygon_utm -- exactly what
-    render_layout_map.py hands the same function for the PDF's contour clip.
+    the retired layout map handed the same function for the PDF's contour clip.
     Smoothing anything else would ship an outline of a shape the map does not
     draw.
 
