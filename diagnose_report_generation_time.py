@@ -498,17 +498,18 @@ def main(scenario: str, out_dir: str) -> int:
     cache = session_cache.SessionCache()
 
     # SETUP RETRIES, NOT THE PRODUCT'S. Open-Meteo (Layer 1's climate
-    # summary) answers 429 intermittently from a shared egress address,
-    # and a 429 hard-fails a session creation. Setup is not what is being
-    # measured, so it is retried here; a failure inside the timed report
-    # is not retried and is reported as what it is.
+    # summary) answers 429, or drops the TLS connection, intermittently
+    # from a shared egress address, and either hard-fails a session
+    # creation. Setup is not what is being measured, so it is retried
+    # here; a failure inside the timed report is not retried and is
+    # reported as what it is.
     for attempt in range(1, 11):
         try:
             session_id, created = make_session(store, fetch_cache, cache)
             break
-        except requests.exceptions.HTTPError as exc:
-            print(f"setup attempt {attempt}: session creation failed ({exc.response.status_code} from "
-                  f"{urlsplit(exc.request.url).netloc}); waiting 20 s")
+        except requests.exceptions.RequestException as exc:
+            print(f"setup attempt {attempt}: session creation failed ({type(exc).__name__}: {str(exc)[:120]}); "
+                  f"waiting 20 s")
             time.sleep(20)
     else:
         raise SystemExit("could not create the session")
