@@ -209,7 +209,12 @@ class DesignInputs:
     streams: list                   # ParcelData's NHD stream rows, geometry in WGS84
     imagery: Optional[dict]         # naip_imagery.parse_naip's block, None when it degraded
     imagery_unavailable: Optional[dict]
-    retrieved_on: date
+    retrieved_on: date              # Layer 1's: the DEM and the streams, fetched when the document was created
+    # The imagery's own retrieval date: NAIP is a report-layer fetch, made
+    # when the report was generated, not with Layer 1 (branch 17 review --
+    # the footer had printed the document's date for it). None falls back
+    # to retrieved_on, for inputs built without report data.
+    imagery_retrieved_on: Optional[date] = None
 
 
 def _created_on(document: dict) -> date:
@@ -234,6 +239,7 @@ def design_inputs_from_context(context, document: dict, report_data) -> DesignIn
         imagery=getattr(report_data, "naip_imagery", None),
         imagery_unavailable=(getattr(report_data, "unavailable", None) or {}).get("naip_imagery"),
         retrieved_on=_created_on(document),
+        imagery_retrieved_on=getattr(report_data, "retrieved_on", None),
     )
 
 
@@ -563,7 +569,8 @@ def build_sources(inputs: DesignInputs, contours: dict) -> list:
     if inputs.imagery is not None:
         lines.append([f"USDA Farm Service Agency, National Agriculture Imagery Program, acquired "
                       f"{naip_imagery.format_acquired(inputs.imagery)}, {inputs.imagery['gsd']:g} m, "
-                      f"via Microsoft Planetary Computer, retrieved {retrieved}."])
+                      f"via Microsoft Planetary Computer, retrieved "
+                      f"{format_retrieved_on(inputs.imagery_retrieved_on or inputs.retrieved_on)}."])
     terrain = []
     if contours.get("interval_ft"):
         terrain.append(f"USGS 3DEP elevation resampled to 5 m, contoured at {contours['interval_ft']} ft")

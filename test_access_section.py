@@ -131,7 +131,7 @@ layers = acs.build_map_layers(INPUTS, DERIVED, report_map.parcel_contours(INPUTS
 by_id = {l["id"]: l for l in layers}
 assert by_id["road-casing"]["stroke"] == "page" and by_id["road-casing"]["stroke_width"] > by_id["roads"]["stroke_width"]
 assert by_id["roads"]["stroke"] == "ink" and by_id["roads"]["dash"] is None and by_id["tracks"]["stroke"] == "ink-muted" and by_id["tracks"]["dash"]
-assert by_id["track-casing"]["stroke"] == "page" and by_id["frontage"]["stroke"] == "ink" and by_id["undrivable"]["stroke"] == "terrain"
+assert by_id["track-casing"]["stroke"] == "page" and by_id["frontage"]["stroke"] == "oxide" and by_id["undrivable"]["stroke"] == "terrain"
 road_labels = by_id["roads"]["labels"]
 assert {l for l in road_labels if l} == {"N Montour Rd", "N Montour Dr"} and road_labels.count(None) == 1, "the unnamed road carries no label"
 assert len(road_labels) == len(by_id["roads"]["geometries"]) == 4, "the far N Montour Rd segment is clipped away"

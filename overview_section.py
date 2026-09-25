@@ -63,8 +63,14 @@ METERS_PER_MILE = 1609.344
 # The context map's frame: near-square, beside the key figures, so it
 # shows about a mile of ground in every direction rather than a strip.
 CONTEXT_FRAME = (318.0, 300.0)
-CONTOUR_PT = 0.35
-INDEX_CONTOUR_PT = 0.8
+CONTOUR_PT = 0.3
+INDEX_CONTOUR_PT = 1.1
+# THE TINT: the ground between index contours, darker as it rises, so the
+# reader SEES the parcel below the surrounding high ground the summary
+# describes. The lowest band is untinted; each band above it adds this
+# much terrain-brown opacity. Light enough that every contour reads over
+# the top band.
+BAND_OPACITY_STEP = 0.07
 STREAM_PT = 0.7
 ROAD_PT = 0.6
 PARCEL_PT = 1.8
@@ -202,12 +208,22 @@ def build_context_map(inputs: od.OverviewInputs, derived: od.OverviewDerived, to
     interval, index_ft = contours["interval_ft"], contours["interval_ft"] * contours["index_every"]
     plain = [lv["geometry"].intersection(visible) for lv in contours["levels"] if not lv["index"]]
     index = [(lv["geometry"].intersection(visible), lv["elevation_ft"]) for lv in contours["levels"] if lv["index"]]
-    layers = [
+    bands = contours.get("bands") or []
+    layers = []
+    for i, band in enumerate(bands):
+        if i == 0 or band["geometry"].is_empty:
+            continue
+        top = i == len(bands) - 1
+        layers.append(report_map.layer(
+            f"context-band-{i}", [band["geometry"].intersection(visible)], kind="polygon", fill="terrain",
+            fill_opacity=BAND_OPACITY_STEP * i,
+            legend=("Higher ground darker" if top else None)))
+    layers += [
         report_map.layer("context-contours", [g for g in plain if not g.is_empty], kind="line", stroke="terrain",
                          stroke_width=CONTOUR_PT, legend=["Contours, ", {"value": f"{interval} ft"}]),
         report_map.layer("context-index-contours", [g for g, _ in index if not g.is_empty], kind="line", stroke="terrain",
                          stroke_width=INDEX_CONTOUR_PT, labels=[f"{e:,}" for g, e in index if not g.is_empty],
-                         legend=["Index contours, ", {"value": f"{index_ft} ft"}, ", elevation in ft"]),
+                         legend=["Index, ", {"value": f"{index_ft} ft"}]),
     ]
     water = inputs.context_water
     if water is not None:
@@ -350,7 +366,8 @@ def build_map_caption(derived: od.OverviewDerived, rendered: dict, inputs: od.Ov
     cell = max(inputs.context_dem["resolution_meters"])
     return ["About a mile around the parcel, from coarser data: contours every ",
             {"value": f"{derived.context_contours['interval_ft']} ft"}, " from a ", {"value": f"{cell:.0f} m"},
-            " elevation grid. This map shows where the parcel sits, not its ground; the parcel's terrain is in Landform."]
+            " elevation grid, the ground tinted darker every ", {"value": f"{derived.context_contours['interval_ft'] * derived.context_contours['index_every']} ft"},
+            " higher. This map shows where the parcel sits, not its ground; the parcel's terrain is in Landform."]
 
 
 def build_unavailable(derived: od.OverviewDerived) -> list:

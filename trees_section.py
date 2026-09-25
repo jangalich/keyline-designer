@@ -587,11 +587,10 @@ def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
             "period": retrieved,
             "citation": "U.S. Geological Survey 3D Elevation Program lidar point clouds, height above ground derived by Microsoft Planetary "
                         "Computer (PDAL smrf ground classification and hag_nn), 2 m.",
-            "terms": "USGS 3DEP data are U.S. federal works in the public domain; the derived collection is served under Planetary "
-                     "Computer's terms.",
-            "method": "First-return height above bare earth, warped bilinearly onto the session's 5 m DEM grid (the canopy dict the design "
-                      f"consumed, read off the session). A cell is canopy at or above {td.CANOPY_HEIGHT_THRESHOLD_METERS} m (15 ft), the "
-                      "design's own threshold, so the section's canopy is the design's. Height classes break at that threshold and at "
+            "terms": "USGS 3DEP data are U.S. federal works in the public domain; Microsoft Planetary Computer's hosting terms for "
+                     "the derived collection are not yet confirmed.",
+            "method": "First-return height above bare earth, warped bilinearly onto the session's 5 m DEM grid. A cell is canopy at or "
+                      f"above {td.CANOPY_HEIGHT_THRESHOLD_METERS} m (15 ft). Height classes break at that threshold and at "
                       "30 and 50 ft. Closure: the grid cut into 30 m blocks from its origin; in each block holding a canopy cell, canopy "
                       "cells over valid on-parcel cells, the figure the cell-weighted mean. A roof is a first return and counts as canopy.",
         }

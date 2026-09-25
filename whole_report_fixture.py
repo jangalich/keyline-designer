@@ -63,7 +63,11 @@ def inputs(**report_overrides) -> dict:
             "soils": sd.soils_inputs_from_context(context, document, data),
             "overview": od.overview_inputs_from_context(context, document, data),
         }
-    result["design"] = ds.design_inputs_from_context(context, design_document(), data)
+    # The committed design is the fixture's, but in a real report it is the
+    # SESSION's own document: it carries the session's created_at, so every
+    # Layer 1 retrieval date in the report is one date.
+    design = dict(design_document(), created_at=document.get("created_at"))
+    result["design"] = ds.design_inputs_from_context(context, design, data)
     return result
 
 

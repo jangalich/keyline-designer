@@ -132,9 +132,11 @@ assert svg.index('id="layer-contours"') < svg.index('id="layer-flood-zone"') < s
     < svg.index('id="layer-flow-paths"') < svg.index('id="layer-streams-perennial') < svg.index('id="parcel-boundary"')
 assert "layer-streams-intermittent" not in svg, "the intermittent tributary lies beyond the frame"
 # THE FRAME IS FITTED: no more than 50 m of ground beyond the bbox either side (report_map.MAX_CONTEXT_MARGIN_M), so
-# Montour Run at 78 m is off the frame but for a stub at a corner, and the empty parcel says so ON the map.
+# Montour Run at 78 m is off the frame but for a stub at a corner, and the empty parcel says so at the head of the
+# caption (branch 17: on the map the statement sat across the parcel's contours).
 assert SECTION["map"]["frame"][0] < report_map.FRAME_WIDTH_PT and SECTION["map"]["frame"] == LANDFORM["map"]["frame"]
-assert '<g id="map-note">' in svg and "No mapped stream, waterbody, wetland" in svg and "or 1%-annual-chance flood zone on the parcel." in svg
+assert '<g id="map-note">' not in svg
+assert _text(SECTION["map_caption"]).startswith("No mapped stream, waterbody, wetland or 1%-annual-chance flood zone on the parcel. ")
 note = ws.empty_parcel_note(DERIVED, INPUTS.boundary_polygon_utm)
 assert note["lines"] == ["No mapped stream, waterbody, wetland", "or 1%-annual-chance flood zone on the parcel."]
 assert INPUTS.boundary_polygon_utm.contains(note["point"])
@@ -404,13 +406,14 @@ degraded_inputs = wd.water_inputs_from_context(CONTEXT, DOCUMENT, degraded_data)
 degraded_section = ws.build_water_section(degraded_inputs, TOKENS, flow=LANDFORM["derived"])
 assert degraded_section["flood_table"] is None and "did not answer" in _text(degraded_section["flood_unavailable"])
 assert "layer-flood-zone" not in degraded_section["map"]["svg"] and "layer-wetlands" not in degraded_section["map"]["svg"]
-assert _text(degraded_section["map_caption"]).startswith("The National Wetlands Inventory did not answer")
+assert "The National Wetlands Inventory did not answer" in _text(degraded_section["map_caption"])
 assert [r["label"] for r in degraded_section["comparison_table"]["rows"]] == ["Terrain wetness only", "Hydric soil only",
                                                                                "Two or more indicators", "Neither", "Total"]
 assert round(sum(degraded_section["comparison_table"]["acres"]), 6) == COVER
 assert degraded_section["key_figures"][2] == {"value": "Unavailable", "label": "mapped wetland on the parcel", "word": True}
 assert degraded_section["key_figures"][8] == {"value": "Unavailable", "label": "FEMA flood zone", "word": True}
-assert "map-note" in degraded_section["map"]["svg"] and "No mapped stream</text>" in degraded_section["map"]["svg"]
+assert "map-note" not in degraded_section["map"]["svg"]
+assert _text(degraded_section["map_caption"]).startswith("No mapped stream or waterbody on the parcel. The National Wetlands Inventory did not answer")
 assert "wetland" not in ws.empty_parcel_note(degraded_section["derived"], INPUTS.boundary_polygon_utm)["lines"][0]
 assert _text(degraded_section["summary"]).endswith("terrain wetness marks 1.1 acres.")
 assert len(degraded_section["sources"]) == 5

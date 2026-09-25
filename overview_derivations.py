@@ -249,6 +249,36 @@ def context_contour_interval_ft(relief_ft: float) -> int:
     return CONTEXT_CONTOUR_INTERVALS_FT[-1]
 
 
+def elevation_bands(context_dem: dict, edges_ft: list) -> list:
+    """THE CONTEXT MAP'S TINT: the ground between successive `edges_ft`
+    (the index contours), as polygons in the DEM's UTM zone -- contourpy's
+    filled contours over the same grid the lines come from, so a band's
+    edge IS its index contour. [{'low_ft', 'high_ft', 'geometry'}], lowest
+    first; the first band's low and the last's high are the window's own."""
+    import contourpy
+    from shapely.geometry import MultiPolygon, Polygon
+    from shapely.ops import unary_union
+
+    from contour_lines import _grid_axes
+
+    array = context_dem["array"]
+    low_ft, high_ft = float(np.nanmin(array)) / METERS_PER_FOOT, float(np.nanmax(array)) / METERS_PER_FOOT
+    bounds = [low_ft - 1.0] + [e for e in edges_ft if low_ft < e < high_ft] + [high_ft + 1.0]
+    x, y = _grid_axes(context_dem)
+    generator = contourpy.contour_generator(x=x, y=y, z=array, fill_type=contourpy.FillType.OuterOffset)
+    bands = []
+    for lower, upper in zip(bounds[:-1], bounds[1:]):
+        points, offsets = generator.filled(lower * METERS_PER_FOOT, upper * METERS_PER_FOOT)
+        polygons = []
+        for pts, offs in zip(points, offsets):
+            rings = [pts[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
+            if rings and len(rings[0]) >= 4:
+                polygons.append(Polygon(rings[0], [r for r in rings[1:] if len(r) >= 4]).buffer(0))
+        geometry = unary_union(polygons) if polygons else MultiPolygon()
+        bands.append({"low_ft": max(lower, low_ft), "high_ft": min(upper, high_ft), "geometry": geometry})
+    return bands
+
+
 def context_contours(context_dem: dict) -> dict:
     """The context map's contour levels over the whole window, in feet:
     {'interval_ft', 'index_every', 'relief_ft', 'levels': [{'elevation_ft',
@@ -262,8 +292,9 @@ def context_contours(context_dem: dict) -> dict:
         levels.append({"elevation_ft": elevation_ft,
                        "index": elevation_ft % (CONTEXT_INDEX_EVERY * interval) == 0,
                        "geometry": contour["lines_utm"]})
+    index_ft = [lv["elevation_ft"] for lv in levels if lv["index"]]
     return {"interval_ft": interval, "index_every": CONTEXT_INDEX_EVERY, "relief_ft": high - low,
-            "min_ft": low, "max_ft": high, "levels": levels}
+            "min_ft": low, "max_ft": high, "levels": levels, "bands": elevation_bands(context_dem, index_ft)}
 
 
 # ======================================================================

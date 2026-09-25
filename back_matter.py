@@ -67,6 +67,12 @@ from climate_section import format_generated_on
 SESSION, REPORT, BUNDLE, DESIGN, NOT_ASSESSED = "session", "report", "bundle", "design", "not assessed"
 
 PUBLIC_DOMAIN = "Public domain."
+# THE ONE OUTSTANDING TERMS QUESTION (naip_imagery.py: VERIFY BEFORE BUILD):
+# Microsoft Planetary Computer's hosting terms. The data it serves are
+# federal and public domain; the host lists NAIP's licence as "proprietary"
+# and its own terms are unconfirmed. Both collections it serves here --
+# the lidar heights and NAIP -- read the same way until that is settled.
+PLANETARY_COMPUTER_TERMS = "Public domain; Planetary Computer's terms unconfirmed."
 
 
 def _text(line) -> str:
@@ -189,7 +195,7 @@ SOURCES = (
     ("3dep_context", "USGS 3D Elevation Program (3DEP)", _has(r"3DEP elevation", _CONTEXT), _context_grid, REPORT,
      PUBLIC_DOMAIN),
     ("3dep_hag", "USGS 3DEP lidar height above ground", _has(r"lidar height above ground"),
-     _canopy_version, SESSION, "Public domain; hosted under Planetary Computer's terms."),
+     _canopy_version, SESSION, PLANETARY_COMPUTER_TERMS),
     ("tcc", "USDA Forest Service NLCD Tree Canopy Cover", _has(r"Tree Canopy Cover"), "30 m", SESSION, PUBLIC_DOMAIN),
     ("nhd", "USGS National Hydrography Dataset (NHD)", _not(_has(r"National Hydrography Dataset"), _CONTEXT),
      "1:24,000 flowlines and waterbodies", SESSION, PUBLIC_DOMAIN),
@@ -216,7 +222,7 @@ SOURCES = (
     ("transportation_context", "USGS National Map transportation", _has(r"National Map transportation", _CONTEXT),
      "extent plus a mile", REPORT, PUBLIC_DOMAIN),
     ("naip", "USDA FSA NAIP aerial imagery", _has(r"National Agriculture Imagery Program"),
-     _naip_version, REPORT, 'Not yet confirmed: FSA public domain; Planetary Computer says "proprietary".'),
+     _naip_version, REPORT, PLANETARY_COMPUTER_TERMS),
     ("census", "U.S. Census Bureau geocoder", _has(r"Census Bureau geocoder"), "Public_AR_Current, Current_Current", REPORT,
      PUBLIC_DOMAIN),
     ("structures", "FEMA and ORNL USA Structures", _has(r"USA Structures"), _structures_version, REPORT,
@@ -405,7 +411,6 @@ def build_back_matter(sections: list, report_data, layer1_retrieved_on: date) ->
         "template": "back_matter.html",
         "vintage": vintage,
         "vintage_table": vintage_data_table(vintage),
-        "vintage_caption": ["Every source any section cites, once. Retrieved is when this report's data were fetched; a "
-                            "bundled source ships with the software."],
+        "vintage_caption": ["Retrieved is when this report's data were fetched; a bundled source ships with the software."],
         "methods": build_methods_note(sections),
     }

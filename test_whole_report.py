@@ -113,6 +113,8 @@ for key, lines in printed.items():
 # The rows the table always carries, whatever the footers print.
 assert "FCC National Broadband Map" in vintage_text and "not assessed" in vintage_text
 assert "Esri Master License Agreement" in vintage_text, "the HIFLD row states the Esri licence as found"
+# ONE HOST, ONE ANSWER: both Planetary Computer collections carry the same unresolved terms until they are settled.
+assert row_of["3dep_hag"]["terms"] == row_of["naip"]["terms"] == back_matter.PLANETARY_COMPUTER_TERMS
 # 3DEP under ONE name: one row, both grids in it.
 threedep = [row for row in back["vintage"]["rows"] if row["source"] == "USGS 3D Elevation Program (3DEP)"]
 assert len(threedep) == 1 and set(threedep[0]["keys"]) == {"3dep", "3dep_context"}, threedep
@@ -122,6 +124,9 @@ for row in back["vintage"]["rows"]:
     assert row["retrieved"], row
 assert row_of["nwi"]["retrieved"] == report_day and row_of["sgmc"]["retrieved"] == report_day
 assert row_of["nhdplus"]["retrieved"] == report_day and row_of["daymet"]["retrieved"] == report_day
+# Design's footer dates NAIP by the report's fetch, and its 3DEP and NHD by Layer 1's -- the same dates the table carries.
+assert f"retrieved {site_report.climate_section.format_generated_on(BUNDLE['data'].retrieved_on)}" in printed["design"][1], printed["design"]
+assert row_of["naip"]["retrieved"] == report_day
 print(f"   {count} footer lines across {len(printed)} sections, each matched; {len(back['vintage']['rows'])} rows on "
       f"page {vintage_page[0] + 1}")
 
@@ -162,7 +167,9 @@ assert context_mpu > 5 * landform_mpu, (context_mpu, landform_mpu)
 assert OVERVIEW["map"]["scale_bar"]["feet"] > landform["map"]["scale_bar"]["feet"]
 assert "<image" not in OVERVIEW["map"]["svg"], "no imagery on the context map"
 caption = "".join(p if isinstance(p, str) else p["value"] for p in OVERVIEW["map_caption"])
-assert "not its ground" in caption and "20 ft" in caption
+assert "not its ground" in caption and "20 ft" in caption and "tinted darker every 100 ft higher" in caption
+# HIGH AND LOW, SEEN: the ground between index contours is tinted, darker as it rises, the lowest band untinted.
+assert "layer-context-band-1" in OVERVIEW["map"]["svg"] and "layer-context-band-0" not in OVERVIEW["map"]["svg"]
 overview_text = " ".join(PAGE_TEXT[1].split())
 assert "The boundary is as drawn by the user and is not a survey." in overview_text
 assert "Coyotes account for the large majority of livestock predator losses in Pennsylvania" in overview_text
@@ -180,8 +187,14 @@ assert len(PAGE_TEXT) - back_start + 1 == 3, "vintage table, then the methods no
 # A hyphen that ends a line in the PDF text is joined back to its word.
 methods_text = re.sub(r"-\s+", "-", " ".join(" ".join(PAGE_TEXT[back_start:]).split()))
 for phrase in ("Thornthwaite", "Hargreaves", "Precipitation factor", "Resultant wind", "largest-remainder",
-               "Chaikin", "THE TOLERANCE IS A JUDGMENT", "Weiss"):
+               "Chaikin", "THE TOLERANCE IS A JUDGMENT", "Weiss", "Keypoints: where a valley's long profile",
+               "priority-flood fill", "map-unit cell grid"):
     assert phrase in methods_text, phrase
+# THE DESIGN'S METHODS ARE NOT HERE (branch 17 review): how the pipeline decides what to propose belongs to the
+# design methods document, not the site data note.
+for phrase in ("least-squares", "detector", "existing-road exclusion", "design's own threshold", "full-credit breakpoint",
+               "the water step", "canopy dict", "No keypoint, no keyline"):
+    assert phrase not in methods_text, phrase
 print(f"   {len(PAGE_TEXT)} pages; overview p2; back matter p{back_start}-{len(PAGE_TEXT)}")
 
 # ======================================================================
