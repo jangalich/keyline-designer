@@ -497,12 +497,11 @@ def main(scenario: str, out_dir: str) -> int:
     fetch_cache = session_cache.FetchCache()
     cache = session_cache.SessionCache()
 
-    # SETUP RETRIES, NOT THE PRODUCT'S. Open-Meteo (Layer 1's climate
-    # summary) answers 429, or drops the TLS connection, intermittently
-    # from a shared egress address, and either hard-fails a session
-    # creation. Setup is not what is being measured, so it is retried
-    # here; a failure inside the timed report is not retried and is
-    # reported as what it is.
+    # SETUP RETRIES, NOT THE PRODUCT'S. A hard-fail Layer 1 source that
+    # does not answer fails a session creation (the first audit's runs met
+    # Open-Meteo's 429s here, before that layer was retired). Setup is not
+    # what is being measured, so it is retried here; a failure inside the
+    # timed report is not retried and is reported as what it is.
     for attempt in range(1, 11):
         try:
             session_id, created = make_session(store, fetch_cache, cache)
