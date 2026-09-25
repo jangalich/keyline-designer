@@ -304,6 +304,17 @@ class Harness:
                 wraps=keypoint_detection.delineate_valleys,
             )
         )
+        # THE FILL AND FLOW PASS, counted the same way at both bindings:
+        # valley_delineation's (flow_pass() and delineate_valleys() reach it
+        # there) and keypoint_detection's own `from valley_delineation
+        # import` copies, which detect_keypoints() self-computes through
+        # when the four flow arrays are not forwarded. Forwarding valleys=
+        # alone once left exactly those lit -- a second fill per warm-up.
+        for name in ("fill_and_resolve", "compute_flow_direction", "compute_flow_accumulation"):
+            for module, prefix in ((valley_delineation, ""), (keypoint_detection, "keypoint_")):
+                setattr(self, prefix + name, patch(
+                    mock_patch.object(module, name, wraps=getattr(module, name))
+                ))
         self.detect_keypoints = patch(
             mock_patch.object(
                 keypoint_detection,
@@ -576,6 +587,17 @@ with Harness() as h:
         f"{h.total_delineate_valleys_calls} across both import bindings"
     )
     valleys_calls = h.total_delineate_valleys_calls
+
+    # AND ONE FILL AND FLOW PASS, not two. Measured, not read off the code:
+    # the forwarding bug this guards looked correct in session_cache.py --
+    # valleys= was passed -- while detect_keypoints() refilled the DEM.
+    for name in ("fill_and_resolve", "compute_flow_direction", "compute_flow_accumulation"):
+        own = getattr(h, name).call_count
+        keypoint = getattr(h, "keypoint_" + name).call_count
+        assert (own, keypoint) == (1, 0), (
+            f"{name} must run exactly once per warm-up, at valley_delineation's binding "
+            f"(flow_pass), and never at keypoint_detection's: got {own} + {keypoint}"
+        )
 
     # It ran against ParcelData's own DEM, not a re-derived one.
     context = sessions.get(document["session_id"])

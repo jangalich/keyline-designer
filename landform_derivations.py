@@ -123,10 +123,7 @@ class TerrainDerived:
 
 
 def flow_pass(dem: dict) -> tuple:
-    filled = valley_delineation.fill_and_resolve(dem["array"])
-    flow_to_row, flow_to_col = valley_delineation.compute_flow_direction(filled, dem["resolution_meters"])
-    accumulation = valley_delineation.compute_flow_accumulation(filled, flow_to_row, flow_to_col)
-    return filled, flow_to_row, flow_to_col, accumulation
+    return valley_delineation.flow_pass(dem)
 
 
 # ======================================================================

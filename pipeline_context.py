@@ -663,14 +663,26 @@ def build_pipeline_context(
     if boundary_polygon_utm is None:
         boundary_polygon_utm = _boundary_polygon_utm(boundary_coordinates, dem)
 
-    valleys = valley_delineation.delineate_valleys(dem)
+    # ONE FLOW PASS, forwarded to both consumers below (valley_delineation.
+    # flow_pass()'s docstring). Forwarding valleys= alone left
+    # detect_keypoints() refilling the DEM for the arrays the valleys were
+    # traced on -- a second fill and flow pass per warm-up.
+    flow = valley_delineation.flow_pass(dem)
+    filled, flow_to_row, flow_to_col, flow_accumulation = flow
+    valleys = valley_delineation.delineate_valleys(dem, flow=flow)
 
     # Keypoints: pure terrain analysis, dependent only on dem/boundary/valleys
     # (all already computed above), forwarded so delineate_valleys() is not
     # rerun. Independent of every KSOP layer below -- computed here, in
     # dependency order, right after the valleys it profiles.
     keypoints = keypoint_detection.detect_keypoints(
-        dem, boundary_polygon_utm, valleys=valleys
+        dem,
+        boundary_polygon_utm,
+        filled=filled,
+        flow_to_row=flow_to_row,
+        flow_to_col=flow_to_col,
+        flow_accumulation=flow_accumulation,
+        valleys=valleys,
     )
 
     # Layer 2, FIRST STEP -- before production areas, deliberately. This
