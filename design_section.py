@@ -402,6 +402,14 @@ def boundary_legend_spec() -> dict:
 
 
 def build_map(inputs: DesignInputs, record: dict, tokens: dict) -> dict:
+    # COMPUTED AGAIN HERE, KNOWINGLY -- NOT A BUG, AND NOT FREE TO REMOVE.
+    # parcel_contours() runs once per section map: Site overview, Landform,
+    # Water, Access, Trees, Soils and Design, seven times per report over the
+    # same DEM and interval. About 0.06 s a time and no network
+    # (diagnose_report_generation_time.py), so the repeat costs under half a
+    # second and cannot fail on a flaky source. Sharing one result means
+    # threading it through every section's builder; worth doing only if the
+    # report's compute ever matters beside its fetches.
     contours = report_map.parcel_contours(inputs.dem, inputs.boundary_polygon_utm)
     layers = build_map_layers(inputs, record, contours)
     extent = map_extent(inputs)
