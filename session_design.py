@@ -13,8 +13,7 @@ pipeline walk would have chosen for them.
 The narrated report, its PDF assembly and Claude call, and the matplotlib
 layout map this module fed were retired when the report job switched to
 the site data report (site_report.py), whose Design section reads the
-committed steps
-off the Design Document directly (design_record.py). What is still read
+committed steps off the Design Document directly (design_record.py). What is still read
 from here is SessionWorkingDataExpiredError, which session_report.
 error_payload() maps. This module is kept, unchanged in behaviour, and is
 retired in a branch of its own -- deleting it in the same change that
