@@ -73,18 +73,23 @@ POLL_TIMEOUT_SECONDS = 900.0
 # THE REPORT LAYER, from the reference fixtures -- built once: every report
 # in this file is on the same boundary, and a ReportData is a value.
 #
-# THREE LAYERS DEGRADED, because this session is not the reference session.
+# TWO LAYERS DEGRADED, because this session is not the reference session.
 # The commits here run the real orchestrator on fencing_step_fixture's
-# SYNTHETIC bench-and-drainage DEM (108x98 cells) and its synthetic SSURGO
-# rows; the report fixtures were captured on the real DEM (108x96) and the
-# real survey. NLCD land cover and the forest type group are rasters on the
-# DEM grid and cannot be laid over a different one, and the survey's
-# components are keyed to map units this session does not have. Each is
-# passed as absent -- the degraded path every section already renders --
-# so this file tests the route and the job; the whole report's content on
-# the reference session is test_whole_report.py's subject.
+# SYNTHETIC bench-and-drainage DEM (108x98 cells); the report fixtures were
+# captured on the real DEM (108x96). NLCD land cover and the forest type
+# group are rasters on the DEM grid and cannot be laid over a different
+# one, so each is passed as absent -- the degraded path every section
+# already renders. The whole report's content on the reference session is
+# test_whole_report.py's subject.
+#
+# THE SOIL SURVEY IS KEPT, and is the point of a case of its own: its rows
+# describe the REAL survey's map units, none of which this synthetic
+# session has, so the survey ANSWERS with nothing for this parcel. That
+# used to leave the Soils section's properties table empty with no
+# statement beside it, and the render raised; soils_section now states
+# that the service answered with no major component here.
 FIXTURE_REPORT_DATA = overview_reference_fixture.report_data(
-    nlcd_landcover=None, forest_type_group=None, soil_survey_rows=None,
+    nlcd_landcover=None, forest_type_group=None,
 )
 
 

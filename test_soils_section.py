@@ -385,9 +385,35 @@ for missing, expect in (({"soil_survey": None}, "The soil survey's detailed prop
             assert row["cells"][2] == DERIVED.map_units[mukey]["hydrologic_group"], "the Layer 1 readings survive"
         assert all(e["tfact"] is None and e["kwfact"] is not None
                    for e in degraded_section["derived"].erosion.values()), "K survives, T does not"
+# THE LAYER ANSWERED, WITH NOTHING FOR THIS PARCEL. A survey whose rows
+# describe no major component of any map unit here (they belong to other
+# units), and a geologic compilation that maps no unit under it. Each leaves
+# its table or line empty exactly as an absent layer does -- and used to
+# reach the template with NO statement, which raised inside the caption
+# macro and failed the whole report. The statement now follows the table,
+# and says the source answered rather than that it was down.
+for answered_empty, key, expect in (
+        ({"soil_survey": {**INPUTS.soil_survey, "map_units": {}}}, "survey_unavailable",
+         "the Soil Data Access service answered, but described no major component for the map units on this parcel"),
+        ({"bedrock_geology": {**INPUTS.bedrock_geology, "units": []}}, "geology_unavailable",
+         "the USGS State Geologic Map Compilation answered, but maps no geologic unit under this parcel")):
+    empty_inputs = sd.SoilsInputs(**{**INPUTS.__dict__, **answered_empty})
+    empty_section = [s for s in site_report.build_sections(DATA, TERRAIN, WATER, ACCESS, TREES, empty_inputs)
+                     if s["name"] == "Soils & geology"][0]
+    assert empty_section[key] and expect in "".join(p for p in empty_section[key] if isinstance(p, str)), \
+        empty_section[key]
+    empty_html, empty_document = _render(empty_inputs)
+    assert expect in empty_html.replace("&#39;", "'"), key
+    assert report_layout.overflowing_boxes(empty_document) == [], key
+# AND THE STATEMENT IS ABSENT EXACTLY WHEN THE TABLE IS PRESENT.
+for section in ([s for s in site_report.build_sections(DATA, TERRAIN, WATER, ACCESS, TREES, INPUTS)
+                 if s["name"] == "Soils & geology"]):
+    assert section["properties_table"] and section["survey_unavailable"] is None
+    assert section["geology"] and section["geology_unavailable"] is None
 print(f"   16 pages; the map page ({len(_tables(MAP_PAGE))} classification tables under the map), the tables page "
       f"({len(_tables(TABLES_PAGE))}) and the last ({len(_tables(CLASS_PAGE))}); one glyph advance "
-      f"{advances.pop():.1f} pt; a crowded page moves the farmland block whole; three degraded renders")
+      f"{advances.pop():.1f} pt; a crowded page moves the farmland block whole; three degraded renders; two sources that answered with "
+      f"nothing for this parcel render their statements")
 
 print("\ntest_soils_section.py: all sections passed")
 print(offline_harness.summary())
