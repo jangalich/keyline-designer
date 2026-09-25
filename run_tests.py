@@ -50,6 +50,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # early and the wall clock is bounded by the longest file, not by the
 # order of the alphabet.
 FULL_ONLY = (
+    # The report job end to end: the real orchestrator commits all six
+    # steps, then four WeasyPrint renders of the twenty-three-page site
+    # data report through the route. Measured at 41.4 s.
+    "test_session_report_route.py",
+    # The report-layer retry replay, ending in three whole
+    # fetch_report_data() runs. Measured at 10.0 s.
+    "test_report_layer_retry.py",
     "test_run_diagnostics.py",
     "test_roads_step.py",
     "test_water_step.py",
