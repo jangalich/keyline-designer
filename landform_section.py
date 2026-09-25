@@ -799,7 +799,6 @@ def build_methods(terrain: TerrainInputs, derived: landform_derivations.TerrainD
     """The methods note's inputs -- the full citation and the method behind
     each figure -- for the note the Site overview branch builds. Not
     rendered by this section."""
-    from keypoint_detection import KEYPOINT_BOUNDARY_MARGIN_METERS, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT
     from valley_delineation import MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES, MIN_STREAM_CONTRIBUTING_AREA_ACRES
 
     resolution = max(terrain.dem["resolution_meters"])
@@ -810,27 +809,27 @@ def build_methods(terrain: TerrainInputs, derived: landform_derivations.TerrainD
             "period": format_retrieved_on(terrain.retrieved_on),
             "citation": CITATION_3DEP,
             "method": "Contours by contourpy over the raw grid at 2, 5, 10 or 20 ft, the interval chosen for 8–15 lines "
-                      "across the parcel; slope by finite differences (production_area.compute_slope_percent) classed "
+                      "across the parcel; slope by finite differences on the 5 m grid, classed "
                       "by the SSURGO slope phases; aspect by Horn's method in eight sectors, Flat under 2%; acreages "
                       "from cell counts allocated exactly to the parcel's polygon area.",
+            # WHAT THE SECTION PRINTS, NOT HOW THE DESIGN USES IT (branch 17
+            # review). Valleys, keypoints, ridges, keylines and the profile
+            # are figures on this section's pages, so each is defined here;
+            # how the keypoint detector finds its break and how the design
+            # steps build on them belongs to the design methods document, not
+            # to the site data report's note.
             "notes": [
                 f"Valleys: depressions filled with an epsilon gradient, D8 flow direction and accumulation; a stream where "
                 f"at least {MIN_STREAM_CONTRIBUTING_AREA_ACRES} acres drain to a cell, a primary valley where the largest "
                 f"contributing area reaches {MIN_PRIMARY_VALLEY_CONTRIBUTING_AREA_ACRES} acres. The map draws each valley's "
                 "main stem, traced from its outlet up to the ridge by the highest-accumulation feeder at each step.",
-                f"Keypoints: the two-segment least-squares split of the stem's raw long profile among positions where the "
-                f"smoothed grade drops by at least {KEYPOINT_MIN_SLOPE_DROP_PCT:.0f} points over {KEYPOINT_MIN_RUN_CELLS} cells "
-                f"either side, within {KEYPOINT_BOUNDARY_MARGIN_METERS:.0f} m of the drawn boundary; one per valley at most, "
-                "none where the profile holds no inflection.",
-                "Ridges: the divides between the valleys' drainage areas -- each cell labelled by the valley its flow "
-                "first reaches, cells whose flow leaves the elevation model labelled as off-window drainage, the shared "
-                "boundaries of the labelled areas rounded by two passes of Chaikin's corner cutting (within half a cell "
-                "of the cell-edge divide).",
-                "Keylines: the contour at the keypoint's raw elevation through the keypoint, clipped to the keypoint "
-                "valley's drainage area so it ends at the divides, then to the parcel. No keypoint, no keyline.",
+                "Keypoints: where a valley's long profile changes from steeper to gentler ground; one per valley at most, "
+                "none where the profile holds no such break.",
+                "Ridges: the divides between the valleys' drainage areas.",
+                "Keylines: the contour through a keypoint, followed across its valley's drainage area to the divides "
+                "and clipped to the parcel.",
                 "The profile is the primary valley's stem -- the largest contributing area among the valleys whose stem "
-                "crosses the parcel -- with raw elevations against ground distance; grades either side of the keypoint "
-                "are the detector's own, from a 5-cell moving average.",
+                "crosses the parcel -- with raw elevations against ground distance.",
                 f"The {resolution:.0f} m grid smooths features narrower than about {2 * resolution:.0f} m; 3DEP's vertical "
                 "accuracy is about 0.8 m, so elevations are set in whole feet and the finest contour interval is 2 ft.",
             ],

@@ -366,7 +366,9 @@ assert caption_text.startswith("A keyline is the contour through its keypoint") 
 assert SECTION["sources"] == [["USGS 3DEP elevation, 1/3 arc-second, resampled to 5 m, retrieved " + ls.format_retrieved_on(TERRAIN.retrieved_on) + "."]]
 methods = SECTION["methods"]
 assert len(methods) == 1 and methods[0]["source"] == "USGS 3DEP" and methods[0]["citation"] == ls.CITATION_3DEP
-assert len(methods[0]["notes"]) == 6 and any("No keypoint, no keyline" in n for n in methods[0]["notes"])
+assert len(methods[0]["notes"]) == 6 and any(n.startswith("Keylines: the contour through a keypoint") for n in methods[0]["notes"])
+# What the section prints, not how the design finds it (branch 17): no detector parameters in the note.
+assert not any("least-squares" in n or "detector" in n or "Chaikin" in n for n in methods[0]["notes"])
 
 # The synthetic parcel: valleys but no keypoint anywhere -> no keyline, said plainly.
 with synthetic.Harness():

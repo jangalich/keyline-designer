@@ -141,6 +141,38 @@ draws on white without it):
                                   with each item's acquisition date --
                                   printed beneath the map (naip_imagery).
 
+THE TABLE AFTER BRANCH 17 (Site overview: six more, all DEGRADABLE --
+the overview stands on the boundary and the session's own DEM, and each
+absent layer leaves its line or its map layer out with a statement):
+
+  context_dem         DEGRADABLE  3DEP over the parcel's extent plus one
+                                  mile, on dem_data's 300-cell grid: the
+                                  context map's contours and the
+                                  landscape position (context_map_data).
+  context_water       DEGRADABLE  NHD flowlines and waterbodies over the
+                                  same extent: the context map's streams.
+  context_roads       DEGRADABLE  National Map transportation over the
+                                  same extent: the context map's roads.
+  county_state        DEGRADABLE  Census geocoder, reverse, at the
+                                  centroid: the county and State
+                                  (census_geography). The cover names the
+                                  county when this answered.
+  structures          DEGRADABLE  FEMA USA Structures, CC BY 4.0: the
+                                  buildings on the parcel
+                                  (structures_data).
+  transmission_lines  DEGRADABLE  HIFLD transmission lines, Esri's
+                                  archived copy: the nearest line within
+                                  five miles (transmission_lines).
+
+THE PHYSIOGRAPHIC PROVINCE AND THE LIVESTOCK PREDATOR LINE ARE BUNDLED
+(class E: physiography.py, livestock_predators.py) and, like severe
+weather, have no row in the table; the overview reads them directly.
+
+RETRIEVED ON. ReportData.retrieved_on is the date this fetch ran -- the
+retrieval date of every report-layer source, which the back matter's
+vintage table prints as data. The Layer 1 sources' date is the Design
+Document's created_at, which every section already reads.
+
 THE WINDOW-BASED LAYERS take the boundary alone: nwi_data, nfhl_data,
 nlcd_landcover_data and forest_type_data derive the parcel's UTM window from the boundary with
 dem_data.dem_window_bounds(), the function the DEM fetch itself uses, so
@@ -183,6 +215,7 @@ monthly table describe the same thirty years.
 """
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Optional
 from xml.etree import ElementTree
 
@@ -204,6 +237,10 @@ import soil_survey
 import soil_water_table
 import soil_woodland
 import naip_imagery
+import census_geography
+import context_map_data
+import structures_data
+import transmission_lines
 from atlas14_data import Atlas14IncompleteError, design_storms, get_atlas14_for_point
 from climate_report import derive_climate
 from daymet_data import DaymetIncompleteError, get_daymet_daily_for_point
@@ -232,6 +269,12 @@ REPORT_FETCH_LAYERS = {
     "soil_survey": DEGRADABLE,
     "bedrock_geology": DEGRADABLE,
     "naip_imagery": DEGRADABLE,
+    "context_dem": DEGRADABLE,
+    "context_water": DEGRADABLE,
+    "context_roads": DEGRADABLE,
+    "county_state": DEGRADABLE,
+    "structures": DEGRADABLE,
+    "transmission_lines": DEGRADABLE,
 }
 
 # The (type, label) pair each layer's failure reports as -- the same split
@@ -252,6 +295,12 @@ LAYER_SOIL_WOODLAND = ("soil_woodland", "soil woodland ratings")
 LAYER_SOIL_SURVEY = ("soil_survey", "soil survey properties")
 LAYER_BEDROCK_GEOLOGY = ("bedrock_geology", "bedrock geology")
 LAYER_NAIP_IMAGERY = ("aerial_imagery", "aerial imagery")
+LAYER_CONTEXT_DEM = ("context_elevation", "surrounding elevation")
+LAYER_CONTEXT_WATER = ("context_streams", "surrounding streams")
+LAYER_CONTEXT_ROADS = ("context_roads", "surrounding roads")
+LAYER_COUNTY_STATE = ("county_state", "county and state")
+LAYER_STRUCTURES = ("structures", "building footprints")
+LAYER_TRANSMISSION = ("transmission_lines", "transmission lines")
 
 # What a Water layer's fetch or parse can raise besides a RequestException:
 # a TIFF rasterio cannot open (OSError), a response whose shape the parser
@@ -268,7 +317,14 @@ _GEOLOGY_FETCH_ERRORS = _WATER_FETCH_ERRORS + (ElementTree.ParseError, bedrock_g
 # The exception kinds that mean "the source answered without the data",
 # as opposed to a RequestException, "the source did not answer".
 _NO_DATA_ERRORS = (DaymetIncompleteError, Atlas14IncompleteError, PowerIncompleteError,
-                   bedrock_geology.GeologyIncompleteError, naip_imagery.NaipIncompleteError)
+                   bedrock_geology.GeologyIncompleteError, naip_imagery.NaipIncompleteError,
+                   census_geography.CensusGeographyIncompleteError)
+
+# The overview's fetches add a geocoder answer with no county in it, a
+# building list the service cut short, and what the road fetch raises for
+# an ArcGIS error returned on HTTP 200 (a RuntimeError).
+_OVERVIEW_FETCH_ERRORS = _WATER_FETCH_ERRORS + (census_geography.CensusGeographyIncompleteError,
+                                                structures_data.StructuresTruncatedError, RuntimeError)
 
 # The imagery fetch adds its own no-data answer, and what the STAC client
 # and a COG read raise for a service that answers badly -- pystac_client's
@@ -355,6 +411,20 @@ class ReportData:
     # layout map's photography and its acquisition dates. None when it
     # degraded, and the map draws on white.
     naip_imagery: Optional[dict] = None
+    # THE SITE OVERVIEW LAYERS (branch 17), each None when it degraded:
+    # the context map's DEM dict, NHD water dict and road rows (the
+    # Layer 1 shapes, a mile wider); census_geography.parse_county_state's
+    # block; structures_data.parse_structures'; transmission_lines.
+    # parse_transmission_lines'.
+    context_dem: Optional[dict] = None
+    context_water: Optional[dict] = None
+    context_roads: Optional[list] = None
+    county_state: Optional[dict] = None
+    structures: Optional[dict] = None
+    transmission_lines: Optional[dict] = None
+    # The date the report layer was fetched: every report-layer source's
+    # retrieval date. None on a fixture built without one.
+    retrieved_on: Optional[date] = None
     # {layer: {"label", "reason", "error"}} for every DEGRADABLE layer that
     # failed. Empty when everything answered. A REQUIRED failure never
     # reaches a ReportData; it raises.
@@ -554,6 +624,60 @@ def fetch_report_data(boundary) -> ReportData:
         imagery = None
         _degrade("naip_imagery", LAYER_NAIP_IMAGERY, exc)
 
+    # THE SITE OVERVIEW LAYERS. The context map's three are Layer 1's own
+    # fetch functions a mile wider; each degrades on its own.
+    context_dem = None
+    try:
+        with run_diagnostics.time_layer("context_dem", context_map_data.get_context_dem_for_boundary):
+            context_dem = context_map_data.get_context_dem_for_boundary(boundary)
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        context_dem = None
+        _degrade("context_dem", LAYER_CONTEXT_DEM, exc)
+
+    context_water = None
+    try:
+        with run_diagnostics.time_layer("context_water", context_map_data.get_context_water_for_boundary):
+            context_water = context_map_data.get_context_water_for_boundary(boundary)
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        context_water = None
+        _degrade("context_water", LAYER_CONTEXT_WATER, exc)
+
+    context_roads = None
+    try:
+        with run_diagnostics.time_layer("context_roads", context_map_data.get_context_roads_for_boundary):
+            context_roads = context_map_data.get_context_roads_for_boundary(boundary)
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        context_roads = None
+        _degrade("context_roads", LAYER_CONTEXT_ROADS, exc)
+
+    county_state = None
+    try:
+        with run_diagnostics.time_layer("county_state", census_geography.get_county_state_for_point):
+            county_state = census_geography.parse_county_state(
+                census_geography.get_county_state_for_point(centroid[0], centroid[1])
+            )
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        county_state = None
+        _degrade("county_state", LAYER_COUNTY_STATE, exc)
+
+    structures = None
+    try:
+        with run_diagnostics.time_layer("structures", structures_data.get_structures_for_boundary):
+            structures = structures_data.parse_structures(structures_data.get_structures_for_boundary(boundary))
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        structures = None
+        _degrade("structures", LAYER_STRUCTURES, exc)
+
+    lines = None
+    try:
+        with run_diagnostics.time_layer("transmission_lines", transmission_lines.get_transmission_lines_near_boundary):
+            lines = transmission_lines.parse_transmission_lines(
+                transmission_lines.get_transmission_lines_near_boundary(boundary)
+            )
+    except _OVERVIEW_FETCH_ERRORS as exc:
+        lines = None
+        _degrade("transmission_lines", LAYER_TRANSMISSION, exc)
+
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
@@ -578,6 +702,13 @@ def fetch_report_data(boundary) -> ReportData:
         soil_survey=survey,
         bedrock_geology=geology,
         naip_imagery=imagery,
+        context_dem=context_dem,
+        context_water=context_water,
+        context_roads=context_roads,
+        county_state=county_state,
+        structures=structures,
+        transmission_lines=lines,
+        retrieved_on=date.today(),
         unavailable=unavailable,
     )
 
@@ -602,6 +733,13 @@ def report_data_from_fixtures(
     soil_survey_rows: Optional[list] = None,
     bedrock_geology_raw: Optional[dict] = None,
     naip_imagery_raw: Optional[dict] = None,
+    context_dem: Optional[dict] = None,
+    context_water: Optional[dict] = None,
+    context_roads: Optional[list] = None,
+    county_state_raw: Optional[dict] = None,
+    structures_raw: Optional[dict] = None,
+    transmission_lines_raw: Optional[dict] = None,
+    retrieved_on: Optional[date] = None,
 ) -> ReportData:
     """
     A ReportData from parsed responses ALREADY IN HAND -- the reference
@@ -621,7 +759,9 @@ def report_data_from_fixtures(
     dict and the two woodland row sets. The Soils layers' the same way
     (soils_reference_fixture): the survey rows, and the geology fetch's
     three-part raw answer. The layout map's imagery the same way
-    (naip_reference_fixture.raw_naip()).
+    (naip_reference_fixture.raw_naip()). The overview's (overview_reference_fixture): the
+    context map's three Layer 1-shaped answers as they are, and the
+    geocoder, structures and transmission responses raw.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     correction = heavy_rain = None
@@ -652,6 +792,14 @@ def report_data_from_fixtures(
         soil_survey=soil_survey.parse_survey(soil_survey_rows) if soil_survey_rows is not None else None,
         bedrock_geology=bedrock_geology.parse_geology(bedrock_geology_raw) if bedrock_geology_raw is not None else None,
         naip_imagery=naip_imagery.parse_naip(naip_imagery_raw) if naip_imagery_raw is not None else None,
+        context_dem=context_dem,
+        context_water=context_water,
+        context_roads=list(context_roads) if context_roads is not None else None,
+        county_state=census_geography.parse_county_state(county_state_raw) if county_state_raw is not None else None,
+        structures=structures_data.parse_structures(structures_raw) if structures_raw is not None else None,
+        transmission_lines=(transmission_lines.parse_transmission_lines(transmission_lines_raw)
+                            if transmission_lines_raw is not None else None),
+        retrieved_on=retrieved_on,
         unavailable=dict(unavailable or {}),
     )
 

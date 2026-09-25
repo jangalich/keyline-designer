@@ -10,8 +10,10 @@ ReportData, through Jinja2 and WeasyPrint to a PDF.
                                                     -> the PDF for a session
 
 This is the replacement for generate_pdf_report.py's narrated document
-(site-data-report-proposal.md). It carries Climate, Landform, Water &
-hydrology, Access, Trees & forestry and Soils & geology, and the foundation every later section composes: the tokens,
+(site-data-report-proposal.md). It carries all eight sections -- Site
+overview, Climate, Landform, Water & hydrology, Access, Trees & forestry,
+Soils & geology and Design -- the cover with its contents, the back
+matter, and the foundation every section composes: the tokens,
 the fonts, the page geometry, and the six reusable components as Jinja
 macros under templates/report/components/. A section is a builder that
 turns a ReportData into a dict of already-formatted values
@@ -41,8 +43,16 @@ were each verified on 70.0 and a resolver picking another release could
 lose any of them silently.
 
 THE COVER. "Site Data Report", the property label -- or, when none was
-sent, the centroid the report data was fetched at, as coordinates -- and
-the generation date. The label and date also run in every section page's
+sent, the centroid the report data was fetched at, as coordinates -- the
+acreage, the county and State (branch 17, when the geocoder answered), the
+generation date, and THE CONTENTS: the outline's eight sections and the
+back matter with page numbers, resolved by WeasyPrint's target-counter()
+in the one render pass (verified at branch 17 step 0: no second pass).
+Each section is wrapped in an anchor the contents link to.
+
+THE BACK MATTER (branch 17, back_matter.py): the vintage table and the
+methods note, built after every section from the footers and methods
+structures the sections carry. The label and date also run in every section page's
 footer beside the page number, through CSS string-set from two hidden
 elements, so user input reaches the page margin as escaped text and never
 as a CSS string.
@@ -63,10 +73,15 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 import access_derivations
 import access_section
+import back_matter
+import census_geography
 import climate_section
 import design_section
 import landform_section
+import overview_derivations
+import overview_section
 import report_data as report_data_module
+from report_outline import SECTION_OUTLINE
 import session_manager
 import soils_derivations
 import soils_section
@@ -74,6 +89,7 @@ import trees_derivations
 import trees_section
 import water_derivations
 import water_section
+from report_outline import section_number
 
 # --- tokens ------------------------------------------------------------
 #
@@ -198,7 +214,12 @@ def cover_label(report_data, property_label: Optional[str]) -> str:
     return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
 
 
-def build_sections(report_data, terrain=None, water=None, access=None, trees=None, soils=None, design=None) -> list:
+def section_anchor(number: str) -> str:
+    return f"section-{number.lower()}"
+
+
+def build_sections(report_data, terrain=None, water=None, access=None, trees=None, soils=None, design=None,
+                   overview=None) -> list:
     """Every section the report renders, in outline order. Climate from
     the report data; Landform from the session's terrain reads
     (landform_section.TerrainInputs) when the caller has a session to read
@@ -214,9 +235,14 @@ def build_sections(report_data, terrain=None, water=None, access=None, trees=Non
     survey and geology blocks; Design (branch 13) from the session's
     committed Design Document and the report data's NAIP imagery
     (design_section.DesignInputs) -- the layout map and the design
-    record. Each section carries its own numeral from report_outline, so
-    adding one renumbers nothing."""
-    sections = [climate_section.build_climate_section(report_data)]
+    record. Site overview (branch 17) from its own inputs
+    (overview_derivations.OverviewInputs) -- first, being I. Each section
+    carries its own numeral from report_outline, so adding one renumbers
+    nothing, and an anchor the cover's contents link to."""
+    sections = []
+    if overview is not None:
+        sections.append(overview_section.build_overview_section(overview, TOKENS))
+    sections.append(climate_section.build_climate_section(report_data))
     if terrain is not None:
         landform = landform_section.build_landform_section(terrain, TOKENS)
         sections.append(landform)
@@ -230,7 +256,19 @@ def build_sections(report_data, terrain=None, water=None, access=None, trees=Non
             sections.append(soils_section.build_soils_section(soils, TOKENS))
         if design is not None:
             sections.append(design_section.build_design_section(design, TOKENS))
+    for section in sections:
+        section["anchor"] = section_anchor(section["number"])
     return sections
+
+
+def build_contents(sections: list, back: Optional[dict]) -> list:
+    """The outline's eight sections in order, each with its anchor when
+    the report carries it, then the back matter."""
+    present = {section["name"]: section["anchor"] for section in sections}
+    contents = [{"number": section_number(name), "name": name, "anchor": present.get(name)} for name in SECTION_OUTLINE]
+    if back is not None:
+        contents.append({"number": None, "name": "Sources and methods", "anchor": "back-matter"})
+    return contents
 
 
 def parcel_acres_label(terrain) -> Optional[str]:
@@ -253,6 +291,8 @@ def render_site_report_html(
     trees=None,
     soils=None,
     design=None,
+    overview=None,
+    complete: bool = False,
 ) -> str:
     """The whole document as HTML, stylesheet inlined. `terrain` is the
     session's landform_section.TerrainInputs, or None for a report built
@@ -260,9 +300,15 @@ def render_site_report_html(
     WaterInputs, `access` its access_derivations.AccessInputs, `trees`
     its trees_derivations.TreesInputs and `soils` its
     soils_derivations.SoilsInputs, each rendered only beside
-    `terrain`."""
+    `terrain`. `complete` is the whole report the job produces: the
+    contents on the cover and the back matter after the last section --
+    off for a render of some sections, which neither describes."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
+    sections = build_sections(report_data, terrain, water, access, trees, soils, design, overview)
+    # The back matter needs a Layer 1 retrieval date, which only a session has.
+    back = (back_matter.build_back_matter(sections, report_data, terrain.retrieved_on)
+            if complete and terrain is not None else None)
     cover = {
         "title": COVER_TITLE,
         "eyebrow": COVER_EYEBROW,
@@ -270,11 +316,14 @@ def render_site_report_html(
         "acres": parcel_acres_label(terrain),
         "generated_on": climate_section.format_generated_on(generated_on),
         "meta": f"Generated {climate_section.format_generated_on(generated_on)}",
+        "county": census_geography.county_state_label(report_data.county_state),
+        "contents": build_contents(sections, back) if complete else None,
     }
     return env.get_template("base.html").render(
         stylesheet=render_stylesheet(env, fonts_directory),
         cover=cover,
-        sections=build_sections(report_data, terrain, water, access, trees, soils, design),
+        sections=sections,
+        back=back,
     )
 
 
@@ -289,6 +338,8 @@ def generate_site_report_pdf(
     trees=None,
     soils=None,
     design=None,
+    overview=None,
+    complete: bool = False,
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
@@ -296,7 +347,7 @@ def generate_site_report_pdf(
 
     html = render_site_report_html(
         report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water,
-        access=access, trees=trees, soils=soils, design=design,
+        access=access, trees=trees, soils=soils, design=design, overview=overview, complete=complete,
     )
     HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
     return output_path
@@ -338,6 +389,7 @@ def generate_session_site_report_pdf(
     access = access_derivations.access_inputs_from_context(context, document, data)
     trees = trees_derivations.trees_inputs_from_context(context, document, data)
     soils = soils_derivations.soils_inputs_from_context(context, document, data)
+    overview = overview_derivations.overview_inputs_from_context(context, document, data)
     # DESIGN ONLY FOR A FINISHED DESIGN. The report is offered once every
     # step is committed (the job's precondition, session_report); called
     # before that, this still renders the inventory and leaves the design
@@ -346,5 +398,5 @@ def generate_session_site_report_pdf(
     design = design_section.design_inputs_from_context(context, document, data) if finished else None
     return generate_site_report_pdf(
         data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access,
-        trees=trees, soils=soils, design=design,
+        trees=trees, soils=soils, design=design, overview=overview, complete=True,
     )

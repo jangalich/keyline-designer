@@ -95,8 +95,12 @@ ROAD_STROKE_PT = 1.3
 ROAD_CASING_PT = 3.0
 TRACK_STROKE_PT = 1.1
 TRACK_DASH = "4 2.5"
+# THE FRONTAGE BAND carries the section's headline figure, so it reads as
+# the subject of the map (branch 17 review): the accent, not a grey tint.
+# Its lengths stay in the table: set on the map they land on the road
+# names and the hachures along the same edge.
 FRONTAGE_BAND_PT = 5.0
-FRONTAGE_BAND_OPACITY = 0.22
+FRONTAGE_BAND_OPACITY = 0.45
 # Hachures along undrivable boundary: short ticks inward, in the terrain
 # token, sized in POINTS so they read the same at any scale (converted to
 # ground metres through the frame's projection when drawn).
@@ -248,7 +252,7 @@ def build_map_layers(inputs: ad.AccessInputs, derived: ad.AccessDerived, contour
     frontage = derived.frontage["geometry"]
     if frontage is not None:
         layers.append(report_map.layer(
-            "frontage", [frontage], kind="line", stroke="ink", stroke_width=FRONTAGE_BAND_PT, stroke_opacity=FRONTAGE_BAND_OPACITY,
+            "frontage", [frontage], kind="line", stroke="oxide", stroke_width=FRONTAGE_BAND_PT, stroke_opacity=FRONTAGE_BAND_OPACITY,
             legend=["Frontage, a mapped road within ", {"value": f"{_ft(derived.frontage['tolerance_m'])} ft"}],
         ))
     undrivable = [_ring_piece(parcel, r["start_m"], r["end_m"]) for r in drawn_runs(derived.boundary) if r["state"] == ad.UNDRIVABLE]
@@ -548,10 +552,9 @@ def build_methods(inputs: ad.AccessInputs, derived: ad.AccessDerived) -> list:
                    f"so 15 m sits just above the source's error and below a half right-of-way plus that error; a road the tolerance "
                    f"decides is reported as such. Public status and surface are not attributes of the source. A track is the part of "
                    f"a mapped segment on the parcel; its grade is the DEM sampled every {ad.TRACK_SAMPLE_STEP_M:.0f} m along it, a "
-                   f"final step shorter than a station folded into the one before. The same rows, buffered by "
-                   f"{ad.ROAD_EXCLUSION_BUFFER_METERS:.0f} m, are the design step's existing-road exclusion.",
+                   f"final step shorter than a station folded into the one before.",
          "notes": [
-             f"Boundary drivability: the exclusion result's slope grid sampled {boundary['inset_m']:.0f} m inside the ring every "
+             f"Boundary drivability: the slope grid Landform classes, sampled {boundary['inset_m']:.0f} m inside the ring every "
              f"{boundary['step_m']:.0f} m; a station at or above {boundary['threshold_pct']:.0f}% (Landform's class D break) is undrivable. "
              f"Runs of stations partition the perimeter exactly; for drawing, runs shorter than {DRAWN_RUN_MIN_STATIONS} stations are "
              "merged into their neighbours.",
@@ -568,8 +571,7 @@ def build_methods(inputs: ad.AccessInputs, derived: ad.AccessDerived) -> list:
                    "cell grid the Water section uses, allocated exactly to the parcel's area."},
         {"source": "USGS 3DEP", "identifier": f"3DEP 1/3 arc-second DEM, resampled to {max(inputs.dem['resolution_meters']):.0f} m, {inputs.dem['crs']}",
          "period": retrieved, "citation": "U.S. Geological Survey, 3D Elevation Program seamless DEM, served by The National Map elevation service.",
-         "terms": "U.S. federal work; public domain.", "method": "Contours at Landform's interval; the slope grid is production_area."
-                                                                 "compute_slope_percent's, the exclusion result's own."},
+         "terms": "U.S. federal work; public domain.", "method": "Contours at Landform's interval; the slope grid is the one Landform classes."},
     ]
 
 

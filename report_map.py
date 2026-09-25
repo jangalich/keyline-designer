@@ -241,6 +241,7 @@ def layer(
     marker_size_pt: Optional[float] = None,
     marker_halo_pt: Optional[float] = None,
     casing_rim: bool = False,
+    label_face: str = "data",
 ) -> dict:
     """
     One styled layer. `geometries` are shapely geometries in the DEM's UTM
@@ -300,6 +301,9 @@ def layer(
     filled circle `marker_size_pt` across, ringed `marker_halo_pt` wide in
     the page colour inside that size.
 
+    `label_face` (branch 17) sets a line layer's labels in the "data" face
+    (the default: an elevation is a measurement) or the "prose" face (a
+    road's name is a word -- the site overview's context map).
     `casing_rim` draws a line's casing as a RIM: the ring between the
     line's own outline and the casing's, filled in the page colour at
     `casing_opacity`, with nothing under the line itself. A stroked casing
@@ -315,6 +319,8 @@ def layer(
         raise ValueError("a hatch layer names the token its lines are drawn in")
     if kind == "screen" and fill is None:
         raise ValueError("a screen layer names the token its dots are drawn in")
+    if label_face not in ("data", "prose"):
+        raise ValueError(f"label_face must be data or prose, got {label_face!r}")
     if marker not in ("asterisk", "dot", "glyph", "pin", "disc"):
         raise ValueError(f"marker must be asterisk, dot, glyph, pin or disc, got {marker!r}")
     if labels is not None:
@@ -344,6 +350,7 @@ def layer(
         "marker_size_pt": marker_size_pt,
         "marker_halo_pt": marker_halo_pt,
         "casing_rim": bool(casing_rim),
+        "label_face": label_face,
     }
 
 
@@ -1089,7 +1096,8 @@ def _layer_svg(spec: dict, projection, tokens: dict, sink: Optional[list] = None
                 pieces.append(
                     _text(
                         x, y + LINE_LABEL_SIZE_PT * 0.35, label,
-                        font=FONT_DATA, size=LINE_LABEL_SIZE_PT, fill=stroke, anchor="middle",
+                        font=FONT_PROSE if spec.get("label_face") == "prose" else FONT_DATA, size=LINE_LABEL_SIZE_PT,
+                        fill=stroke, anchor="middle",
                         transform=f"rotate({_fmt(angle)} {_fmt(x)} {_fmt(y)})",
                     )
                 )

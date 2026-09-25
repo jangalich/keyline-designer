@@ -333,8 +333,8 @@ def build_hydrology_layers(inputs: wd.WaterInputs, derived: wd.WaterDerived, con
 
 
 def empty_parcel_note(derived: wd.WaterDerived, boundary_polygon_utm) -> Optional[dict]:
-    """The quiet statement set in the middle of a parcel with nothing to
-    draw: no mapped stream, waterbody, wetland or 1%-annual-chance flood
+    """The quiet statement for a parcel with nothing to draw (set at the
+    head of the map's caption): no mapped stream, waterbody, wetland or 1%-annual-chance flood
     zone on it -- each named only when its source was read, so the note
     never claims an absence nobody checked. None when anything is drawn."""
     surface = derived.surface_water
@@ -961,8 +961,8 @@ def build_methods(inputs: wd.WaterInputs, derived: wd.WaterDerived) -> list:
          "period": retrieved, "citation": "U.S. Geological Survey, 3D Elevation Program seamless DEM, served by The National Map elevation service.",
          "terms": "U.S. federal work; public domain.",
          "method": "One priority-flood fill with flat resolution, D8 flow direction and accumulation (the landform derivations' pass); "
-                   "raw TWI = ln(specific catchment area / tan slope) on the exclusion result's slope grid; wet ground by terrain at "
-                   "or above the water step's window-referenced full-credit breakpoint (90th percentile of the window's raw TWI); "
+                   "raw TWI = ln(specific catchment area / tan slope) on the slope grid Landform classes; wet ground by terrain at "
+                   "or above the 90th percentile of the window's raw TWI; "
                    "depression depth = filled minus raw above a 0.1 m noise floor; the contributing area is the union of the "
                    "parcel outlets' watersheds within the window, with cells on the window's rim counted as evidence of truncation."},
     ]
@@ -984,10 +984,11 @@ def build_water_section(inputs: wd.WaterInputs, tokens: Optional[dict] = None,
         tokens = site_report.TOKENS
     derived = wd.derive(inputs, flow)
     contours = report_map.parcel_contours(inputs.dem, inputs.boundary_polygon_utm)
-    hydrology = report_map.render_map(
-        inputs.boundary_polygon_utm, build_hydrology_layers(inputs, derived, contours), tokens,
-        note=empty_parcel_note(derived, inputs.boundary_polygon_utm),
-    )
+    # THE EMPTY-PARCEL STATEMENT LEADS THE CAPTION (branch 17 review): set on
+    # the map it sat across the parcel's contours, and there is no clear
+    # ground on a parcel-fitted frame to move it to.
+    hydrology = report_map.render_map(inputs.boundary_polygon_utm, build_hydrology_layers(inputs, derived, contours), tokens)
+    note = empty_parcel_note(derived, inputs.boundary_polygon_utm)
     wetness = report_map.render_map(inputs.boundary_polygon_utm, build_wetness_layers(inputs, derived, contours), tokens)
     water_table = build_water_table(derived)
     return {
@@ -997,7 +998,7 @@ def build_water_section(inputs: wd.WaterInputs, tokens: Optional[dict] = None,
         "heading": SECTION_NAME,
         "summary": build_summary(derived),
         "map": hydrology,
-        "map_caption": build_map_caption(derived, inputs),
+        "map_caption": ([" ".join(note["lines"]) + " "] if note else []) + build_map_caption(derived, inputs),
         "surface_water_table": build_surface_water_table(derived),
         "surface_water_caption": build_surface_water_caption(derived, inputs),
         "wetness_map": wetness,

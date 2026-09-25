@@ -492,7 +492,9 @@ def build_methods(report_data) -> list:
                      "(MLY-PRCP-AVGNDS-GE100HI)." if heavy and heavy["applied"] else
                      "Days with at least 1.00 in of precipitation: Daymet's count, which understates them."),
                     "Daymet at each station: the 1991–2020 mean annual total at the station's coordinates, "
-                    f"bundled with the normals (Daymet versions {correction['vintage'].get('daymet', {}).get('versions', {})}).",
+                    "bundled with the normals (Daymet " + ", ".join(
+                        f"version {version} at {count:,} stations"
+                        for version, count in correction["vintage"].get("daymet", {}).get("versions", {}).items()) + ").",
                 ],
             }
         )

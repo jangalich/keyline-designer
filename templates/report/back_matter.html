@@ -1,0 +1,31 @@
+{#- THE BACK MATTER -- TWO PAGES, after the last section. The vintage
+    table: every source any section cites, once, with its version, its
+    retrieval date, the sections that use it and the terms it was found
+    under. Then the methods note: each section's methods in outline order,
+    and the rules the whole report shares. No styling here, no numbers
+    here: `back` is back_matter.build_back_matter()'s dict. -#}
+{% import "components/heading.html" as c2 %}
+{% import "components/data_table.html" as c5 %}
+{% import "components/caption.html" as c9 %}
+<section class="back-matter" id="back-matter">
+  <div class="back-matter__vintage">
+    <p class="eyebrow">Back matter</p>
+    {{ c2.heading("Sources and data vintage") }}
+    {{ c5.data_table(back.vintage_table) }}
+    {{ c9.caption(back.vintage_caption) }}
+  </div>
+  <div class="back-matter__methods">
+    <p class="eyebrow">Back matter, continued</p>
+    {{ c2.heading("Methods") }}
+    <div class="methods">
+{%- for group in back.methods %}
+      <div class="methods__group">
+        <p class="methods__section">{% if group.number %}<span class="eyebrow__number">{{ group.number }}</span> · {% endif %}{{ group.name }}</p>
+{%- for entry in group.entries %}
+        <p class="methods__entry"><span class="methods__source">{{ entry.source }}.</span> {{ entry.text | join(" ") }}</p>
+{%- endfor %}
+      </div>
+{%- endfor %}
+    </div>
+  </div>
+</section>
