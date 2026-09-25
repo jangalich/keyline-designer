@@ -519,7 +519,6 @@ def build_fixture(*, empty=False):
         soil_geometries={},
         water_features={"streams": [], "water_bodies": []},
         farm_roads=[],
-        climate_summary={},
         canopy_height={
             "array": np.zeros((SIZE, SIZE), dtype=np.float32),
             "resolution_meters": RES,
@@ -527,7 +526,6 @@ def build_fixture(*, empty=False):
             "origin_y": ORIGIN_Y,
             "crs": CRS,
         },
-        imagery_summary={},
         irradiance={"status": "no_api_key"},
     )
 

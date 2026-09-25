@@ -338,10 +338,6 @@ with Harness() as h:
             {"type": "canopy", "label": "tree canopy height"},
         ),
         (
-            parcel_data.ParcelDataIncompleteError("no scene", *parcel_data.LAYER_IMAGERY),
-            {"type": "imagery", "label": "satellite imagery"},
-        ),
-        (
             production_zone_payload.LayerFetchError(*production_zone_payload.LAYER_ELEVATION),
             {"type": "elevation", "label": "elevation data"},
         ),
@@ -557,7 +553,7 @@ with Harness() as h, mock_patch.object(
     with mock_patch.object(
         parcel_data, "fetch_parcel_data",
         side_effect=parcel_data.ParcelDataIncompleteError(
-            "imagery did not answer", *parcel_data.LAYER_IMAGERY
+            "canopy did not answer", *parcel_data.LAYER_CANOPY
         ),
     ):
         upstream_failed = s.job("roads", {"access_point": list(ACCESS_B)}).wait(timeout=900)

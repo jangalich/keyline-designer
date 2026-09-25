@@ -430,9 +430,7 @@ def _build_parcel_data(_boundary=None) -> ParcelData:
         # the fourth step run.
         water_features={"streams": [], "water_bodies": []},
         farm_roads=FIXTURE_ROADS,
-        climate_summary={},
         canopy_height=_build_canopy(dem),
-        imagery_summary={},
         irradiance={"status": "ok"},
     )
 

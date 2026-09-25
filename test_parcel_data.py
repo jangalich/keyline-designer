@@ -4,8 +4,8 @@ test_parcel_data.py
 Offline (no-network, mocked) checks for parcel_data.py's own hard-fail
 contract: fetch_parcel_data() fetches every raw layer exactly once,
 upfront, and raises -- uncaught, uncached -- on ANY failure among ANY of
-the hard-fail layers, with imagery and canopy height included and no
-soft-fail exception among them. The ONE deliberately exempt field --
+the hard-fail layers, with canopy height included and no soft-fail
+exception among them. The ONE deliberately exempt field --
 irradiance (optional regional context; see parcel_data.py's HARD-FAIL
 CONTRACT carve-out) -- is covered separately in section 7: a degraded
 baseline must NOT gate the run. get_regional_irradiance_baseline() is
@@ -25,10 +25,10 @@ Covers:
      ParcelData comes back with every field populated, and
      boundary_polygon_utm is a real, correctly-reprojected Polygon
      (checked against an independent warp_transform computed here).
-  2. HARD FAIL, all eleven layers individually (dem, soil_components,
+  2. HARD FAIL, all nine layers individually (dem, soil_components,
      farmland_classification, erosion_factor, saturated_hydraulic_
      conductivity, soil_geometries, water_features, farm_roads,
-     climate_summary, canopy_height, imagery_summary):
+     canopy_height):
      mocking just that one layer's fetch to raise makes fetch_parcel_
      data() raise the SAME exception instance (identity-checked), no
      ParcelData is returned, and a second call under the same failing
@@ -42,26 +42,25 @@ Covers:
   5. irradiance -- the one non-hard-failing field -- is fetched exactly
      once, at the parcel centroid (WGS84), and a degraded (non-"ok")
      baseline is carried through as a plain dict WITHOUT gating the run.
-  8. TWELVE FETCHES, EXACTLY -- an exact call-count assertion over the
-     whole set, plus the negative it exists to hold: elevation_data.
+  8. TEN FETCHES, EXACTLY -- an exact call-count assertion over the
+     whole set, plus the negatives it exists to hold: elevation_data.
      get_elevation_grid() is not called, is not bound in parcel_data's
      namespace, and elevation_grid is neither a FETCH_LAYERS entry nor a
-     ParcelData field. That layer was 36 sequential EPQS point requests
-     for one report sentence and 65-90% of a cold creation's fetch wait;
-     the report reads its two numbers off the DEM now (see parcel_data.py's
-     NO ELEVATION-POINT LAYER section). An upper bound would not catch a
-     re-added thirteenth fetch, so the count is exact.
+     ParcelData field (36 sequential EPQS point requests for one report
+     sentence and 65-90% of a cold creation's fetch wait; see
+     parcel_data.py's NO ELEVATION-POINT LAYER section). And the same for
+     the two layers retired with the narrated report: climate_summary
+     (Open-Meteo) and imagery_summary (Sentinel-2) are not fetched, not
+     bound, not layers and not fields. An upper bound would not catch a
+     re-added fetch, so the count is exact.
 
-Bonus (beyond the required eleven hard-fail cases above): imagery_data.
-get_imagery_summary_for_boundary() and canopy_height_data.get_canopy_
-height_for_boundary() both document returning None as a genuine, non-
-exceptional "nothing usable found" outcome distinct from a raised
-exception (see parcel_data.py's own module docstring) -- confirmed live
-against their real docstrings in this branch's own Step 0 signature
-check. Since ParcelData.canopy_height/imagery_summary are required dict
-fields, not Optional, parcel_data.py converts that None into a raised
-ParcelDataIncompleteError instead of passing it through. Sections 5-6
-below prove that conversion.
+Bonus (beyond the required nine hard-fail cases above): canopy_height_
+data.get_canopy_height_for_boundary() documents returning None as a
+genuine, non-exceptional "nothing usable found" outcome distinct from a
+raised exception (see parcel_data.py's own module docstring). Since
+ParcelData.canopy_height is a required dict field, not Optional,
+parcel_data.py converts that None into a raised ParcelDataIncompleteError
+instead of passing it through. Section 5 below proves that conversion.
 """
 
 from contextlib import ExitStack
@@ -104,11 +103,6 @@ FAKE_WATER_FEATURES = {"streams": [], "waterbodies": []}
 FAKE_FARM_ROADS = [
     {"name": "N Montour Rd", "geometry": {"type": "LineString", "coordinates": [[-79.98, 40.64], [-79.97, 40.65]]}}
 ]
-FAKE_CLIMATE_SUMMARY = {
-    "prevailing_wind_direction": "SW",
-    "prevailing_wind_direction_degrees": 225.0,
-    "avg_annual_precipitation_mm": 1000.0,
-}
 FAKE_CANOPY_HEIGHT = {
     "array": np.zeros((10, 10), dtype="float32"),
     "resolution_meters": (5.0, 5.0),
@@ -116,19 +110,6 @@ FAKE_CANOPY_HEIGHT = {
     "origin_y": 4500000.0,
     "crs": DEM_CRS,
     "source_item_id": "3dep-lidar-hag-item",
-}
-FAKE_IMAGERY_SUMMARY = {
-    "scene_date": "2026-05-14",
-    "days_since_scene": 63,
-    "cloud_cover_pct": 4.2,
-    "pct_open_water": 2.0,
-    "pct_bare_or_degraded_soil": 12.3,
-    "pct_low_vegetation": 45.6,
-    "pct_dense_vegetation": 40.1,
-    "avg_ndvi": 0.35,
-    "ndvi_min": -0.12,
-    "ndvi_max": 0.82,
-    "valid_pixel_count": 10234,
 }
 # A realistic "ok" baseline. irradiance is NOT a hard-fail layer, so it is
 # deliberately kept OUT of DEFAULTS (and the per-layer hard-fail loop that
@@ -153,9 +134,7 @@ DEFAULTS = {
     "get_soil_geometries_for_polygon": FAKE_SOIL_GEOMETRIES,
     "get_water_features_for_boundary": FAKE_WATER_FEATURES,
     "get_farm_roads_for_boundary": FAKE_FARM_ROADS,
-    "get_climate_summary_for_point": FAKE_CLIMATE_SUMMARY,
     "get_canopy_height_for_boundary": FAKE_CANOPY_HEIGHT,
-    "get_imagery_summary_for_boundary": FAKE_IMAGERY_SUMMARY,
 }
 
 SOIL_POLYGON_FN_NAMES = [
@@ -218,9 +197,7 @@ assert result.saturated_hydraulic_conductivity is FAKE_KSAT
 assert result.soil_geometries is FAKE_SOIL_GEOMETRIES
 assert result.water_features is FAKE_WATER_FEATURES
 assert result.farm_roads is FAKE_FARM_ROADS
-assert result.climate_summary is FAKE_CLIMATE_SUMMARY
 assert result.canopy_height is FAKE_CANOPY_HEIGHT
-assert result.imagery_summary is FAKE_IMAGERY_SUMMARY
 
 expected_xs, expected_ys = warp_transform(
     "EPSG:4326",
@@ -324,7 +301,7 @@ for name, wkt_arg in zip(SOIL_POLYGON_FN_NAMES, wkt_args):
 print("All five soil functions receive the identical, once-computed wkt_polygon string.")
 
 
-# --- 5-6. bonus: None from imagery/canopy (their own documented "nothing found" outcome,
+# --- 5. bonus: None from canopy (its own documented "nothing found" outcome,
 # distinct from a raised exception) is converted into a hard ParcelDataIncompleteError here ---
 
 stack, mocks = _mocked({"get_canopy_height_for_boundary": Mock(return_value=None)})
@@ -342,27 +319,12 @@ assert raised is not None, (
 print("Bonus: canopy_height fetch returning None (its own non-exceptional 'no coverage' outcome) "
       "is converted into a raised ParcelDataIncompleteError, not passed through as None.")
 
-stack, mocks = _mocked({"get_imagery_summary_for_boundary": Mock(return_value=None)})
-with stack:
-    try:
-        fetch_parcel_data(BOUNDARY_COORDINATES)
-        raised = None
-    except ParcelDataIncompleteError as e:
-        raised = e
-assert raised is not None, (
-    "get_imagery_summary_for_boundary() returning None (its own documented 'no usable scene' "
-    "outcome) must still hard-fail fetch_parcel_data(), since imagery_summary is a required, "
-    "non-Optional ParcelData field -- the map is essential to the report"
-)
-print("Bonus: imagery_summary fetch returning None (its own non-exceptional 'no scene' outcome) "
-      "is converted into a raised ParcelDataIncompleteError, not passed through as None.")
-
 
 # --- 7. irradiance exemption: the ONE non-hard-failing field. A degraded
 # (non-"ok") baseline must NOT gate the run -- unlike every layer in section
 # 2, fetch_parcel_data() still returns a fully populated ParcelData and
 # carries the degraded dict straight through, never raising. This is the
-# opposite of the canopy/imagery None-sentinel behavior in sections 5-6 ---
+# opposite of the canopy None-sentinel behavior in section 5 ---
 
 for degraded_status in ("no_api_key", "fetch_failed", "validation_failed"):
     degraded_baseline = {
@@ -387,22 +349,22 @@ for degraded_status in ("no_api_key", "fetch_failed", "validation_failed"):
     )
     # every OTHER (hard-fail) layer must still be fully populated -- the
     # exemption must not disturb the rest of the Layer 1 contract.
-    assert result.dem is FAKE_DEM and result.imagery_summary is FAKE_IMAGERY_SUMMARY, (
+    assert result.dem is FAKE_DEM and result.canopy_height is FAKE_CANOPY_HEIGHT, (
         "a degraded irradiance baseline must leave every hard-fail layer populated as normal"
     )
 
 print("irradiance exemption: a degraded baseline (no_api_key/fetch_failed/validation_failed) does NOT "
       "gate fetch_parcel_data(); it is carried through as a plain dict while every hard-fail layer "
-      "stays populated -- the deliberate opposite of the canopy/imagery None-sentinel hard fail.")
+      "stays populated -- the deliberate opposite of the canopy None-sentinel hard fail.")
 
-# --- 8. TWELVE FETCHES, EXACTLY, AND NO ELEVATION LATTICE AMONG THEM ---
+# --- 8. TEN FETCHES, EXACTLY, AND NO RETIRED LAYER AMONG THEM ---
 #
 # THE COUNT IS EXACT AND THE SET IS NAMED. Section 1 already proves each
 # mocked layer's value arrives on the right field; what this adds is that
-# the number of network calls a cold fetch makes is TWELVE and that no
-# thirteenth crept back in. A "<= 13" style bound would pass a re-added
-# elevation lattice, which is exactly the regression this section exists
-# to fail on.
+# the number of network calls a cold fetch makes is TEN and that no
+# eleventh crept back in. A "<= 11" style bound would pass a re-added
+# elevation lattice, climate summary or imagery summary, which is exactly
+# the regression this section exists to fail on.
 
 import elevation_data
 
@@ -411,19 +373,18 @@ stack, mocks = _mocked()
 with stack, mock_patch.object(elevation_data, "get_elevation_grid", _grid_mock):
     _counted = fetch_parcel_data(BOUNDARY_COORDINATES)
 
-# The eleven hard-fail layers plus irradiance: twelve fetch functions, each
-# called exactly once. `mocks` carries irradiance alongside DEFAULTS' eleven.
-assert len(mocks) == 12, sorted(mocks)
+# The nine hard-fail layers plus irradiance: ten fetch functions, each
+# called exactly once. `mocks` carries irradiance alongside DEFAULTS' nine.
+assert len(mocks) == 10, sorted(mocks)
 _counts = {name: mock.call_count for name, mock in mocks.items()}
 assert set(_counts.values()) == {1}, _counts
-assert sum(_counts.values()) == 12, _counts
-assert len(parcel_data.FETCH_LAYERS) == 12, parcel_data.FETCH_LAYERS
+assert sum(_counts.values()) == 10, _counts
+assert len(parcel_data.FETCH_LAYERS) == 10, parcel_data.FETCH_LAYERS
 assert set(parcel_data.FETCH_LAYERS) == set(
     [
         "dem", "soil_components", "farmland_classification", "erosion_factor",
         "saturated_hydraulic_conductivity", "soil_geometries", "water_features",
-        "farm_roads", "climate_summary", "canopy_height", "imagery_summary",
-        "irradiance",
+        "farm_roads", "canopy_height", "irradiance",
     ]
 ), parcel_data.FETCH_LAYERS
 
@@ -440,11 +401,27 @@ assert not hasattr(_counted, "elevation_grid"), (
 )
 assert "elevation_grid" not in ParcelData.__dataclass_fields__
 
+# THE TWO LAYERS RETIRED WITH THE NARRATED REPORT, the same three ways:
+# nothing in parcel_data binds their fetch functions, and neither is a
+# declared layer or a field. Their modules are gone outright, so there is
+# nothing to patch -- a re-added import would fail at import time.
+import importlib.util  # noqa: E402
+
+for _retired_layer, _retired_fetch, _retired_module in (
+    ("climate_summary", "get_climate_summary_for_point", "climate_data"),
+    ("imagery_summary", "get_imagery_summary_for_boundary", "imagery_data"),
+):
+    assert not hasattr(parcel_data, _retired_fetch), _retired_fetch
+    assert _retired_layer not in parcel_data.FETCH_LAYERS, _retired_layer
+    assert _retired_layer not in ParcelData.__dataclass_fields__, _retired_layer
+    assert importlib.util.find_spec(_retired_module) is None, _retired_module
+
 print(
-    f"TWELVE FETCHES, EXACTLY: one cold fetch_parcel_data() called {sum(_counts.values())} fetch "
+    f"TEN FETCHES, EXACTLY: one cold fetch_parcel_data() called {sum(_counts.values())} fetch "
     f"functions, each exactly once, matching parcel_data.FETCH_LAYERS' {len(parcel_data.FETCH_LAYERS)} "
     f"entries. get_elevation_grid() was called 0 times, is not bound in parcel_data's namespace, and "
-    f"elevation_grid is neither a FETCH_LAYERS entry nor a ParcelData field."
+    f"elevation_grid is neither a FETCH_LAYERS entry nor a ParcelData field; climate_summary "
+    f"(Open-Meteo) and imagery_summary (Sentinel-2) are neither fetched, bound, layers nor fields."
 )
 
 print("\nAll parcel_data.py checks passed.")

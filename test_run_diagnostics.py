@@ -46,16 +46,16 @@ Sections (the branch's numbered tests in brackets):
 THE FETCH TIMING SECTIONS (this branch's numbered tests in brackets)
 ===================================================================
 Sections 11-18 measure the OTHER end of a session: parcel_data.fetch_
-parcel_data(), the twelve sequential fetches a session creation waits
+parcel_data(), the ten sequential fetches a session creation waits
 minutes on. They run through the REAL fetch_parcel_data() -- its real
-order, its real None checks, its real raises -- with only the twelve
+order, its real None checks, its real raises -- with only the ten
 network calls mocked, on parcel_data's own namespace (see FetchHarness).
 
- 11  [1]  A COLD CREATION RECORDS TWELVE LAYER TIMINGS summing to the
+ 11  [1]  A COLD CREATION RECORDS TEN LAYER TIMINGS summing to the
           recorded total, in fetch order, each row carrying its own
           layer's wait.
  12  [2]  A WARM CREATION SAYS THE CACHE SERVED IT -- layers null, not
-          twelve zeroes.
+          ten zeroes.
  13  [3]  A FAILED FETCH STILL WRITES A RECORD, naming the layer and the
           exception, with NO session left behind. Two REAL induced
           failures, not stubbed verdicts. THE ONE THAT MATTERS
@@ -100,7 +100,6 @@ import document_store
 import elevation_data
 import farm_roads_data
 import hydrology_data
-import imagery_data
 import job_runner
 import parcel_data
 import production_area
@@ -269,9 +268,7 @@ def _build_parcel_data(_boundary=None) -> ParcelData:
         soil_geometries=HYDRIC_GEOMETRIES,
         water_features={"streams": [], "water_bodies": []},
         farm_roads=FIXTURE_ROADS,
-        climate_summary={},
         canopy_height=_build_canopy(dem),
-        imagery_summary={},
         irradiance={"status": "ok"},
     )
 
@@ -287,8 +284,8 @@ class Harness:
     each prove theirs is.
 
     `real_fetch=True` leaves parcel_data.fetch_parcel_data() ALONE so the
-    real one runs and its twelve layer timers fire; FetchHarness below
-    is that mode plus the twelve layer functions mocked underneath it,
+    real one runs and its ten layer timers fire; FetchHarness below
+    is that mode plus the ten layer functions mocked underneath it,
     on parcel_data's own namespace. Everything else here -- every warm-up
     boundary, every step's own fetches and self-computes -- is identical
     in both modes, so a section that measures the fetch is measuring it
@@ -492,11 +489,11 @@ class Harness:
         }
 
 
-# --- the twelve layers, mocked one at a time ---------------------------
+# --- the ten layers, mocked one at a time ---------------------------
 #
 # THE REAL fetch_parcel_data() RUNS. Every section that measures the fetch
 # needs the function under test to be the real one -- its real order, its
-# real twelve calls, its real None checks and its real raises -- with
+# real ten calls, its real None checks and its real raises -- with
 # only the network boundary replaced. Patches therefore target
 # parcel_data's OWN namespace (parcel_data.get_dem_for_boundary, ...) and
 # not each source module's, since parcel_data.py imports every fetch with
@@ -523,21 +520,19 @@ FETCH_LAYER_RETURNS = {
     "get_soil_geometries_for_polygon": HYDRIC_GEOMETRIES,
     "get_water_features_for_boundary": {"streams": [], "water_bodies": []},
     "get_farm_roads_for_boundary": FIXTURE_ROADS,
-    "get_climate_summary_for_point": {},
     "get_canopy_height_for_boundary": _FIXTURE_CANOPY,
-    "get_imagery_summary_for_boundary": {},
     "get_regional_irradiance_baseline": {"status": "ok"},
 }
 
 # FETCH_LAYERS entry -> the parcel_data binding that fills it.
 LAYER_FUNCTIONS = dict(zip(parcel_data.FETCH_LAYERS, FETCH_LAYER_RETURNS))
-assert len(parcel_data.FETCH_LAYERS) == 12, parcel_data.FETCH_LAYERS
-assert len(LAYER_FUNCTIONS) == len(FETCH_LAYER_RETURNS) == 12
+assert len(parcel_data.FETCH_LAYERS) == 10, parcel_data.FETCH_LAYERS
+assert len(LAYER_FUNCTIONS) == len(FETCH_LAYER_RETURNS) == 10
 
 
 def _layer_mock(name, delay):
     """One layer's stand-in. `delay` seconds of sleep before returning, so
-    a section can give the twelve layers KNOWN, DISTINGUISHABLE waits and
+    a section can give the ten layers KNOWN, DISTINGUISHABLE waits and
     then assert that each recorded row carries its own layer's wait and not
     some other layer's."""
     value = FETCH_LAYER_RETURNS[name]
@@ -553,7 +548,7 @@ def _layer_mock(name, delay):
 
 class FetchHarness:
     """
-    Harness(real_fetch=True) plus the twelve layer functions mocked, so
+    Harness(real_fetch=True) plus the ten layer functions mocked, so
     a whole session creation runs through the REAL fetch_parcel_data().
 
     `delays` is {FETCH_LAYERS entry: seconds}; `overrides` is
@@ -1818,19 +1813,19 @@ print(
 
 
 # =========================================================================
-# 11 [fetch test 1]. A COLD CREATION RECORDS TWELVE LAYER TIMINGS
+# 11 [fetch test 1]. A COLD CREATION RECORDS TEN LAYER TIMINGS
 # =========================================================================
 #
-# THE DATA A PROGRESS DISPLAY WOULD LATER BE BUILT FROM. Twelve rows, in
+# THE DATA A PROGRESS DISPLAY WOULD LATER BE BUILT FROM. Ten rows, in
 # fetch order, each with its own wall time, summing into the recorded
 # total. Sequential is what makes that sentence true -- the fetches do not
 # overlap, so "which layer is this run on" has an answer and the times add
 # up rather than merging.
 #
-# EACH LAYER IS GIVEN A DIFFERENT, KNOWN WAIT (10 ms, 20 ms, ... 120 ms) so
-# the assertion is not just "twelve numbers appeared" but "row N carries
+# EACH LAYER IS GIVEN A DIFFERENT, KNOWN WAIT (10 ms, 20 ms, ... 100 ms) so
+# the assertion is not just "ten numbers appeared" but "row N carries
 # LAYER N's wait". A recorder that mixed up which timer belonged to which
-# call, or that recorded one clock twelve times, passes the first and
+# call, or that recorded one clock ten times, passes the first and
 # fails the second.
 
 _cold_dir = tempfile.mkdtemp(prefix="run_diagnostics_cold_")
@@ -1863,7 +1858,7 @@ with Diagnostics(on=True, directory=_cold_dir), FetchHarness(delays=_DELAYS) as 
 _cold_fetch = _sole_fetch_event(_cold_record)
 
 # Every layer fetched EXACTLY ONCE -- this section measures one fetch, and
-# a record of twelve rows over twelve calls would be a different thing.
+# a record of ten rows over ten calls would be a different thing.
 assert set(_cold_counts.values()) == {1}, _cold_counts
 
 assert _no_grid.call_count == 0, (
@@ -1874,15 +1869,15 @@ assert _no_grid.call_count == 0, (
 assert _cold_fetch["reason"] == "create_session"
 assert _cold_fetch["cache"]["cached_before"] is False
 assert _cold_fetch["cache"]["served_by"] == "fetch"
-assert _cold_fetch["cache"]["layers_timed"] == 12
+assert _cold_fetch["cache"]["layers_timed"] == 10
 assert _cold_fetch["outcome"]["status"] == "ok"
 
 _cold_layers = _cold_fetch["layers"]
-assert len(_cold_layers) == 12, len(_cold_layers)
+assert len(_cold_layers) == 10, len(_cold_layers)
 
 # IN THE PIPELINE'S OWN ORDER, and each row says where it sat.
 assert [row["layer"] for row in _cold_layers] == list(parcel_data.FETCH_LAYERS)
-assert [row["order"] for row in _cold_layers] == list(range(12))
+assert [row["order"] for row in _cold_layers] == list(range(10))
 assert all(row["outcome"] == "ok" for row in _cold_layers)
 
 # EACH ROW CARRIES ITS OWN LAYER'S WAIT. The injected waits increase
@@ -1894,7 +1889,7 @@ for _index, (_layer, _elapsed) in enumerate(zip(parcel_data.FETCH_LAYERS, _cold_
     assert _elapsed >= _floor, f"{_layer}: {_elapsed:.1f} ms < its own {_floor:.0f} ms wait"
 assert _cold_elapsed == sorted(_cold_elapsed), _cold_elapsed
 
-# THE TWELVE SUM TO THE RECORDED TOTAL. layers_total_ms is the sum the
+# THE TEN SUM TO THE RECORDED TOTAL. layers_total_ms is the sum the
 # record carries; total_ms is the wall clock around the whole fetch, and
 # the gap between them is real non-layer work (the boundary reprojection,
 # the centroid warp, the cache's own bookkeeping) that no layer accounts
@@ -1906,14 +1901,14 @@ _cold_layers_total = _cold_fetch["timings"]["layers_total_ms"]
 assert abs(_cold_sum - _cold_layers_total) < 1e-6, (_cold_sum, _cold_layers_total)
 assert _cold_layers_total <= _cold_total, (_cold_layers_total, _cold_total)
 assert _cold_layers_total >= 0.5 * _cold_total, (
-    f"the twelve layers account for only {_cold_layers_total / _cold_total:.1%} of the total"
+    f"the ten layers account for only {_cold_layers_total / _cold_total:.1%} of the total"
 )
 
 print(
-    f"11 [fetch test 1]. A COLD CREATION RECORDS TWELVE LAYER TIMINGS: one session creation "
+    f"11 [fetch test 1]. A COLD CREATION RECORDS TEN LAYER TIMINGS: one session creation "
     f"through the REAL fetch_parcel_data() recorded {len(_cold_layers)} layer rows, in "
-    f"parcel_data.FETCH_LAYERS' own order, each fetched exactly once. Given twelve distinct "
-    f"injected waits of {_STEP_SECONDS * 1000:.0f}-{12 * _STEP_SECONDS * 1000:.0f} ms, every row "
+    f"parcel_data.FETCH_LAYERS' own order, each fetched exactly once. Given ten distinct "
+    f"injected waits of {_STEP_SECONDS * 1000:.0f}-{len(parcel_data.FETCH_LAYERS) * _STEP_SECONDS * 1000:.0f} ms, every row "
     f"carries ITS OWN layer's wait and the recorded times rise strictly down the list. They sum "
     f"to layers_total_ms = {_cold_layers_total:.1f} ms, which is "
     f"{_cold_layers_total / _cold_total:.1%} of the {_cold_total:.1f} ms total; the "
@@ -1929,8 +1924,8 @@ print(
 #
 # A WARM CREATION AND A COLD ONE ARE DIFFERENT MEASUREMENTS AND MUST NEVER
 # BE AVERAGED. The failure mode this guards is a record that reports
-# twelve zero-millisecond layers on a cache hit -- which reads as
-# twelve instantaneous fetches, and would quietly drag the average for
+# ten zero-millisecond layers on a cache hit -- which reads as
+# ten instantaneous fetches, and would quietly drag the average for
 # every layer toward zero the moment anyone summarised a directory of
 # records. `layers` is null instead, and the cache block says plainly who
 # answered.
@@ -1957,12 +1952,12 @@ assert set(_first_counts.values()) == {1}, _first_counts
 assert _second_counts == _first_counts, (_first_counts, _second_counts)
 
 assert _cold_control["cache"]["served_by"] == "fetch"
-assert len(_cold_control["layers"]) == 12
+assert len(_cold_control["layers"]) == 10
 
 assert _warm_fetch["cache"]["cached_before"] is True
 assert _warm_fetch["cache"]["served_by"] == "fetch_cache"
 assert _warm_fetch["cache"]["layers_timed"] == 0
-# THE POINT: null, not twelve zeroes.
+# THE POINT: null, not ten zeroes.
 assert _warm_fetch["layers"] is None, _warm_fetch["layers"]
 assert _warm_fetch["outcome"]["status"] == "ok"
 # The irradiance status still comes back on the warm path -- read off the
@@ -1979,8 +1974,8 @@ assert _rebuild_events[1]["layers"] is None
 
 print(
     f"12 [fetch test 2]. A WARM CREATION SAYS THE CACHE SERVED IT: a second session on the same "
-    f"boundary against the same fetch cache called not one of the twelve layer functions again, "
-    f"and its record says served_by 'fetch_cache', layers_timed 0 and layers NULL -- not twelve "
+    f"boundary against the same fetch cache called not one of the ten layer functions again, "
+    f"and its record says served_by 'fetch_cache', layers_timed 0 and layers NULL -- not ten "
     f"zeroes. Its total was {_warm_fetch['timings']['total_ms']:.3f} ms against the cold run's "
     f"{_cold_control['timings']['total_ms']:.1f} ms, and its irradiance status "
     f"({_warm_fetch['irradiance']['status']!r}) is the cached ParcelData's own. Dropping that "
@@ -1994,7 +1989,7 @@ print(
 # 13 [fetch test 3]. A FAILED FETCH STILL WRITES A RECORD
 # =========================================================================
 #
-# THE ONE THAT MATTERS OPERATIONALLY. Eleven of the twelve layers HARD-
+# THE ONE THAT MATTERS OPERATIONALLY. Nine of the ten layers HARD-
 # FAIL the session: fetch_parcel_data() raises, session_manager.create_
 # session() persists nothing and caches nothing, and NO SESSION EXISTS.
 # The record written on that path is the only evidence the run ever
@@ -2059,7 +2054,7 @@ assert _erosion["outcome"] == "raised"
 assert _erosion["error_type"] == "ReadTimeout"
 assert "induced" in _erosion["error_message"]
 assert all(row["outcome"] == "ok" for row in _raise_layers[:-1])
-# The fetch stopped there: the nine layers after erosion_factor have no
+# The fetch stopped there: the six layers after erosion_factor have no
 # rows at all, which is the record saying where the run got to.
 assert _raise_fetch["cache"]["layers_timed"] == 4
 # No ParcelData came back, and the irradiance block says so rather than
@@ -2134,7 +2129,7 @@ print(
 # `status` says whether the numbers are real, so a degraded baseline is
 # NORMAL OPERATION. A record that marked it a failure would put a red mark
 # on runs that were fine -- and a reader who learns to ignore that mark
-# stops reading the twelve layers where it means something.
+# stops reading the ten layers where it means something.
 
 _irr_dir = tempfile.mkdtemp(prefix="run_diagnostics_irr_")
 _DEGRADED = {
@@ -2186,7 +2181,7 @@ print(
 # 15 [fetch test 5]. RETRY COUNTS AND RETRY TIME REACH THE RECORD
 # =========================================================================
 #
-# THEY USED NOT TO EXIST. Five modules behind these twelve layers retry
+# THEY USED NOT TO EXIST. Four modules behind these ten layers retry
 # internally, each keeping its own private copy of the same progressive-
 # timeout loop, and every one of them counted attempts in a local
 # variable and returned only the final payload -- so a layer that
@@ -2210,7 +2205,7 @@ print(
 _retries = _cold_fetch["retries"]
 
 # THE MOCKED COLD RUN FIRST, AND ITS NULLS ARE THE RIGHT ANSWER. The
-# twelve layers above are Mocks, whose __module__ is unittest.mock -- so
+# ten layers above are Mocks, whose __module__ is unittest.mock -- so
 # the timer resolves that module, finds nothing published, and says so.
 # This is the negative control the positive below needs: it shows a null
 # means "this callable's module published nothing", not "the reader is
@@ -2243,7 +2238,6 @@ _REAL_ENTRY_POINTS = [
     soil_data.get_soil_geometries_for_polygon,
     hydrology_data.get_water_features_for_boundary,
     farm_roads_data.get_farm_roads_for_boundary,
-    imagery_data.get_imagery_summary_for_boundary,
     canopy_height_data.get_canopy_height_for_boundary,
 ]
 for _entry in _REAL_ENTRY_POINTS:
@@ -2262,7 +2256,6 @@ _HELPER_MODULES = [
     soil_data,
     hydrology_data,
     farm_roads_data,
-    imagery_data,
     canopy_height_data,
     canopy_cover_data,
 ]
@@ -2279,12 +2272,12 @@ assert _helpers["soil_data._run_sda_query"] == {
 # keeps transparent.
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
-# AND WHICH OF THEM IS A LOOP. Five of the eleven declare a budget and
+# AND WHICH OF THEM IS A LOOP. Four of the nine declare a budget and
 # hand it straight to a helper that owns the loop, so their attempts are
 # counted under that helper -- reported rather than left for a reader to
 # discover by finding a helper that never appears in any breakdown.
 #
-# FOUR OF THE FIVE ARE THE CANOPY LAYER'S, because its budget is declared
+# ALL FOUR ARE THE CANOPY LAYER'S, because its budget is declared
 # once at the layer entry point and handed down a chain: get_canopy_
 # height_for_boundary -> _search_hag_items, and, on the no-HAG-coverage
 # path, -> _tree_canopy_cover_fallback -> get_tree_canopy_cover_for_
@@ -2295,7 +2288,6 @@ assert sorted(name for name, row in _helpers.items() if not row["counts_attempts
     "canopy_height_data._search_hag_items",
     "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
-    "imagery_data._search_scenes",
 ], sorted(_helpers)
 # The fallback's budget is the CANOPY LAYER's, not a second one: by the
 # time NLCD TCC runs it is the last canopy source there is for the parcel,
@@ -2399,11 +2391,11 @@ assert _retry_row["attempt_detail"]["helpers"]["soil_data._run_sda_query"]["atte
 # module applied.
 assert _clean_row["elapsed_ms"] < _retry_row["elapsed_ms"]
 
-# THE OTHER ELEVEN LAYERS IN THE SAME RECORD ARE STILL MOCKS, so the
+# THE OTHER NINE LAYERS IN THE SAME RECORD ARE STILL MOCKS, so the
 # fetch-level booleans read false and the absent reasons are present.
 # That is the honest report of a MIXED fetch and worth pinning: a
 # `attempts_recorded: true` that meant "at least one row" would let
-# eleven silent nulls hide behind one real count.
+# nine silent nulls hide behind one real count.
 assert _retry_event["retries"]["attempts_recorded"] is False
 assert _retry_event["retries"]["attempts_absent_reason"] is not None
 assert [row["layer"] for row in _retry_event["layers"] if row["attempts"] is not None] == [
@@ -2470,7 +2462,7 @@ print(
     f"{_retry_row['attempts']} with {_retry_row['retry_sleep_ms']:.0f} ms of measured sleep inside "
     f"{_retry_row['elapsed_ms']:.0f} ms -- the same layer on the same parcel, told apart by a "
     f"number the loop published rather than a threshold this module applied. attempt_detail names "
-    f"soil_data._run_sda_query at calls=1/attempts=3. The other eleven rows are Mocks and honestly "
+    f"soil_data._run_sda_query at calls=1/attempts=3. The other nine rows are Mocks and honestly "
     f"report nulls, so attempts_recorded stays false on a MIXED fetch. Of the {len(_helpers)} "
     f"functions a max_retries parameter finds, 5 own a counting loop and 3 pass their budget on. "
     f"AND A WARM CREATION CARRIES NO STALE COUNT: with soil_data still publishing 3 on this "
@@ -2547,14 +2539,14 @@ if _comparable_bodies[0] != _comparable_bodies[1]:
 # EVERY TIMING IS REDACTED, AND NOTHING ELSE IS. The `_ms` paths found in
 # the raw record are exactly the values replaced in the comparable one.
 _paths = _timing_keys({k: v for k, v in _shape_records[0].items() if k != "header"})
-# 12 elapsed_ms + 12 retry_sleep_ms + total_ms + layers_total_ms. The
+# 10 elapsed_ms + 10 retry_sleep_ms + total_ms + layers_total_ms. The
 # retry sleeps are null on this run (its layers are Mocks, which publish
 # nothing) and are redacted anyway: the suffix keys on the NAME, so the
 # slot a duration lives in is redacted whether or not it was filled. What
 # says which happened is retry_sleep_source beside it, which carries no
 # suffix and so still diffs in full -- the same pairing attempts and
 # attempts_source already had.
-assert len(_paths) == 26, _paths
+assert len(_paths) == 22, _paths
 assert _comparable_bodies[0].count(run_diagnostics.REDACTED_TIMING) == len(_paths)
 assert run_diagnostics.REDACTED_TIMING not in _raw_bodies[0]
 
@@ -2594,10 +2586,10 @@ print(
 # fetch_parcel_data(). Every function that builds any part of a fetch
 # record -- and every one section 6 already lists -- is replaced by one
 # that RAISES, and a whole cold session creation runs clean underneath,
-# through all twelve layer timers.
+# through all ten layer timers.
 #
 # time_layer() IS DELIBERATELY NOT IN THAT LIST. It DOES run when
-# diagnostics are off -- it is the call site in parcel_data.py, twelve
+# diagnostics are off -- it is the call site in parcel_data.py, ten
 # times per fetch -- so what is asserted about it is what it COSTS: it
 # hands back the module-level do-nothing singleton, having read one
 # thread-local attribute and built nothing.
@@ -2644,7 +2636,7 @@ print(
     f"{len(_FETCH_NEVER)} record-building functions in run_diagnostics.py -- section 6's list plus "
     f"the {len(_FETCH_NEVER) - len(_NEVER)} the fetch group adds -- were replaced by ones that "
     f"RAISE, and a full cold session creation ran clean through the REAL fetch_parcel_data(), "
-    f"fetching all twelve layers exactly once. Not one of them fired and no directory was "
+    f"fetching all ten layers exactly once. Not one of them fired and no directory was "
     f"created. time_layer() is excluded because it DOES run: it returned the do-nothing singleton."
 )
 
@@ -2676,7 +2668,7 @@ _fetch_lines = [
 ]
 assert len(_fetch_lines) == 7, _check_output
 assert all(line.startswith("[ok]") for line in _fetch_lines), _fetch_lines
-assert any("times 12 of 12 declared layers" in line for line in _fetch_lines), _fetch_lines
+assert any("times 10 of 10 declared layers" in line for line in _fetch_lines), _fetch_lines
 # THE SIXTH AND SEVENTH ARE THE REPORT-TIME DATA LAYER'S (report_data.py,
 # the site data report's own fetch layer), asked the same two questions
 # Layer 1 is asked: does its fetch call time_layer, and does it time every
@@ -2700,12 +2692,12 @@ assert any("fetch_parcel_data calls time_layer" in line for line in _fetch_lines
 # THE FIFTH IS THIS BRANCH'S, and it is the same class of silent failure
 # as the other four: a layer entry point that lost its
 # @fetch_attempts.publishes decorator raises nothing and simply publishes
-# no count, forever. Nine of the twelve layers come from a module with a
-# counting retry loop; the three that do not (dem, climate, irradiance)
+# no count, forever. Eight of the ten layers come from a module with a
+# counting retry loop; the two that do not (dem, irradiance)
 # are not expected to publish and are not counted here. Nothing about
 # that split is named in this module -- see _timed_callables().
 assert any(
-    "retrying layers publish attempts: 9 of 9 timed entry points" in line
+    "retrying layers publish attempts: 8 of 8 timed entry points" in line
     for line in _fetch_lines
 ), _fetch_lines
 
@@ -2747,7 +2739,7 @@ _torn_report = [line for line in _torn_lines if "report_data" in line]
 assert len(_torn_layer1) == 5 and len(_torn_report) == 2, _torn_lines
 assert all(line.startswith("[!!]") for line in _torn_layer1), _torn_lines
 assert all(line.startswith("[ok]") for line in _torn_report), _torn_lines
-assert any("times 0 of 12 declared layers" in line for line in _torn_lines), _torn_lines
+assert any("times 0 of 10 declared layers" in line for line in _torn_lines), _torn_lines
 # The publishing line fails too, and for the honest reason: the timed
 # callables are read out of the compiled fetch_parcel_data, and this one
 # times nothing, so there are 0 entry points to have checked. "0 of 0" is
@@ -2771,19 +2763,19 @@ _dropped_lines = [
 assert not _dropped_ok, _dropped_output
 assert len(_dropped_lines) == 1, _dropped_output
 assert _dropped_lines[0].startswith("[!!]"), _dropped_lines
-assert "8 of 9 timed entry points" in _dropped_lines[0], _dropped_lines
+assert "7 of 8 timed entry points" in _dropped_lines[0], _dropped_lines
 # ... and only that one line moved.
 assert _dropped_output.count("[!!]") == 1, _dropped_output
 
 print(
     f"18 [fetch test 8]. self_check() REPORTS WHETHER FETCH INSTRUMENTATION IS WIRED: it prints "
     f"seven fetch lines, all [ok] against the loaded modules -- build_session_context calls "
-    f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, it times 12 of 12 "
+    f"begin_fetch and record_fetch, fetch_parcel_data calls time_layer, it times 10 of 10 "
     f"declared layers, 9 of 9 timed entry points from a retrying module publish attempts, and "
     f"the report-time layer's fetch_report_data calls time_layer and times 1 of 1 declared "
     f"report layers. TWO NEGATIVE CONTROLS: with both Layer 1 functions replaced by "
     f"uninstrumented ones the five Layer 1 lines read [!!] while the two report-layer lines "
-    f"stay [ok] (the layer count 0 of 12, the publishing count 0 of 0 -- not a pass but "
+    f"stay [ok] (the layer count 0 of 10, the publishing count 0 of 0 -- not a pass but "
     f"'could not be checked'); and with ONE entry point's decorator dropped, that line ALONE "
     f"reads [!!] at 8 of 9. Both return False with RECORDS WOULD NOT BE WRITTEN."
 )

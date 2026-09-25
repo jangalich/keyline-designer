@@ -975,7 +975,7 @@ tool (built with Leaflet).
   shading — it has no vegetation/canopy signal at all (no DSM-derived
   canopy height model exists in this pipeline yet). A real canopy height
   model, or a per-pixel NDVI overlay reprojected onto the DEM grid (using
-  `imagery_data.py`'s already-merged Sentinel-2 fetch — NOT the separate,
+  a Sentinel-2 fetch like the retired `imagery_data.py`'s — NOT the separate,
   still-unmerged NLCD/NDVI branch), would be a meaningfully better shading
   signal and is a reasonable next step once the DEM-only version is
   validated against real tree cover on the ground.
@@ -1181,13 +1181,13 @@ what the diff shows.
 
 #### Fetch timing
 
-A session creation waits on `parcel_data.fetch_parcel_data()` — thirteen
+A session creation waits on `parcel_data.fetch_parcel_data()` — ten
 sequential fetches, no threading and no async — and that wait is most of the
 minutes it takes. The record's first event is a `fetch` event carrying, per
 layer: its wall time, the callable that was timed, whether the call raised
 and with what. Beside them: the total, whether the fetch ran at all or the
 boundary was already in the fetch cache (a warm creation records
-`layers: null`, never thirteen zeroes), `irradiance`'s own `status` — the
+`layers: null`, never ten zeroes), `irradiance`'s own `status` — the
 one deliberately non-hard-failing layer, so a degraded baseline is recorded
 as degraded and never as a failure — and, on a failure, the exception type,
 its message, and `ParcelDataIncompleteError`'s own `layer`/`label`.
@@ -1197,10 +1197,10 @@ hard-failed layer creates no session at all — nothing persisted, nothing
 cached — so the record is the only evidence that run ever happened. Its
 `header.session_id` is the id that creation generated and then discarded.
 
-**Attempt counts are not available and the record says so.** Five modules
+**Attempt counts are not available and the record says so.** Four modules
 behind these layers retry internally (`soil_data._run_sda_query` and the
 private `_retry()`/`_query_*` copies in `hydrology_data`,
-`farm_roads_data`, `imagery_data`, `canopy_height_data`); each counts
+`farm_roads_data`, `canopy_height_data`); each counts
 attempts in a local variable and returns only the final payload, so a layer
 that succeeded on attempt 3 after two two-second pauses is indistinguishable
 from one that succeeded on attempt 1. Every layer row therefore records

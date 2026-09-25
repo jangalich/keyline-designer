@@ -10,15 +10,23 @@ layers and returns them bundled in one dataclass. See pipeline_context.py
 for the derived-computation layer built on top of raw data like this.
 
 HARD-FAIL CONTRACT: fetch_parcel_data() raises (uncached, uncaught) on
-ANY failure among ANY of the HARD-FAIL layers it fetches -- dem,
+ANY failure among ANY of the NINE HARD-FAIL layers it fetches -- dem,
 soil_components, farmland_classification, erosion_factor, saturated_
-hydraulic_conductivity, soil_geometries, water_features, farm_roads,
-climate_summary, canopy_height, and imagery_summary. Data completeness is
-a precondition for a trustworthy report, not an optional enhancement -- a
-missing/broken layer means nothing downstream should run against
-incomplete data. Imagery is included in that list even though the
-map might seem optional: the map is essential to the report, so an imagery
-outage stops the pipeline the same as a DEM outage does.
+hydraulic_conductivity, soil_geometries, water_features, farm_roads and
+canopy_height. Every one of them is read by a design step or by the site
+data report's sections; data completeness is a precondition for a
+trustworthy design, not an optional enhancement -- a missing/broken layer
+means nothing downstream should run against incomplete data.
+
+TWO LAYERS LEFT WITH THE NARRATED REPORT. climate_summary (Open-Meteo, a
+ten-year daily archive) and imagery_summary (a Sentinel-2 scene search and
+two band reads) were hard-fail layers here read by nothing but the retired
+narrated report's prompt. Each could sink a session creation -- and, worse,
+a COLD REBUILD: a report on a session the cache had let go refetches Layer
+1, so a 429 from Open-Meteo failed a paid site report whose climate comes
+from Daymet. Both are gone; nothing that remains reads either. Do not
+re-add a layer here that no step and no report section consumes: every
+hard-fail layer is one more source that can stop a session and a rebuild.
 
 THE TWO CARVE-OUTS, AND HOW THEY DIFFER. There are exactly TWO named
 departures from the contract above and NO others, and they are NOT the
@@ -59,24 +67,14 @@ canopy -- so some ground on it is marked wooded that a walk would show as
 two trees in a field. That is not expressible as an availability flag,
 because the check genuinely ran.
 
-This is a deliberately STRICTER standard than the individual fetch
-functions this module calls. Two of them -- imagery_data.
-get_imagery_summary_for_boundary() and canopy_height_data.
-get_canopy_height_for_boundary() -- document returning None as a genuine,
-non-exceptional "nothing usable found" outcome (persistent cloud cover;
-no canopy coverage for this area from EITHER canopy source), distinct
-from a raised exception on an actual request failure. generate_full_
-report.py's current per-section graceful degradation treats that None the same way it treats a caught
-exception: skip the section, keep going. This module does not -- since
-ParcelData.imagery_summary and ParcelData.canopy_height are required
-dict fields (no Optional, no None default), a None from either fetch is
-converted into a raised ParcelDataIncompleteError here, same as any other
-hard failure. Once this module is wired into generate_full_report.py (a
-later, separate branch), that module's own imagery try/except becomes
-dead code -- this function will already have raised before that point is
-ever reached. Flagging here so it isn't mistaken for still-active
-graceful degradation once that wiring happens. generate_full_report.py's
-own broader redesign is out of scope for this branch.
+This is a deliberately STRICTER standard than the fetch function it
+calls. canopy_height_data.get_canopy_height_for_boundary() documents
+returning None as a genuine, non-exceptional "nothing usable found"
+outcome (no canopy coverage for this area from EITHER canopy source),
+distinct from a raised exception on an actual request failure. This
+module converts that None into a raised ParcelDataIncompleteError, since
+ParcelData.canopy_height is a required dict field (no Optional, no None
+default).
 
 irradiance IS included, as the single deliberately non-hard-failing field
 (see the HARD-FAIL CONTRACT carve-out above and the comment on the
@@ -94,8 +92,8 @@ grid_size=6), a 6x6 lattice of 36 SEQUENTIAL EPQS point requests with a
 time.sleep(0.3) between each. Three timed cold creations put it at 42.8 s,
 31.8 s and 118.8 s -- 65%, 65% and 90% of the whole fetch wait, the single
 largest cost in a session creation by a wide margin. What consumed it was
-ONE SENTENCE in the report: report_generator._format_elevation_summary()
-printed its min, max and point count. No KSOP module read it; it appears
+ONE SENTENCE in the narrated report (since retired): its elevation line
+printed the lattice's min, max and point count. No KSOP module read it; it appears
 in no step registry entry's `consumes`. Meanwhile the dem layer above --
 the FIRST fetch, 1-3 s -- already covers the same boundary at ~5 m
 resolution, and min/max over that array (raster_grid.elevation_range_in_
@@ -112,10 +110,10 @@ nothing downstream was run against. Do NOT re-add a point-sampled
 elevation layer here; the DEM is the source. elevation_data.py itself is
 left in place (see its own module docstring).
 
-MEASURED, NOT CHANGED. Every one of the twelve fetches below sits
+MEASURED, NOT CHANGED. Every one of the ten fetches below sits
 inside a run_diagnostics.time_layer() block, so a session creation with
 KEYLINE_RUN_DIAGNOSTICS set records how long each layer took, in fetch
-order, in that session's diagnostic record -- and, for the nine layers
+order, in that session's diagnostic record -- and, for the eight layers
 whose module retries, HOW MANY ATTEMPTS that took and how much of the
 wait was the pause between them, published by the loops themselves
 (fetch_attempts.py) and read off the module here. Those blocks read a
@@ -124,12 +122,8 @@ what runs, in what order, how often, or how it retries is different with
 them than without. Off (the default) each one costs a thread-local lookup and a
 do-nothing singleton. The names are FETCH_LAYERS below, which is also
 what run_diagnostics.self_check() cross-checks the compiled function
-against, so a thirteenth layer added without a timer is reported rather
+against, so an eleventh layer added without a timer is reported rather
 than silently missing. See run_diagnostics.py's Group 5.
-
-Standalone module only in this branch -- no wiring into
-pipeline_context.py, generate_full_report.py, render_layout_map.py, or
-any KSOP module yet; that's later, separate branches.
 """
 
 from dataclasses import dataclass
@@ -140,11 +134,9 @@ from shapely.geometry import Polygon
 
 import run_diagnostics
 from canopy_height_data import get_canopy_height_for_boundary
-from climate_data import get_climate_summary_for_point
 from dem_data import get_dem_for_boundary
 from farm_roads_data import get_farm_roads_for_boundary
 from hydrology_data import get_water_features_for_boundary
-from imagery_data import get_imagery_summary_for_boundary
 from irradiance_data import get_regional_irradiance_baseline
 from soil_data import (
     coordinates_to_wkt_polygon,
@@ -160,9 +152,9 @@ class ParcelDataIncompleteError(RuntimeError):
     """
     Raised when a fetch function returned its own documented "nothing
     usable found" sentinel (None) for a layer this module treats as
-    mandatory -- imagery and canopy height both use that convention (see
-    module docstring) for a genuine data-gap outcome that isn't a raised
-    exception on its own. ParcelData has no Optional fields, so that
+    mandatory -- canopy height uses that convention (see module docstring)
+    for a genuine data-gap outcome that isn't a raised exception on its
+    own. ParcelData has no Optional fields, so that
     sentinel is converted into a hard failure here instead of being
     passed through as None.
 
@@ -205,7 +197,7 @@ class ParcelDataIncompleteError(RuntimeError):
         self.reason = reason
 
 
-# The (type, label) pairs the two mandatory-layer raises below report as.
+# The (type, label) pair the mandatory-layer raise below reports as.
 #
 # CANOPY IS MANDATORY AND STAYS MANDATORY (the second of the module
 # docstring's two carve-outs). It has a FALLBACK, not an exemption: the
@@ -219,10 +211,9 @@ class ParcelDataIncompleteError(RuntimeError):
 # imports the whole production pipeline; this module is Layer 1 and must
 # stay below it).
 LAYER_CANOPY = ("canopy", "tree canopy height")
-LAYER_IMAGERY = ("imagery", "satellite imagery")
 
 
-# THE TWELVE LAYERS fetch_parcel_data() FETCHES, IN THE ORDER IT
+# THE TEN LAYERS fetch_parcel_data() FETCHES, IN THE ORDER IT
 # FETCHES THEM. Sequential -- no threading, no async -- so this order is
 # real: each layer's wait is added to the one before it, the per-layer
 # times sum toward the total, and "which layer is this run on" is a
@@ -231,7 +222,7 @@ LAYER_IMAGERY = ("imagery", "satellite imagery")
 # WHY THIS ORDER IS WHAT IT IS. Exactly one edge is a genuine dependency:
 # canopy_height needs the dem, and is fetched after it for that reason
 # and no other (see the entry point's docstring). Everything from
-# soil_components through imagery_summary is independent of everything
+# soil_components through farm_roads is independent of everything
 # beside it and runs sequentially because that is how it was written, not
 # because anything requires it. Stated here as an observation for the
 # record to be read against; changing it is not this module's business
@@ -244,8 +235,8 @@ LAYER_IMAGERY = ("imagery", "satellite imagery")
 # DECLARED HERE AND CROSS-CHECKED AGAINST THE COMPILED FUNCTION.
 # run_diagnostics._fetch_hook_sites() reads the LOADED fetch_parcel_
 # data()'s own constants and reports how many of these names appear in
-# it, so a thirteenth layer added without a timer shows up in
-# self_check() as "12 of 13" rather than as a row that quietly never
+# it, so an eleventh layer added without a timer shows up in
+# self_check() as "10 of 11" rather than as a row that quietly never
 # appears in any record.
 FETCH_LAYERS = (
     "dem",
@@ -256,9 +247,7 @@ FETCH_LAYERS = (
     "soil_geometries",
     "water_features",
     "farm_roads",
-    "climate_summary",
     "canopy_height",
-    "imagery_summary",
     "irradiance",
 )
 
@@ -274,9 +263,7 @@ class ParcelData:
     soil_geometries: dict
     water_features: dict
     farm_roads: list[dict]
-    climate_summary: dict
     canopy_height: dict
-    imagery_summary: dict
     # THE ONE DELIBERATELY NON-HARD-FAILING LAYER 1 FIELD. Every field above
     # is mandatory: a missing/broken value raises and stops the pipeline
     # (see the module docstring's HARD-FAIL CONTRACT). irradiance is the
@@ -290,17 +277,6 @@ class ParcelData:
     # adding it to a hard-fail gate, a completeness check, or an
     # Optional/None default -- the non-hard-failing behavior is the point.
     irradiance: dict
-
-
-def _boundary_center(boundary_coordinates: list) -> tuple:
-    """Rough center point of the boundary, used for the climate lookup
-    (climate is regional, not parcel-precise, so one representative point
-    is the right level of precision here). Duplicated from generate_full_
-    report.py's own helper of the same name -- a 4-line pure function, not
-    worth a cross-import."""
-    lons = [pt[0] for pt in boundary_coordinates]
-    lats = [pt[1] for pt in boundary_coordinates]
-    return sum(lats) / len(lats), sum(lons) / len(lons)
 
 
 def _boundary_polygon_utm(boundary_coordinates: list[tuple[float, float]], dem: dict) -> Polygon:
@@ -327,8 +303,8 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
 
     HARD FAILS (raises, uncached, does not degrade) on ANY failure among
     ANY fetched layer -- see module docstring for the full contract,
-    including why imagery and canopy height each get an explicit None
-    check here despite neither ParcelData field being Optional.
+    including why canopy height gets an explicit None check here despite
+    the ParcelData field not being Optional.
 
     canopy_height is fetched AFTER dem (real ordering dependency --
     get_canopy_height_for_boundary() requires the DEM as an input, unlike
@@ -380,10 +356,6 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     with run_diagnostics.time_layer("farm_roads", get_farm_roads_for_boundary):
         farm_roads = get_farm_roads_for_boundary(boundary_coordinates)
 
-    center_lat, center_lon = _boundary_center(boundary_coordinates)
-    with run_diagnostics.time_layer("climate_summary", get_climate_summary_for_point):
-        climate_summary = get_climate_summary_for_point(center_lat, center_lon)
-
     with run_diagnostics.time_layer("canopy_height", get_canopy_height_for_boundary):
         canopy_height = get_canopy_height_for_boundary(boundary_coordinates, dem)
     # THE None CHECK IS OUTSIDE THE TIMER, deliberately. The call itself
@@ -413,21 +385,6 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
             reason=ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL,
         )
 
-    with run_diagnostics.time_layer("imagery_summary", get_imagery_summary_for_boundary):
-        imagery_summary = get_imagery_summary_for_boundary(boundary_coordinates)
-    # Outside the timer for canopy_height's reason above, exactly.
-    if imagery_summary is None:
-        raise ParcelDataIncompleteError(
-            "get_imagery_summary_for_boundary() found no recent low-cloud scene for this "
-            "boundary -- imagery_summary is a mandatory layer in this module (the map is "
-            "essential to the report), so a genuine no-scene result is a hard failure "
-            "here, not a value to degrade gracefully on.",
-            *LAYER_IMAGERY,
-            # Also an absence, not an outage: the search RAN and matched no
-            # scene. A failed request would have raised out of the fetch.
-            reason=ParcelDataIncompleteError.REASON_NO_DATA_FOR_PARCEL,
-        )
-
     # irradiance: the ONE non-hard-failing field (see the dataclass comment
     # and the module docstring's HARD-FAIL CONTRACT carve-out). Fetched here
     # once, at Layer 1, so nothing downstream re-fetches it. The
@@ -438,13 +395,13 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     # the boundary has denser vertices. get_regional_irradiance_baseline()
     # never raises and always returns a populated dict, so there is
     # deliberately NO try/except and NO None check here (unlike
-    # canopy_height/imagery above), and this field is intentionally NOT part
+    # canopy_height above), and this field is intentionally NOT part
     # of any hard-fail gate.
     centroid_utm = boundary_polygon_utm.centroid
     centroid_lons, centroid_lats = warp_transform(
         dem["crs"], "EPSG:4326", [centroid_utm.x], [centroid_utm.y]
     )
-    # TIMED LIKE THE OTHER ELEVEN, JUDGED LIKE NONE OF THEM. The timer
+    # TIMED LIKE THE OTHER NINE, JUDGED LIKE NONE OF THEM. The timer
     # measures the call, which is all it ever does; it cannot record this
     # layer as a failure because this layer cannot fail -- the function
     # never raises. What says whether the numbers are real is the
@@ -465,8 +422,6 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
         soil_geometries=soil_geometries,
         water_features=water_features,
         farm_roads=farm_roads,
-        climate_summary=climate_summary,
         canopy_height=canopy_height,
-        imagery_summary=imagery_summary,
         irradiance=irradiance,
     )

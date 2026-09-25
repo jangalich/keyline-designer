@@ -291,9 +291,9 @@ def _detail(function, ledger, outcome, value) -> dict:
 
     `returned_sentinel` is a SHAPE, not a judgement: True when the call
     returned None, which is the documented "nothing found" return of
-    canopy_height_data.get_canopy_height_for_boundary() and imagery_data.
-    get_imagery_summary_for_boundary() (parcel_data.py then hard-fails on
-    it, outside the timer, and its own outcome block says so). It is null
+    canopy_height_data.get_canopy_height_for_boundary() (parcel_data.py
+    then hard-fails on it, outside the timer, and its own outcome block
+    says so). It is null
     when the call raised, because a call that raised returned nothing to
     describe. Every other entry point here returns a list or a dict and
     this is simply False for them -- an empty list from a query that

@@ -178,9 +178,7 @@ def _build_parcel_data(_boundary=None) -> ParcelData:
         soil_geometries=HYDRIC_GEOMETRIES,
         water_features=FIXTURE_WATER_FEATURES,
         farm_roads=FIXTURE_ROADS,
-        climate_summary={},
         canopy_height=_build_canopy(dem),
-        imagery_summary={},
         irradiance={"status": "ok"},
     )
 
