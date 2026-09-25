@@ -56,6 +56,11 @@ import report_data
 import bedrock_geology
 import naip_imagery
 import naip_reference_fixture
+import census_geography
+import context_map_data
+import overview_reference_fixture
+import structures_data
+import transmission_lines
 import soil_road_ratings
 import soil_survey
 import soil_woodland
@@ -109,6 +114,10 @@ assert REPORT_FETCH_LAYERS == {
     "soil_survey": DEGRADABLE, "bedrock_geology": DEGRADABLE,
     # THE DESIGN LAYER (branch 13): the layout map's NAIP photography -- the map draws on white without it.
     "naip_imagery": DEGRADABLE,
+    # THE SITE OVERVIEW LAYERS (branch 17): the context map's three, the county, the buildings and the nearest
+    # transmission line -- each a line or a map layer the overview leaves out with a statement.
+    "context_dem": DEGRADABLE, "context_water": DEGRADABLE, "context_roads": DEGRADABLE,
+    "county_state": DEGRADABLE, "structures": DEGRADABLE, "transmission_lines": DEGRADABLE,
 }, REPORT_FETCH_LAYERS
 assert set(REPORT_FETCH_LAYERS.values()) <= {REQUIRED, DEGRADABLE}
 for layer in REPORT_FETCH_LAYERS:
@@ -119,7 +128,7 @@ assert "daymet_at_stations" not in ReportData.__dataclass_fields__, "the station
 sites = run_diagnostics._fetch_hook_sites()
 assert sites["report_data.fetch_report_data calls time_layer"] is True, sites
 coverage = [k for k in sites if k.startswith("report_data.fetch_report_data times")]
-assert coverage == ["report_data.fetch_report_data times 15 of 15 declared report layers"], sites
+assert coverage == ["report_data.fetch_report_data times 21 of 21 declared report layers"], sites
 assert sites[coverage[0]] is True
 assert sites["parcel_data.fetch_parcel_data calls time_layer"] is True
 print(f"   {coverage[0]}")
@@ -165,6 +174,7 @@ _WATER_RAW["forest_type_group"] = trees_reference_fixture.raw_forest_type()
 _WATER_RAW["soil_woodland_rows"] = trees_reference_fixture.raw_soil_woodland()
 _WATER_RAW.update(soils_reference_fixture.raw_soils_layers())
 _WATER_RAW["naip_imagery_raw"] = naip_reference_fixture.raw_naip()
+_WATER_RAW.update(overview_reference_fixture.raw_overview_layers())
 _WATER_FETCHES = (
     (hydrology_data, "get_nhd_points_for_boundary", "nhd_points"),
     (nhdplus_data, "get_flowline_attributes_for_boundary", "nhdplus_hr"),
@@ -183,6 +193,14 @@ _WATER_FETCHES = (
     (bedrock_geology, "get_geology_for_boundary", "bedrock_geology_raw"),
     # The design layer (branch 13): the layout map's NAIP window from the committed live fetch.
     (naip_imagery, "get_naip_for_boundary", "naip_imagery_raw"),
+    # The Site overview layers (branch 17): the context map's three answers in Layer 1's own shapes, a mile
+    # wider, and the geocoder, structures and transmission responses raw.
+    (context_map_data, "get_context_dem_for_boundary", "context_dem"),
+    (context_map_data, "get_context_water_for_boundary", "context_water"),
+    (context_map_data, "get_context_roads_for_boundary", "context_roads"),
+    (census_geography, "get_county_state_for_point", "county_state_raw"),
+    (structures_data, "get_structures_for_boundary", "structures_raw"),
+    (transmission_lines, "get_transmission_lines_near_boundary", "transmission_lines_raw"),
 )
 def _layer_of(key: str) -> str:
     """The ReportData field a fixture key names. report_data_from_fixtures
@@ -249,6 +267,14 @@ assert len(data.soil_woodland["map_units"]) == 7 and len(data.soil_woodland["com
 # The design layer: one NAIP item, its acquisition date, at 0.6 m.
 assert data.naip_imagery["acquired"] == ["2022-06-21"] and data.naip_imagery["years"] == [2022] and data.naip_imagery["gsd"] == 0.6
 assert sum(len(c["species"]) for c in data.soil_woodland["components"].values()) == 132
+# The Site overview layers: the context DEM on the capped 300-cell grid, the wider NHD and road answers, the
+# county, the four footprints near the parcel and the eleven lines within five miles; and the retrieval date.
+assert data.context_dem["array"].shape == (300, 300) and len(data.context_water["streams"]) == 48
+assert len(data.context_water["water_bodies"]) == 14 and len(data.context_roads) == 171
+assert census_geography.county_state_label(data.county_state) == "Allegheny County, Pennsylvania"
+assert len(data.structures["structures"]) == 4 and len(data.transmission_lines["lines"]) == 11
+import datetime as _datetime
+assert data.retrieved_on == _datetime.date.today()
 print(f"   centroid {data.centroid[0]:.4f}, {data.centroid[1]:.4f}; 1 Daymet call; factor {data.climate['prcp_factor']:.3f}; "
       f"zone {data.climate['hardiness']['zone']}; wind from {data.wind['seasons']['winter']['prevailing_sector']}")
 
@@ -354,7 +380,7 @@ print("   1 fetch for 2 calls on one boundary; a failed fetch leaves the cache e
 # ======================================================================
 # 6. Each Water layer degrades alone
 # ======================================================================
-print("6. each of the six Water, one Access, two Trees, two Soils and one Design layer failing is recorded alone; an empty NWI answer is not a degradation")
+print("6. each of the six Water, one Access, two Trees, two Soils, one Design and six Overview layers failing is recorded alone; an empty NWI answer is not a degradation")
 _water_stack.close()
 for module, name, key in _WATER_FETCHES:
     layer = _layer_of(key)
@@ -405,7 +431,9 @@ with a, b, c:
 assert set(all_down.unavailable) == {_layer_of(key) for _, _, key in _WATER_FETCHES}
 assert set(all_down.unavailable) == {"nhd_points", "nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table",
                                      "soil_road_ratings", "forest_type_group", "soil_woodland",
-                                     "soil_survey", "bedrock_geology", "naip_imagery"}
+                                     "soil_survey", "bedrock_geology", "naip_imagery",
+                                     "context_dem", "context_water", "context_roads", "county_state", "structures",
+                                     "transmission_lines"}
 assert all_down.climate is not None
 print(f"   {len(_WATER_FETCHES)} layers, each down alone -> one `unavailable` entry, the other "
       f"{len(_WATER_FETCHES) - 1} parsed; a bad TIFF degrades; an empty NWI answer does not")
