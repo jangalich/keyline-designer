@@ -68,7 +68,9 @@ def derivations(dem: dict) -> dict:
         ],
         "keypoints": [{field: (list(kp[field]) if field == "rowcol" else kp[field]) for field in KEYPOINT_FIELDS}
                       for kp in keypoints],
-        "keypoint_diagnostics": diagnostics,
+        # The counters only: the per-valley candidate tables are a reporting
+        # view (diagnose_keypoint_candidates.py), not a fact to pin.
+        "keypoint_diagnostics": {key: value for key, value in diagnostics.items() if key != "valley_candidates"},
     }
 
 

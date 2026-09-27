@@ -13,7 +13,7 @@ A keypoint is the inflection in a primary valley's long profile: the lowest
 point of the steep upper reach, equivalently the highest point of the
 gentler lower reach. Every primary valley has exactly one, so this module
 returns exactly one keypoint per valley by construction (or none, honestly,
-when a gate rejects it -- never a relaxed gate).
+when every candidate split is rejected -- never a relaxed gate).
 
 Pipeline (each step reuses valley_delineation.py rather than reimplementing
 D8 hydrology):
@@ -33,10 +33,14 @@ D8 hydrology):
             valleys that are not this property's)
         --> sample RAW elevation + cumulative distance along the stem,
             smooth, take cell-to-cell slope percent, smooth again
-        --> locate the keypoint by a TWO-SEGMENT LEAST-SQUARES FIT over the
-            long profile, restricted to splits where slope actually drops AND
-            that lie within the boundary margin, flag on/off parcel
-        --> fill-artifact + stem-length gates -> one keypoint per valley
+        --> CANDIDATES: evaluate the TWO-SEGMENT LEAST-SQUARES FIT at every
+            valid split along the profile (keypoint_split_candidates())
+        --> FILTERS, per candidate, each recording its reason code: slope
+            must drop, the split must lie within the boundary margin, and it
+            must not sit on ground the fill raised
+        --> SELECTION: the surviving candidate with the best fit residual
+            (select_keypoint_candidate()) -> one keypoint per valley, flagged
+            on/off parcel; no survivor -> no keypoint, reasons recorded
 
 FIVE CRITERIA THAT FAILED, encoded here so they are not reintroduced (each
 was diagnosed from a real dead end -- see the tests for the executable
@@ -99,14 +103,32 @@ form):
      property: the 8.17-acre valley carries 150 m of channel across the
      parcel and 13 eligible on-parcel splits, and returned no keypoint at
      all, because its best fit sat 47 m out. Since where a keypoint may sit
-     is known before any line is fitted, it belongs in the candidate set
-     (two_segment_keypoint_split's position_is_eligible), and the valley then
-     answers with its best ADMISSIBLE split. This is not a relaxed gate: the
-     margin is enforced exactly as before, and nothing beyond it is ever
-     returned -- what changed is that a valley is no longer silenced by a
-     split it was never allowed to use. Contrast the marsh gate, which stays
-     a filter on the chosen split for the reason recorded at its own call
-     site.
+     is known before any line is fitted, it belongs in the candidate set,
+     and the valley then answers with its best ADMISSIBLE split. This is not
+     a relaxed gate: the margin is enforced exactly as before, and nothing
+     beyond it is ever returned -- what changed is that a valley is no
+     longer silenced by a split it was never allowed to use.
+
+  6. Apply EVERY filter to every candidate, then select; never select, then
+     filter. The same lesson as #5, generalised once the epsilon fill made
+     the marsh gate hit it. With stems now routed through depressions, a
+     depression's own raw plunge can be the profile's best two-segment
+     split; while the marsh gate was a filter on the ONE chosen split, that
+     cost the valley its keypoint outright (the synthetic bowl in
+     test_keypoint_detection.py, test 1). The fit now scores every valid
+     split, each filter rejects candidates independently with a reason
+     code, and the best-residual survivor is the keypoint -- so a
+     contaminated best split costs its valley nothing but that split, and a
+     valley with no survivor reports why candidate by candidate. No filter
+     changed value or logic; on a profile where no filter rejects the
+     global best split, the answer is byte-identical to the single-split
+     search. KNOWN LIMIT, reported not fixed: filtering candidates does not
+     un-contaminate the RESIDUAL. On the synthetic bowl the residual keeps
+     falling toward the filled run, so the best surviving split is the
+     unfilled cell at its rim -- three cells below the true inflection.
+     Scoping the fit itself to unfilled ground is the remedy for that, and
+     a separate change; diagnose_keypoint_candidates.py counts how often a
+     real selection sits next to a fill-rejected split.
 
 A GATE THAT WAS TRIED AND IS DELIBERATELY NOT INCLUDED: a normalised two-
 segment residual gate (residual as a fraction of the profile's elevation
@@ -184,10 +206,10 @@ KEYPOINT_MIN_RUN_CELLS = 6
 # 13.23-acre reference property; NOT validated elsewhere. CONFIGURABLE.
 KEYPOINT_MIN_SLOPE_DROP_PCT = 3.0
 
-# The marsh gate. A keypoint whose fill depth (filled minus raw elevation at
-# the keypoint cell) exceeds this is sitting on ground the priority-flood
-# raised -- a pit/marsh whose steep-to-flat entrance is a filling artifact,
-# not landform. Small and nonzero so genuine near-zero fill (a cell barely
+# The marsh gate, applied to every candidate split (fix #6). A split whose
+# fill depth (filled minus raw elevation at the split cell) exceeds this is
+# sitting on ground the priority-flood raised -- a pit/marsh whose steep-to-
+# flat entrance is a filling artifact, not landform. Small and nonzero so genuine near-zero fill (a cell barely
 # touched by the flood) still passes. It is a SECOND, independent defense
 # alongside fix #1 (raw profiling): the inflection on a filled profile lands
 # at the pit RIM, where fill depth is ~0, so the fill gate alone would not
@@ -200,7 +222,8 @@ KEYPOINT_FILL_ARTIFACT_THRESHOLD_M = 0.15
 # extending past the property line are found and their stems run off it. This
 # distance is what "near the drawn boundary" means, and it does THREE things
 # in detect_keypoints(): a valley with no stem cell this close is dropped
-# before it is profiled; the two-segment fit may only choose among stem cells
+# before it is profiled; a candidate split further out is rejected
+# (REJECT_OFF_MARGIN), so the keypoint is only ever chosen among stem cells
 # this close; and the chosen keypoint is flagged and measured (on_parcel /
 # distance_outside_boundary_m). Nothing further outside is ever returned.
 #
@@ -419,6 +442,121 @@ def _line_residual_sum_of_squares(x: np.ndarray, y: np.ndarray) -> float:
     return float(np.sum(residual ** 2))
 
 
+# Rejection reason codes, one per EXISTING filter, carried by every candidate
+# split a filter turns away. The tuple order is the order the filters are
+# listed in detect_keypoints()'s docstring and the order a candidate's own
+# reasons are recorded in; it is not a precedence -- every filter is applied
+# to every candidate, and a candidate records EVERY filter it fails, so the
+# run-level tally counts fill-artifact contamination directly rather than
+# only where no earlier filter happened to fire first.
+REJECT_SLOPE_DROP = "slope_drop_below_min"
+REJECT_OFF_MARGIN = "outside_boundary_margin"
+REJECT_FILL_ARTIFACT = "fill_artifact"
+KEYPOINT_REJECTION_REASONS = (REJECT_SLOPE_DROP, REJECT_OFF_MARGIN, REJECT_FILL_ARTIFACT)
+
+
+def keypoint_split_candidates(
+    distance: np.ndarray,
+    elevation: np.ndarray,
+    slope_pct: np.ndarray,
+    min_run_cells: int,
+) -> list[dict]:
+    """
+    CANDIDATE GENERATION: the two-segment fit (fix #3) evaluated at EVERY
+    valid split position along the profile, not only the winning one.
+
+    For a split at stem cell index k, "above" is the upstream reach cells
+    [0..k] and "below" is the downstream reach cells [k..n-1] (the split cell
+    k -- the would-be keypoint -- is the shared endpoint of both fitted
+    lines). A position is VALID if and only if it satisfies the minimum-
+    segment-length constraint on both sides: k ranges over [min_run_cells,
+    n-1-min_run_cells], guaranteeing at least min_run_cells profile cells
+    (and slope samples) above and below. That is the same range the fit has
+    always searched; no other constraint is applied here, and nothing
+    outside the range ever enters the set.
+
+    Each candidate carries the figures the filters and the selection read:
+    'index' (k), 'slope_above_pct' / 'slope_below_pct' (mean smoothed slope
+    over the min_run_cells slopes just above / just below k), 'slope_drop_pct'
+    (above minus below), and 'residual' (the total residual sum of squares of
+    the two independent OLS lines, elevation vs distance). Returned in index
+    order, upstream -> downstream. A profile too short for any valid split
+    returns [].
+
+    The global argmin of 'residual' over this set is the profile's best two-
+    segment split with no filter applied; the keypoint the detector returns is
+    the best-residual candidate that survives every filter
+    (select_keypoint_candidate()).
+    """
+    n = len(elevation)
+    candidates = []
+    for k in range(min_run_cells, n - min_run_cells):
+        slope_above = float(np.mean(slope_pct[k - min_run_cells:k]))
+        slope_below = float(np.mean(slope_pct[k:k + min_run_cells]))
+        residual = (
+            _line_residual_sum_of_squares(distance[:k + 1], elevation[:k + 1])
+            + _line_residual_sum_of_squares(distance[k:], elevation[k:])
+        )
+        candidates.append(
+            {
+                "index": k,
+                "slope_above_pct": slope_above,
+                "slope_below_pct": slope_below,
+                "slope_drop_pct": slope_above - slope_below,
+                "residual": residual,
+            }
+        )
+    return candidates
+
+
+def global_argmin_candidate(candidates: list[dict]) -> Optional[dict]:
+    """
+    The candidate with the lowest fit residual, with NO filter applied -- the
+    profile's own best two-segment split. Ties go to the upstream-most
+    (lowest index) candidate, the same tie-break the fit has always had.
+    None for an empty set. Reported, never returned as a keypoint on its own
+    account: it is the reference the fall-through count is measured against.
+    """
+    if not candidates:
+        return None
+    return min(candidates, key=lambda cand: cand["residual"])
+
+
+def select_keypoint_candidate(candidates: list[dict]) -> Optional[dict]:
+    """
+    SELECTION: among the candidates that survived every filter (an empty
+    'rejected_by' list), the one with the best -- lowest -- fit residual. If
+    none survives, None: the valley produces no keypoint, and the rejected
+    candidates' reason codes are the record of why.
+
+    Ties go to the upstream-most (lowest index) survivor. With min() over a
+    list in index order this is the same first-strictly-lower rule the
+    retired single-split search applied, so on a profile where no filter
+    rejects the global argmin the selection IS the retired answer.
+
+    ELEVATION IS REPORTED, NEVER SELECTED ON. This is a decision, not an
+    omission, and it is recorded here where the choice is made. Yeomans'
+    keypoint is the inflection where the steep upper reach meets the gentle
+    lower one, and its value comes from BEING that inflection -- not from
+    being high. The two-segment residual is the detector's geometric
+    definition of "where the profile best divides into a steep line and a
+    gentle one"; ranking survivors by elevation instead would systematically
+    prefer weak inflections far up a long stem over the real one, trading a
+    detector with a geometric definition for one optimising a proxy. "Prefer
+    keypoints that can serve production" is a USE criterion and already
+    lives downstream, as the gravity relationship
+    (pipeline_context._attach_keypoint_feature_relationships()'s signed
+    elevation differential to the production areas and the water zone); it
+    does not belong in detection. Revisit only if the per-valley candidate
+    tables (detect_keypoints()'s diagnostics) show the fit-best survivor is
+    routinely a poor practical choice.
+    """
+    survivors = [cand for cand in candidates if not cand["rejected_by"]]
+    if not survivors:
+        return None
+    return min(survivors, key=lambda cand: cand["residual"])
+
+
 def two_segment_keypoint_split(
     distance: np.ndarray,
     elevation: np.ndarray,
@@ -428,53 +566,38 @@ def two_segment_keypoint_split(
     position_is_eligible=None,
 ) -> Optional[tuple[int, float, float, float, float]]:
     """
-    Locates the keypoint by the two-segment least-squares fit (fix #3), among
-    splits where slope actually drops (fix #4). This is the scale-free
-    definition of the keypoint: the split at which the long profile best
-    divides into a steep upper line and a gentle lower one.
+    The two-segment keypoint fit (fix #3) over a bare profile, restricted to
+    splits where slope actually drops (fix #4) and, optionally, to positions
+    satisfying position_is_eligible (a k -> bool predicate standing in for
+    the boundary margin, fix #5; a failure is recorded as REJECT_OFF_MARGIN).
+    Composed from the same pieces detect_keypoints() uses --
+    keypoint_split_candidates(), per-candidate filters,
+    select_keypoint_candidate() -- over a bare profile with no stem cells,
+    so the fill-depth filter has nothing to read and is not applied. The
+    tests drive the fit through this on hand-built profiles.
 
-    For a candidate split at stem cell index k, "above" is the upstream reach
-    cells [0..k] and "below" is the downstream reach cells [k..n-1] (the split
-    cell k -- the keypoint -- is the shared endpoint of both fitted lines). k
-    ranges over [min_run_cells, n-1-min_run_cells], guaranteeing at least
-    min_run_cells profile cells (and slope samples) on each side. A split is
-    ELIGIBLE only if the mean slope over the min_run_cells slopes just above k
-    exceeds the mean over the min_run_cells just below by at least
-    min_slope_drop_pct -- without this the fit can settle where slope
-    increases downstream, the opposite of a keypoint.
-
-    position_is_eligible, when given, is an additional per-position predicate
-    (k -> bool) narrowing the candidate set BEFORE the fit chooses. It exists
-    for the boundary margin (see detect_keypoints): a constraint on WHERE a
-    keypoint may sit has to be part of the choice, not a filter applied to the
-    choice, or a valley whose best-fitting split falls outside the constraint
-    reports nothing at all rather than its best admissible split. Omitted, the
-    candidate set is exactly the slope-dropping positions, as before.
-
-    Among eligible splits, the chosen k minimises the total residual sum of
-    squares of the two independent OLS lines (elevation vs distance). Returns
-    (k, slope_above_pct, slope_below_pct, slope_drop_pct, total_residual), or
-    None if no eligible split exists (too short a profile, slope never drops
-    by the required amount, or nothing satisfying position_is_eligible -- the
-    honest "no keypoint here" answer).
+    Returns (k, slope_above_pct, slope_below_pct, slope_drop_pct,
+    total_residual) for the best-residual surviving split, or None if none
+    survives (too short a profile, slope never drops by the required amount,
+    or nothing satisfying position_is_eligible).
     """
-    n = len(elevation)
-    best = None
-    for k in range(min_run_cells, n - min_run_cells):
-        slope_above = float(np.mean(slope_pct[k - min_run_cells:k]))
-        slope_below = float(np.mean(slope_pct[k:k + min_run_cells]))
-        slope_drop = slope_above - slope_below
-        if slope_drop < min_slope_drop_pct:
-            continue
-        if position_is_eligible is not None and not position_is_eligible(k):
-            continue
-        residual = (
-            _line_residual_sum_of_squares(distance[:k + 1], elevation[:k + 1])
-            + _line_residual_sum_of_squares(distance[k:], elevation[k:])
-        )
-        if best is None or residual < best[4]:
-            best = (k, slope_above, slope_below, slope_drop, residual)
-    return best
+    candidates = keypoint_split_candidates(distance, elevation, slope_pct, min_run_cells)
+    for cand in candidates:
+        cand["rejected_by"] = []
+        if cand["slope_drop_pct"] < min_slope_drop_pct:
+            cand["rejected_by"].append(REJECT_SLOPE_DROP)
+        if position_is_eligible is not None and not position_is_eligible(cand["index"]):
+            cand["rejected_by"].append(REJECT_OFF_MARGIN)
+    chosen = select_keypoint_candidate(candidates)
+    if chosen is None:
+        return None
+    return (
+        chosen["index"],
+        chosen["slope_above_pct"],
+        chosen["slope_below_pct"],
+        chosen["slope_drop_pct"],
+        chosen["residual"],
+    )
 
 
 def _stem_boundary_margin(stem: list, dem: dict, boundary_polygon_utm) -> list:
@@ -531,32 +654,59 @@ def detect_keypoints(
 
     Per valley: the outlet is the highest-accumulation branch endpoint; the
     main stem is traced upstream from it (trace_stem_from_outlet()); the RAW-
-    elevation long profile is sampled and smoothed along the stem; the
-    keypoint is the two-segment-fit split among slope-dropping positions
-    WITHIN boundary_margin_meters of the drawn boundary
-    (two_segment_keypoint_split()).
+    elevation long profile is sampled and smoothed along the stem; then
+    CANDIDATES -> FILTERS -> SELECTION (fix #6):
+      * candidates: every valid split (keypoint_split_candidates() -- at
+        least min_run_cells profile cells on each side);
+      * filters, each applied to every candidate independently, each
+        recording its reason code on the candidate: slope drop below
+        min_slope_drop_pct (REJECT_SLOPE_DROP); more than
+        boundary_margin_meters outside the drawn boundary
+        (REJECT_OFF_MARGIN); on ground the fill raised by more than
+        fill_artifact_threshold_m (REJECT_FILL_ARTIFACT, the marsh gate);
+      * selection: the surviving candidate with the lowest fit residual
+        (select_keypoint_candidate(), where the decision NOT to select on
+        elevation is recorded).
 
-    Gates -- a valley yields NO keypoint if:
+    Valley gates -- a valley yields NO keypoint if:
       * its stem is shorter than 2 * min_run_cells + 2 cells (too short to
         hold a steep run, a gentle run, and a split between them);
       * no stem cell at all is within boundary_margin_meters of the drawn
         boundary (the valley is somewhere else in the buffered DEM window and
         has nothing to say about this property);
-      * no split has a slope drop of at least min_slope_drop_pct (the profile
-        is effectively straight -- no inflection);
-      * every such split is more than boundary_margin_meters outside the
-        drawn boundary;
-      * the chosen split sits on ground the fill raised by more than
-        fill_artifact_threshold_m (the marsh gate).
-    The margin CONSTRAINS THE CHOICE; the marsh gate FILTERS IT. See the
-    inline comments at each -- the order is the point, not an accident.
+      * no candidate survives the filters. Counted under the retired names,
+        told apart in the retired order: rejected_no_slope_drop (no split
+        drops slope -- the profile is effectively straight),
+        rejected_off_margin (some do, none inside the margin),
+        rejected_fill_artifact (some pass both, and every one of those sits
+        on filled ground).
     There is deliberately NO catchment gate, NO deduplication, NO production
     exclusion, and NO residual/normalised-fit gate (see the module
     docstring for why each was rejected).
 
-    diagnostics, if a dict is passed, is populated in place with the per-
-    valley stem/gate breakdown -- a reporting hook only; it does not affect
-    the return value. _profile_from_filled is a test-only hook that profiles
+    diagnostics, if a dict is passed, is populated in place -- a reporting
+    hook only; it does not affect the return value. It carries the valley-
+    level counters above, plus:
+      'fall_through_valleys'       valleys whose selected keypoint is not
+                                   the global best-residual split;
+      'fill_fall_through_valleys'  the subset where the fill gate rejected
+                                   the split the pre-fall-through search
+                                   would have chosen, and the valley kept a
+                                   keypoint anyway;
+      'candidate_rejections'       {reason code: count}, every reason of
+                                   every rejected candidate, across the run;
+      'valley_candidates'          per profiled valley: valley_id,
+                                   stem_length_cells, global_argmin_index,
+                                   pre_fill_best_index, selected_index,
+                                   fall_through, fill_fall_through, outcome,
+                                   and 'candidates' -- every candidate with
+                                   index, rowcol, elevation_m,
+                                   contributing_acres, slope_above/below/
+                                   drop_pct, residual, on_parcel,
+                                   distance_outside_boundary_m, fill_depth_m,
+                                   rejected_by (reason codes) and outcome
+                                   ('selected' / 'survived' / 'rejected').
+    diagnose_keypoint_candidates.py prints it as tables. _profile_from_filled is a test-only hook that profiles
     the FILLED array instead of raw, to demonstrate fix #1's failure mode;
     never set it on a real path.
 
@@ -608,7 +758,18 @@ def detect_keypoints(
         "rejected_fill_artifact": 0,
         "rejected_off_margin": 0,
         "surviving": 0,
+        # Valleys whose selected keypoint is NOT the global best-residual
+        # split, i.e. where some filter turned the global best away and a
+        # lower-ranked candidate answered. fill_fall_through_valleys is the
+        # subset fix #6 added: the fill-artifact gate rejected the split the
+        # single-split search would have returned, and the valley kept a
+        # keypoint anyway (under that search, it lost it).
+        "fall_through_valleys": 0,
+        "fill_fall_through_valleys": 0,
+        # Every rejected candidate's every reason, tallied across the run.
+        "candidate_rejections": {reason: 0 for reason in KEYPOINT_REJECTION_REASONS},
     }
+    valley_candidates: list[dict] = []
 
     survivors: list[dict] = []
     for valley in valleys:
@@ -640,60 +801,113 @@ def detect_keypoints(
 
         # Distance, smoothed elevation, and smoothed slope all come from one
         # pass over the SAME profile array (raw on the real path -- fix #1);
-        # the fit's residual reads elevation-vs-distance, the eligibility
-        # window reads slope.
+        # the fit's residual reads elevation-vs-distance, the slope-drop
+        # filter reads slope.
         distance, elevation, slope_pct = _profile_along_stem(
             stem, profile_array, dem, profile_smooth_cells
         )
-        # THE MARGIN IS PART OF THE CHOICE, not a filter on it. Fitting first
-        # and testing the winner afterwards loses a valley that runs through
-        # the parcel whenever its globally best-fitting split happens to land
-        # further out in the buffer than the margin allows -- the valley then
-        # reports nothing, though it holds admissible splits the fit was never
-        # asked to rank. Measured on the reference property: the 8.17-acre
-        # valley carries 150 m of channel across the parcel and 13 on-parcel
-        # eligible splits, and reported no keypoint at all because its best
-        # fit sat 47 m out.
-        split = two_segment_keypoint_split(
-            distance,
-            elevation,
-            slope_pct,
-            min_run_cells,
-            min_slope_drop_pct,
-            position_is_eligible=within_margin,
+
+        # CANDIDATES -> FILTERS -> SELECTION. Every valid split is a
+        # candidate; each existing filter is applied to each candidate
+        # independently, recording every reason it fails; the best-residual
+        # survivor is the keypoint. A contaminated best split therefore no
+        # longer costs the valley its keypoint -- the next-best survivor
+        # answers -- and a valley with no survivor says why, candidate by
+        # candidate.
+        candidates = keypoint_split_candidates(distance, elevation, slope_pct, min_run_cells)
+        for cand in candidates:
+            k = cand["index"]
+            r, c = stem[k]
+            _point, on_parcel, distance_outside = stem_margin[k]
+            fill_depth = float(filled[r, c]) - float(raw_array[r, c])
+            cand["rowcol"] = (r, c)
+            cand["elevation_m"] = float(raw_array[r, c])
+            cand["contributing_acres"] = float(flow_accumulation[r, c]) * area_per_cell
+            cand["on_parcel"] = on_parcel
+            cand["distance_outside_boundary_m"] = distance_outside
+            cand["fill_depth_m"] = fill_depth
+            rejected_by = []
+            # Fix #4: slope must actually drop across the split.
+            if cand["slope_drop_pct"] < min_slope_drop_pct:
+                rejected_by.append(REJECT_SLOPE_DROP)
+            # Fix #5: the boundary margin. Applying it per candidate is what
+            # "the margin constrains the choice" always meant -- a valley that
+            # runs through the parcel answers with its best ADMISSIBLE split
+            # (measured on the reference property: the 8.17-acre valley's best
+            # fit sat 47 m out while it held 13 eligible on-parcel splits).
+            if not within_margin(k):
+                rejected_by.append(REJECT_OFF_MARGIN)
+            # The marsh gate: a split on ground the fill raised by more than
+            # fill_artifact_threshold_m is a filling artifact, not landform.
+            # It used to be a filter on the ONE chosen split, so a valley
+            # whose best split sat on filled ground lost its keypoint outright
+            # -- which, once the epsilon fill routed stems through
+            # depressions, meant a depression's own plunge could silence a
+            # valley holding a real inflection above it. Per candidate, the
+            # artifact split is still never returned; the valley's next-best
+            # split on real ground answers instead.
+            if fill_depth > fill_artifact_threshold_m:
+                rejected_by.append(REJECT_FILL_ARTIFACT)
+            cand["rejected_by"] = rejected_by
+            for reason in rejected_by:
+                stats["candidate_rejections"][reason] += 1
+
+        chosen = select_keypoint_candidate(candidates)
+        best_overall = global_argmin_candidate(candidates)
+        # The split the retired single-split search returned before its fill
+        # gate: the best-residual candidate passing slope drop and margin.
+        # Kept only for the report -- it is what "the previous best" means
+        # for a valley the fall-through now rescues.
+        pre_fill_best = min(
+            (
+                cand for cand in candidates
+                if REJECT_SLOPE_DROP not in cand["rejected_by"]
+                and REJECT_OFF_MARGIN not in cand["rejected_by"]
+            ),
+            key=lambda cand: cand["residual"],
+            default=None,
         )
-        if split is None:
-            # Two honest "no keypoint" answers, told apart rather than
-            # merged: a profile with NO inflection anywhere, versus one whose
-            # inflections all lie further outside the boundary than the margin
-            # allows. Re-fit unconstrained only on this rejection path -- the
-            # answer is needed for the counters, never for the return value.
-            unconstrained = two_segment_keypoint_split(
-                distance, elevation, slope_pct, min_run_cells, min_slope_drop_pct
-            )
-            stats[
-                "rejected_no_slope_drop" if unconstrained is None else "rejected_off_margin"
-            ] += 1
+        for cand in candidates:
+            cand["outcome"] = "selected" if cand is chosen else ("rejected" if cand["rejected_by"] else "survived")
+
+        valley_record = {
+            "valley_id": int(valley["id"]),
+            "stem_length_cells": len(stem),
+            "global_argmin_index": None if best_overall is None else best_overall["index"],
+            "pre_fill_best_index": None if pre_fill_best is None else pre_fill_best["index"],
+            "selected_index": None if chosen is None else chosen["index"],
+            "fall_through": chosen is not None and chosen is not best_overall,
+            "fill_fall_through": chosen is not None and pre_fill_best is not None and chosen is not pre_fill_best,
+            "outcome": None,
+            "candidates": candidates,
+        }
+        valley_candidates.append(valley_record)
+
+        if chosen is None:
+            # No survivor. The valley-level counter keeps the retired
+            # meaning, told apart in the retired order: NO split drops slope
+            # anywhere; some do, but none inside the margin; some pass both,
+            # but every one of those sits on filled ground.
+            if pre_fill_best is not None:
+                outcome = "rejected_fill_artifact"
+            elif any(REJECT_SLOPE_DROP not in cand["rejected_by"] for cand in candidates):
+                outcome = "rejected_off_margin"
+            else:
+                outcome = "rejected_no_slope_drop"
+            stats[outcome] += 1
+            valley_record["outcome"] = outcome
             continue
 
-        k, slope_above, slope_below, slope_drop, _residual = split
-        r, c = stem[k]
+        valley_record["outcome"] = "selected"
+        if valley_record["fall_through"]:
+            stats["fall_through_valleys"] += 1
+        if valley_record["fill_fall_through"]:
+            stats["fill_fall_through_valleys"] += 1
 
-        # The marsh gate stays a filter on the chosen split rather than a
-        # constraint on the choice, deliberately. The margin describes the
-        # DRAWN LINE, which is a hand-traced approximation, so choosing within
-        # it is choosing on better information; fill depth describes the
-        # GROUND, and a valley whose best inflection sits on ground the flood
-        # raised has a real problem that "no keypoint here" reports honestly.
-        fill_depth = float(filled[r, c]) - float(raw_array[r, c])
-        if fill_depth > fill_artifact_threshold_m:
-            stats["rejected_fill_artifact"] += 1
-            continue
-
+        k = chosen["index"]
+        r, c = chosen["rowcol"]
         point, on_parcel, distance_outside = stem_margin[k]
         x, y = point.x, point.y
-
-        contributing_acres = float(flow_accumulation[r, c]) * area_per_cell
         lon, lat = warp_transform(dem["crs"], "EPSG:4326", [x], [y])
 
         survivors.append(
@@ -702,11 +916,11 @@ def detect_keypoints(
                 "rowcol": (r, c),
                 "point_utm": point,
                 "geometry_wgs84": {"type": "Point", "coordinates": (lon[0], lat[0])},
-                "elevation_m": round(float(raw_array[r, c]), 2),
-                "contributing_acres": round(contributing_acres, 2),
-                "slope_above_pct": round(slope_above, 2),
-                "slope_below_pct": round(slope_below, 2),
-                "slope_drop_pct": round(slope_drop, 2),
+                "elevation_m": round(chosen["elevation_m"], 2),
+                "contributing_acres": round(chosen["contributing_acres"], 2),
+                "slope_above_pct": round(chosen["slope_above_pct"], 2),
+                "slope_below_pct": round(chosen["slope_below_pct"], 2),
+                "slope_drop_pct": round(chosen["slope_drop_pct"], 2),
                 "stem_length_cells": len(stem),
                 "position_along_stem": int(k),
                 "on_parcel": on_parcel,
@@ -725,10 +939,12 @@ def detect_keypoints(
     stats["surviving"] = len(survivors)
     if diagnostics is not None:
         diagnostics.update(stats)
+        diagnostics["valley_candidates"] = valley_candidates
 
     _LOGGER.info(
         "keypoint detection: valleys=%d rejected(short_stem=%d valley_off_margin=%d "
-        "no_slope_drop=%d fill_artifact=%d off_margin=%d) surviving=%d",
+        "no_slope_drop=%d fill_artifact=%d off_margin=%d) surviving=%d "
+        "fall_through=%d (fill=%d) candidate_rejections=%s",
         stats["valleys"],
         stats["rejected_short_stem"],
         stats["rejected_valley_off_margin"],
@@ -736,6 +952,9 @@ def detect_keypoints(
         stats["rejected_fill_artifact"],
         stats["rejected_off_margin"],
         stats["surviving"],
+        stats["fall_through_valleys"],
+        stats["fill_fall_through_valleys"],
+        stats["candidate_rejections"],
     )
 
     return survivors
