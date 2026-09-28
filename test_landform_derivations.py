@@ -8,8 +8,9 @@ session, so every product below is read the way the report job reads it.
 
   1. THE FIXTURE PINS THE DERIVATION: valleys and keypoints recomputed
      from the stored DEM match the stored copy cell for cell -- 4
-     valleys; 3 keypoints, 2 on the parcel and 1 just outside it, 19.6 m
-     from the boundary.
+     valleys; 3 keypoints, 2 on the parcel and 1 just outside it, 24.2 m
+     from the boundary (the highest-survivor selection; 19.6 m under the
+     best-residual one).
   2. THE CALL COUNT: building the section from the session calls
      delineate_valleys() and detect_keypoints() ZERO times and the flow
      pass (fill_and_resolve, compute_flow_direction,
@@ -93,8 +94,11 @@ for got, stored in zip(keypoints, STORED["keypoints"]):
     for field in stored:
         assert got[field] == stored[field], (field, got[field], stored[field])
 assert [kp["on_parcel"] for kp in keypoints] == [True, True, False]
-assert keypoints[2]["valley_id"] == 2 and keypoints[2]["distance_outside_boundary_m"] == 19.55
-assert keypoints[1]["rowcol"] == (66, 25) and keypoints[1]["elevation_m"] == 333.5, "the keypoint the margin fix recovered"
+assert keypoints[2]["valley_id"] == 2 and keypoints[2]["distance_outside_boundary_m"] == 24.19
+# Valley 8's keypoint: recovered by the margin fix at (66, 25), 333.50 m;
+# moved by the highest-survivor selection to the top of the same survivor
+# block, (54, 34), 342.26 m.
+assert keypoints[1]["rowcol"] == (54, 34) and keypoints[1]["elevation_m"] == 342.26
 print(f"   4 valleys {[v['id'] for v in valleys]}; 3 keypoints, 2 on the parcel, 1 at "
       f"{keypoints[2]['distance_outside_boundary_m']} m outside; retrieved {STORED['retrieved_on']}")
 
@@ -195,7 +199,10 @@ for keyline in DERIVED.keylines:
     assert keyline["on_parcel"] is not None and keyline["on_parcel"].within(real.BOUNDARY_POLYGON_UTM.buffer(0.01))
     assert abs(keyline["length_on_parcel_m"] - keyline["on_parcel"].length) < 1e-9
 ends = {k["keypoint_id"]: [("edge" if e["at_window_edge"] else "divide") for e in k["ends"]] for k in DERIVED.keylines}
-assert ends[0] == ["divide", "divide"] and ends[1] == ["divide", "divide"] and sorted(ends[2]) == ["divide", "edge"], ends
+# All three end at divides on both sides. Valley 2's used to run to the DEM
+# window's edge on one side; its keypoint now sits 8.9 m higher (the highest-
+# survivor selection), and its contour closes on the divide inside the window.
+assert ends[0] == ["divide", "divide"] and ends[1] == ["divide", "divide"] and ends[2] == ["divide", "divide"], ends
 outside = [k for k in DERIVED.keylines if not k["keypoint_on_parcel"]]
 assert len(outside) == 1 and outside[0]["valley_id"] == 2 and 140 < outside[0]["length_on_parcel_m"] < 165
 total_ft = sum(k["length_on_parcel_m"] for k in DERIVED.keylines) / METERS_PER_FOOT
@@ -226,8 +233,8 @@ assert all(abs(profile["distance_m"][i + 1] - profile["distance_m"][i] - steps[i
 assert profile["distance_m"][0] == 0.0 and profile["elevation_m"][0] > profile["elevation_m"][-1], "upstream first"
 kp = profile["keypoint"]
 assert kp["index"] == keypoints[2]["position_along_stem"] and stem[kp["index"]] == keypoints[2]["rowcol"]
-assert kp["grade_above_pct"] == keypoints[2]["slope_above_pct"] == 8.88 and kp["grade_below_pct"] == 5.87
-assert kp["on_parcel"] is False and kp["distance_outside_boundary_m"] == 19.55
+assert kp["grade_above_pct"] == keypoints[2]["slope_above_pct"] == 14.93 and kp["grade_below_pct"] == 11.5
+assert kp["on_parcel"] is False and kp["distance_outside_boundary_m"] == 24.19
 # The detector's grades are the means of its smoothed slope over min_run cells either side of the split.
 distance, elevation, slope = keypoint_detection._profile_along_stem(stem, arr, DEM, keypoint_detection.KEYPOINT_PROFILE_SMOOTH_CELLS)
 run = keypoint_detection.KEYPOINT_MIN_RUN_CELLS
@@ -243,7 +250,7 @@ chart = SECTION["profile"]["chart"]
 assert chart["exaggeration"] == 3 and isinstance(chart["exaggeration"], int)
 assert len(chart["boundary_ticks_x"]) == 2 and chart["keypoint_xy"] is not None
 assert abs(chart["y_per_ft"] / chart["x_per_ft"] - 3.0) < 1e-9, "the exaggeration is the ratio of the scales"
-assert "parcel boundary" in chart["svg"] and "8.9% above" in chart["svg"] and "5.9% below" in chart["svg"]
+assert "parcel boundary" in chart["svg"] and "14.9% above" in chart["svg"] and "11.5% below" in chart["svg"]
 assert set(re.findall(r'(?:fill|stroke)="(#[0-9a-fA-F]{6})"', chart["svg"])) <= set(TOKENS.values())
 print(f"   stem {len(stem)} cells, {profile['distance_m'][-1]:.0f} m; keypoint at {kp['distance_m']:.0f} m, "
       f"{kp['grade_above_pct']}% -> {kp['grade_below_pct']}%; crossings at "
@@ -277,9 +284,9 @@ print("   rows " + "; ".join(f"valley {r['valley_id']} -> {r['number']}: {r['len
 # ======================================================================
 print("7. the counting rule, the table, the figures; the no-keypoint statement on the synthetic parcel")
 statement = _text(SECTION["keypoint_statement"])
-assert statement == ("3 keypoints: 2 on the property and 1 just outside the boundary, within 64 ft of it; "
+assert statement == ("3 keypoints: 2 on the property and 1 just outside the boundary, within 79 ft of it; "
                      "its keyline still crosses the parcel and is drawn."), statement
-assert {"value": "3"} in SECTION["keypoint_statement"] and {"value": "64 ft"} in SECTION["keypoint_statement"]
+assert {"value": "3"} in SECTION["keypoint_statement"] and {"value": "79 ft"} in SECTION["keypoint_statement"]
 figures = {f["label"]: f["value"] for f in SECTION["key_figures"]}
 assert list(figures) == ["lowest elevation", "highest elevation", "relief", "mean slope", "dominant aspect",
                          "keypoints detected, 1 just outside the boundary", "valleys on the parcel", "ridges on the parcel",
@@ -295,12 +302,12 @@ for row, derived_row in zip(table["rows"], rows_):
     assert row["cells"][0] == f"{round(derived_row['length_m'] / METERS_PER_FOOT):,}"
     assert row["cells"][3] == f"{round(derived_row['keypoint']['elevation_m'] / METERS_PER_FOOT):,}"
     assert re.match(r"^\d+\.\d$", row["cells"][2]) and re.match(r"^\d+\.\d$", row["cells"][4])
-assert table["rows"][0]["cells"][3] == "1,109" and table["rows"][0]["cells"][4:] == ["8.9", "5.9"]
+assert table["rows"][0]["cells"][3] == "1,138" and table["rows"][0]["cells"][4:] == ["14.9", "11.5"]
 caption = _text(SECTION["valley_table_caption"])
-assert "Valley 1's keypoint lies 64 ft outside the boundary." in caption
+assert "Valley 1's keypoint lies 79 ft outside the boundary." in caption
 profile_caption = _text(SECTION["profile"]["caption"])
 assert profile_caption.startswith("Valley 1, the full stem from its head") and "vertical exaggeration 3×" in profile_caption
-assert "64 ft outside the boundary" in profile_caption
+assert "79 ft outside the boundary" in profile_caption
 # The table with a valley lacking a keypoint reads dashes.
 dashed = ls.build_valley_table(none)
 assert all(r["cells"][3:] == [ZERO_DASH] * 3 for r in dashed["rows"])
@@ -342,24 +349,24 @@ assert f'stroke="{TOKENS["ink"]}"' in keyline_group and f'stroke-width="{ls.KEYL
 # dot). On this parcel the two short keylines (89 and 84 m) cannot carry theirs, so their elevations are set
 # beside the dots.
 keyline_layer = [l for l in structure_layers if l["id"] == "keylines"][0]
-assert keyline_layer["labels"] == ["1,173", "1,094", "1,109"]
+assert keyline_layer["labels"] == ["1,177", "1,123", "1,138"]
 for g, k in zip(keyline_layer["geometries"], DERIVED.keylines):
     if k["keypoint_on_parcel"]:
         endpoints = [Point(c) for part in _parts(g) for c in (part.coords[0], part.coords[-1])]
         assert len(_parts(g)) >= 2 and min(e.distance(by_keypoint[k["keypoint_id"]]["point_utm"]) for e in endpoints) < 0.2, "split at the keypoint"
 placed = set(re.findall(r">([\d,]+)</text>", keyline_group))
-assert placed == {"1,109"}, placed
+assert placed == {"1,138"}, placed
 assert SECTION["structure_map"]["labels_placed"]["keylines"] == [False, False, True]
-# ...so those two elevations are set beside their keypoints' dots instead, and 1,109's is not.
+# ...so those two elevations are set beside their keypoints' dots instead, and 1,138's is not.
 keypoint_layer = [l for l in structure_layers if l["id"] == "keypoints"][0]
-assert keypoint_layer["labels"] == ["1,173", "1,094"] and [l for l in structure_layers if l["id"] == "keypoints-outside"][0]["labels"] == [None]
+assert keypoint_layer["labels"] == ["1,177", "1,123"] and [l for l in structure_layers if l["id"] == "keypoints-outside"][0]["labels"] == [None]
 reach_group = structure.split('<g id="layer-keylines-outside">', 1)[1].split("</g>", 1)[0]
 assert f'stroke="{TOKENS["ink-muted"]}"' in reach_group, "the outside keypoint's keyline reaches it in the muted ink"
 outside_group = structure.split('<g id="layer-keypoints-outside">', 1)[1].split("</g>", 1)[0]
 assert outside_group.count("<circle") == 2 and f'fill="{TOKENS["ink-muted"]}"' in outside_group, "one dot: a halo and a fill"
 on_group = structure.split('<g id="layer-keypoints">', 1)[1].split("</g>", 1)[0]
 assert on_group.count("<circle") == 4 and f'fill="{TOKENS["ink"]}"' in on_group and on_group.count(f'fill="{TOKENS["page"]}"') == 2
-assert {"1,173", "1,094"} == set(re.findall(r">([\d,]+)</text>", on_group)) and "<text" not in outside_group
+assert {"1,177", "1,123"} == set(re.findall(r">([\d,]+)</text>", on_group)) and "<text" not in outside_group
 caption_text = _text(SECTION["structure_caption"])
 assert caption_text.startswith("A keyline is the contour through its keypoint") and caption_text.endswith(statement)
 # The sources line and the methods entry the Site overview will render.
@@ -427,7 +434,7 @@ assert {"report-map", "report-chart", "caption"} <= _classes(pages[4]) and "data
 assert {"key-figures", "data-table", "source-footer"} <= _classes(pages[5]) and "report-map" not in _classes(pages[5])
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[3:])
 squash = "".join(flat.split())
-for expected in ("3keypoints:2onthepropertyand1justoutsidetheboundary", "verticalexaggeration3×", "Valley1'skeypointlies64ftoutside",
+for expected in ("3keypoints:2onthepropertyand1justoutsidetheboundary", "verticalexaggeration3×", "Valley1'skeypointlies79ftoutside",
                  "III·LANDFORM,CONTINUED", "Keylines,elevationinft"):
     assert expected in squash, expected
 assert squash.count("III·LANDFORM,CONTINUED") == 2

@@ -38,13 +38,14 @@ D8 hydrology):
         --> FILTERS, per candidate, each recording its reason code: slope
             must drop, the split must lie within the boundary margin, and it
             must not sit on ground the fill raised
-        --> SELECTION: the surviving candidate with the best fit residual
+        --> SELECTION: the surviving candidate standing HIGHEST by raw
+            elevation, ties to the best fit residual
             (select_keypoint_candidate()) -> one keypoint per valley, flagged
             on/off parcel; no survivor -> no keypoint, reasons recorded
 
-FIVE CRITERIA THAT FAILED, encoded here so they are not reintroduced (each
-was diagnosed from a real dead end -- see the tests for the executable
-form):
+SEVEN RULES, each encoded so the approach it replaced is not reintroduced
+(each was diagnosed from a real dead end or a real candidate table -- see the
+tests for the executable form):
 
   1. Profile the RAW elevation array, never the FILLED one.
      delineate_valleys() builds branches_utm from filled[r, c], and
@@ -117,7 +118,7 @@ form):
      cost the valley its keypoint outright (the synthetic bowl in
      test_keypoint_detection.py, test 1). The fit now scores every valid
      split, each filter rejects candidates independently with a reason
-     code, and the best-residual survivor is the keypoint -- so a
+     code, and a survivor is selected (fix #7) -- so a
      contaminated best split costs its valley nothing but that split, and a
      valley with no survivor reports why candidate by candidate. No filter
      changed value or logic; on a profile where no filter rejects the
@@ -128,7 +129,29 @@ form):
      unfilled cell at its rim -- three cells below the true inflection.
      Scoping the fit itself to unfilled ground is the remedy for that, and
      a separate change; diagnose_keypoint_candidates.py counts how often a
-     real selection sits next to a fill-rejected split.
+     real selection sits next to a fill-rejected split. (Under fix #7's
+     highest-survivor rule the bowl's selection moves off the rim, to the
+     top of the real-ground block; the residual contamination is unchanged
+     and still recorded.)
+
+  7. SELECT THE HIGHEST SURVIVOR, not the best residual. Once #6 exposed
+     the full survivor sets, they showed the filters are already the
+     geometric gate: a valley routinely holds a dozen consecutive
+     filter-passing splits, and the whole-stem residual systematically
+     picked the lowest of them. Choosing among qualified inflections is a
+     USE question, and a keypoint's use is the ground it commands by
+     gravity, which is monotone in elevation. The reasoning, the earlier
+     position it reverses, and the edge-cell consequence (the selection is
+     the top, weakest-drop cell of its block, so KEYPOINT_MIN_SLOPE_DROP_PCT
+     now moves every selection) are recorded at select_keypoint_candidate().
+
+A SELECTION RULE FLAGGED AND DELIBERATELY NOT BUILT: select the highest
+survivor whose slope drop is within some fraction of the best drop available
+among the valley's survivors -- trading a little elevation for a stronger
+break, and loosening the selection's dependence on the slope-drop constant.
+Deferred until the straight-elevation rule's per-valley drop gap
+(diagnose_keypoint_candidates.py prints it every run) shows whether that gap
+matters on real ground.
 
 A GATE THAT WAS TRIED AND IS DELIBERATELY NOT INCLUDED: a normalised two-
 segment residual gate (residual as a fraction of the profile's elevation
@@ -525,36 +548,67 @@ def global_argmin_candidate(candidates: list[dict]) -> Optional[dict]:
 def select_keypoint_candidate(candidates: list[dict]) -> Optional[dict]:
     """
     SELECTION: among the candidates that survived every filter (an empty
-    'rejected_by' list), the one with the best -- lowest -- fit residual. If
-    none survives, None: the valley produces no keypoint, and the rejected
+    'rejected_by' list), the one standing HIGHEST by raw elevation
+    ('elevation_m'). Ties on elevation go to the lowest fit residual -- the
+    retired selection rule kept as the tiebreak -- and then to the upstream-
+    most (lowest index) candidate, so the answer is deterministic. If none
+    survives, None: the valley produces no keypoint, and the rejected
     candidates' reason codes are the record of why.
 
-    Ties go to the upstream-most (lowest index) survivor. With min() over a
-    list in index order this is the same first-strictly-lower rule the
-    retired single-split search applied, so on a profile where no filter
-    rejects the global argmin the selection IS the retired answer.
+    WHY ELEVATION, AND WHY THIS REVERSES AN EARLIER DECISION. Both positions
+    are recorded, because the evidence moved the choice rather than
+    overturning the argument.
 
-    ELEVATION IS REPORTED, NEVER SELECTED ON. This is a decision, not an
-    omission, and it is recorded here where the choice is made. Yeomans'
-    keypoint is the inflection where the steep upper reach meets the gentle
-    lower one, and its value comes from BEING that inflection -- not from
-    being high. The two-segment residual is the detector's geometric
-    definition of "where the profile best divides into a steep line and a
-    gentle one"; ranking survivors by elevation instead would systematically
-    prefer weak inflections far up a long stem over the real one, trading a
-    detector with a geometric definition for one optimising a proxy. "Prefer
-    keypoints that can serve production" is a USE criterion and already
-    lives downstream, as the gravity relationship
-    (pipeline_context._attach_keypoint_feature_relationships()'s signed
-    elevation differential to the production areas and the water zone); it
-    does not belong in detection. Revisit only if the per-valley candidate
-    tables (detect_keypoints()'s diagnostics) show the fit-best survivor is
-    routinely a poor practical choice.
+      The earlier position: select the best (lowest) two-segment residual,
+      never elevation. Yeomans' keypoint is the inflection where the steep
+      reach meets the gentle one, and its value comes from BEING that
+      inflection, not from being high; ranking by elevation would prefer weak
+      inflections far up a long stem over the real one, trading a geometric
+      definition for a proxy, and "can it serve production" is a use
+      criterion that already lives downstream as the gravity relationship.
+
+      Why it held, and then stopped holding. It was sound while the fit
+      returned ONE split per valley and the filters had not yet been shown
+      to qualify more than one. The candidate tables
+      (diagnose_keypoint_candidates.py) showed they qualify many: on the
+      reference property valley 8 has thirteen consecutive survivors
+      (indices 13-25, 342.26 down to 333.50 m) and valley 4 thirteen in two
+      blocks -- every one a slope-dropping, in-margin, unfilled split, i.e. a
+      keypoint by this module's own rules. The residual was not choosing
+      between an inflection and a non-inflection; it was minimising total
+      two-segment misfit over the WHOLE stem, which on these profiles
+      systematically prefers splits low down, where a practitioner reads the
+      sharpest local break. Once every survivor is a filter-passing
+      inflection, choosing among them is an APPLICATION question, and a
+      keypoint's practical value is the land it commands by gravity, which
+      is monotone in elevation. So elevation is the defensible basis: the
+      filters are the geometric gate, and selection is use.
+
+    The residual stays on the record -- on every candidate, as the tiebreak,
+    and in the diagnostics -- because it is how a strange survivor set gets
+    noticed.
+
+    THE EDGE-CELL CONSEQUENCE, ACCEPTED DELIBERATELY. Survivors come in
+    contiguous blocks along the stem, bounded by cells where the slope drop
+    crosses KEYPOINT_MIN_SLOPE_DROP_PCT (the other two filters bound blocks
+    too, but on real ground it is mostly this one). Elevation falls down the
+    stem, so "highest survivor" lands at the TOP EDGE of the highest block:
+    the cell immediately below a rejection. On the reference property that
+    is valley 8's index 13 at a 4.12% drop, directly below index 12 at
+    2.85%, while the block's strongest break is index 16 at 5.82%. So the
+    selected keypoint is systematically the WEAKEST-drop member of its own
+    block, and a small change to the slope-drop constant moves every
+    selection -- the constant is now load-bearing for WHERE a keypoint sits,
+    not only WHETHER one exists. This is known and accepted, not
+    overlooked; diagnose_keypoint_candidates.py prints, per valley, the
+    selected drop against the best drop among its survivors so the gap is
+    visible every run. The flagged alternative that would narrow it is in
+    the module docstring (deferred, not built).
     """
     survivors = [cand for cand in candidates if not cand["rejected_by"]]
     if not survivors:
         return None
-    return min(survivors, key=lambda cand: cand["residual"])
+    return min(survivors, key=lambda cand: (-cand["elevation_m"], cand["residual"], cand["index"]))
 
 
 def two_segment_keypoint_split(
@@ -570,11 +624,17 @@ def two_segment_keypoint_split(
     splits where slope actually drops (fix #4) and, optionally, to positions
     satisfying position_is_eligible (a k -> bool predicate standing in for
     the boundary margin, fix #5; a failure is recorded as REJECT_OFF_MARGIN).
-    Composed from the same pieces detect_keypoints() uses --
-    keypoint_split_candidates(), per-candidate filters,
-    select_keypoint_candidate() -- over a bare profile with no stem cells,
-    so the fill-depth filter has nothing to read and is not applied. The
-    tests drive the fit through this on hand-built profiles.
+    Built from keypoint_split_candidates() and the same per-candidate
+    filters detect_keypoints() applies, over a bare profile with no stem
+    cells, so the fill-depth filter has nothing to read and is not applied.
+
+    This is the FIT'S OWN answer -- the best-residual surviving split -- and
+    NOT the detector's selection: detect_keypoints() selects the HIGHEST
+    survivor by raw elevation (select_keypoint_candidate(), where the reason
+    is recorded), which a bare profile has no raw stem elevations to do. The
+    residual survives as that selection's tiebreak and on every candidate's
+    record; the tests drive the fit's definition (fixes #3-#5) through this
+    on hand-built profiles.
 
     Returns (k, slope_above_pct, slope_below_pct, slope_drop_pct,
     total_residual) for the best-residual surviving split, or None if none
@@ -588,9 +648,10 @@ def two_segment_keypoint_split(
             cand["rejected_by"].append(REJECT_SLOPE_DROP)
         if position_is_eligible is not None and not position_is_eligible(cand["index"]):
             cand["rejected_by"].append(REJECT_OFF_MARGIN)
-    chosen = select_keypoint_candidate(candidates)
-    if chosen is None:
+    survivors = [cand for cand in candidates if not cand["rejected_by"]]
+    if not survivors:
         return None
+    chosen = min(survivors, key=lambda cand: cand["residual"])
     return (
         chosen["index"],
         chosen["slope_above_pct"],
@@ -664,9 +725,10 @@ def detect_keypoints(
         boundary_margin_meters outside the drawn boundary
         (REJECT_OFF_MARGIN); on ground the fill raised by more than
         fill_artifact_threshold_m (REJECT_FILL_ARTIFACT, the marsh gate);
-      * selection: the surviving candidate with the lowest fit residual
-        (select_keypoint_candidate(), where the decision NOT to select on
-        elevation is recorded).
+      * selection: the surviving candidate standing highest by raw
+        elevation, ties to the lowest fit residual
+        (select_keypoint_candidate(), where the reasoning -- and the earlier
+        residual rule it replaced -- is recorded).
 
     Valley gates -- a valley yields NO keypoint if:
       * its stem is shorter than 2 * min_run_cells + 2 cells (too short to
@@ -687,18 +749,26 @@ def detect_keypoints(
     diagnostics, if a dict is passed, is populated in place -- a reporting
     hook only; it does not affect the return value. It carries the valley-
     level counters above, plus:
-      'fall_through_valleys'       valleys whose selected keypoint is not
-                                   the global best-residual split;
+      'fall_through_valleys'       valleys where a filter rejected the
+                                   global best-residual split and the valley
+                                   kept a keypoint anyway;
       'fill_fall_through_valleys'  the subset where the fill gate rejected
                                    the split the pre-fall-through search
                                    would have chosen, and the valley kept a
                                    keypoint anyway;
+      'selection_moved_valleys'    valleys whose selected (highest) survivor
+                                   is not the best-residual survivor;
       'candidate_rejections'       {reason code: count}, every reason of
                                    every rejected candidate, across the run;
       'valley_candidates'          per profiled valley: valley_id,
                                    stem_length_cells, global_argmin_index,
-                                   pre_fill_best_index, selected_index,
-                                   fall_through, fill_fall_through, outcome,
+                                   pre_fill_best_index,
+                                   fit_best_survivor_index, selected_index,
+                                   selected_slope_drop_pct,
+                                   best_survivor_slope_drop_pct/_index,
+                                   survivor_blocks ((first, last) index
+                                   runs), fall_through, fill_fall_through,
+                                   selection_moved, outcome,
                                    and 'candidates' -- every candidate with
                                    index, rowcol, elevation_m,
                                    contributing_acres, slope_above/below/
@@ -758,14 +828,16 @@ def detect_keypoints(
         "rejected_fill_artifact": 0,
         "rejected_off_margin": 0,
         "surviving": 0,
-        # Valleys whose selected keypoint is NOT the global best-residual
-        # split, i.e. where some filter turned the global best away and a
-        # lower-ranked candidate answered. fill_fall_through_valleys is the
-        # subset fix #6 added: the fill-artifact gate rejected the split the
-        # single-split search would have returned, and the valley kept a
+        # Valleys where some filter rejected the global best-residual split
+        # and the valley kept a keypoint anyway. fill_fall_through_valleys is
+        # the subset fix #6 added: the fill-artifact gate rejected the split
+        # the single-split search would have returned, and the valley kept a
         # keypoint anyway (under that search, it lost it).
         "fall_through_valleys": 0,
         "fill_fall_through_valleys": 0,
+        # Valleys whose selected (highest) survivor is not the one the
+        # retired residual rule would have picked among the same survivors.
+        "selection_moved_valleys": 0,
         # Every rejected candidate's every reason, tallied across the run.
         "candidate_rejections": {reason: 0 for reason in KEYPOINT_REJECTION_REASONS},
     }
@@ -809,8 +881,8 @@ def detect_keypoints(
 
         # CANDIDATES -> FILTERS -> SELECTION. Every valid split is a
         # candidate; each existing filter is applied to each candidate
-        # independently, recording every reason it fails; the best-residual
-        # survivor is the keypoint. A contaminated best split therefore no
+        # independently, recording every reason it fails; the highest
+        # survivor is the keypoint (select_keypoint_candidate()). A contaminated best split therefore no
         # longer costs the valley its keypoint -- the next-best survivor
         # answers -- and a valley with no survivor says why, candidate by
         # candidate.
@@ -857,7 +929,7 @@ def detect_keypoints(
         # The split the retired single-split search returned before its fill
         # gate: the best-residual candidate passing slope drop and margin.
         # Kept only for the report -- it is what "the previous best" means
-        # for a valley the fall-through now rescues.
+        # for a valley the fill gate used to silence.
         pre_fill_best = min(
             (
                 cand for cand in candidates
@@ -869,15 +941,44 @@ def detect_keypoints(
         )
         for cand in candidates:
             cand["outcome"] = "selected" if cand is chosen else ("rejected" if cand["rejected_by"] else "survived")
+        passing = [cand for cand in candidates if not cand["rejected_by"]]
+        # What the retired residual rule would have selected among these
+        # same survivors -- the record of how far the elevation rule moved.
+        fit_best = min(passing, key=lambda cand: cand["residual"], default=None)
+        # The strongest break available among the survivors, against which
+        # the selected (top-of-block, weakest-edge) drop is measured.
+        best_drop = max(passing, key=lambda cand: cand["slope_drop_pct"], default=None)
+        # Survivors as contiguous runs of stem index, so the edge-cell
+        # behaviour (selection at the top of the highest block) is visible.
+        blocks: list[list[int]] = []
+        for cand in passing:
+            if blocks and cand["index"] == blocks[-1][1] + 1:
+                blocks[-1][1] = cand["index"]
+            else:
+                blocks.append([cand["index"], cand["index"]])
 
         valley_record = {
             "valley_id": int(valley["id"]),
             "stem_length_cells": len(stem),
             "global_argmin_index": None if best_overall is None else best_overall["index"],
             "pre_fill_best_index": None if pre_fill_best is None else pre_fill_best["index"],
+            "fit_best_survivor_index": None if fit_best is None else fit_best["index"],
             "selected_index": None if chosen is None else chosen["index"],
-            "fall_through": chosen is not None and chosen is not best_overall,
-            "fill_fall_through": chosen is not None and pre_fill_best is not None and chosen is not pre_fill_best,
+            "selected_slope_drop_pct": None if chosen is None else chosen["slope_drop_pct"],
+            "best_survivor_slope_drop_pct": None if best_drop is None else best_drop["slope_drop_pct"],
+            "best_survivor_slope_drop_index": None if best_drop is None else best_drop["index"],
+            "survivor_blocks": [tuple(block) for block in blocks],
+            # A filter turned the global best-residual split away and the
+            # valley still has a keypoint.
+            "fall_through": chosen is not None and bool(best_overall["rejected_by"]),
+            # The fill gate rejected the split the single-split search would
+            # have returned (and then lost the valley over), and the valley
+            # still has a keypoint.
+            "fill_fall_through": chosen is not None and pre_fill_best is not None
+            and REJECT_FILL_ARTIFACT in pre_fill_best["rejected_by"],
+            # The elevation rule chose a different survivor than the residual
+            # rule would have.
+            "selection_moved": chosen is not None and chosen is not fit_best,
             "outcome": None,
             "candidates": candidates,
         }
@@ -903,6 +1004,8 @@ def detect_keypoints(
             stats["fall_through_valleys"] += 1
         if valley_record["fill_fall_through"]:
             stats["fill_fall_through_valleys"] += 1
+        if valley_record["selection_moved"]:
+            stats["selection_moved_valleys"] += 1
 
         k = chosen["index"]
         r, c = chosen["rowcol"]

@@ -40,20 +40,22 @@ Verification map (task's numbered list):
 
 Candidates -> filters -> selection (fix #6 in the module docstring):
   10. Regression: the global-argmin candidate is the split the retired
-      single-split search returned (a frozen copy of it is the oracle), and
-      with no filter rejecting it the selected keypoint is byte-identical to
-      the retired output -- synthetic and on the real reference terrain.
+      single-split search returned (a frozen copy of it is the oracle); the
+      filters are unchanged -- the survivor SET is byte-identical to the
+      candidate-set commit's (d1f3ee2), synthetic and on the real reference
+      terrain -- and only the selection within it moved.
   11. Fall-through: the bowl's best split is a fill artifact; the gate
-      rejects it, the best surviving split answers, the valley keeps a
-      keypoint.
+      rejects it, a surviving split answers, the valley keeps a keypoint.
   12. All candidates rejected: no keypoint, and every candidate's reasons
       recorded.
   13. Candidate validity: no split violating the minimum-segment-length
       constraint ever enters the set.
-  14. Elevation is not a selector: the highest surviving candidate is not
-      the best fit, and the best fit wins.
+  14. Highest-elevation selection: the highest survivor is selected over
+      the residual-best one (stated), at the top edge of its block.
   15. Output contract: one keypoint per valley, and every field a
       downstream consumer reads is present and unchanged in type.
+  16. Tie on elevation: the lowest residual wins, in every ordering.
+  17. A single survivor is selected, whatever its elevation or residual.
 """
 
 import inspect
@@ -223,13 +225,20 @@ _dem1 = _dem(_arr1)
 #   AND THEN FALL-THROUGH. The candidates -> filters -> selection branch
 #   is that later branch's second option: the fill gate now rejects the
 #   bowl's splits one by one rather than the valley, and the best split on
-#   real ground answers -- (27, 7). TEST 11 asserts the mechanism in full.
-#   Note what (27, 7) IS: the last unfilled cell above the bowl, its RIM,
-#   three rows below the true break at row 24. The residual surface itself
-#   is shaped by the depression, falling steadily toward it, so the best
-#   survivor is the one pressed up against the filled run. That is the
-#   contamination the other option -- scoping the fit to unfilled ground --
-#   would address, and it is flagged, not fixed, here.
+#   real ground answers. TEST 11 asserts the mechanism in full. Under the
+#   best-residual selection that answer was (27, 7): the last unfilled cell
+#   above the bowl, its RIM, three rows below the true break at row 24,
+#   because the residual surface itself is shaped by the depression and
+#   falls steadily toward it. That contamination is unchanged -- (27, 7) is
+#   still the best-residual survivor, and scoping the fit to unfilled ground
+#   is still its own branch.
+#
+#   AND THEN THE HIGHEST SURVIVOR. The keypoint is now the highest of the
+#   survivors (rows 17-27, one contiguous block), so the valley answers
+#   (17, 7) -- the top edge of that block, the cell directly below the first
+#   slope-drop rejection, and seven rows ABOVE the true break. The rim is no
+#   longer selected; the edge-cell consequence recorded at
+#   select_keypoint_candidate() is what replaced it.
 #
 # detect (RAW, the real path). What must hold, whatever the valley returns,
 # is that nothing inside the depression is ever RETURNED: the fill gate is
@@ -240,9 +249,9 @@ for _k in _kps1:
     assert _k["rowcol"][0] not in _BOWL_ROWS, (
         f"RAW profiling must not return a keypoint inside the depression, got {_k['rowcol']}"
     )
-assert [tuple(_k["rowcol"]) for _k in _kps1] == [(27, 7)], (
-    "the fill gate rejects the bowl's splits and the best split on real ground answers -- expected "
-    f"(27, 7), got {[k['rowcol'] for k in _kps1]}"
+assert [tuple(_k["rowcol"]) for _k in _kps1] == [(17, 7)], (
+    "the fill gate rejects the bowl's splits and the highest split on real ground answers -- expected "
+    f"(17, 7), got {[k['rowcol'] for k in _kps1]}"
 )
 assert _diag1["valleys"] == 1, _diag1
 assert _diag1["rejected_fill_artifact"] == 0 and _diag1["fill_fall_through_valleys"] == 1, (
@@ -252,9 +261,9 @@ assert _diag1["candidate_rejections"]["fill_artifact"] > 0, _diag1
 print(
     f"Test 1: detect (raw) never returns a cell inside the bowl. The stem crosses it (the epsilon fill "
     f"routes it), the fill gate rejects {_diag1['candidate_rejections']['fill_artifact']} bowl splits, "
-    f"and the valley falls through to {tuple(_kps1[0]['rowcol'])} -- the bowl's rim, not the true "
-    f"break at row 24 (see TEST 11). Under the plain fill the tracer stopped at the rim and returned "
-    f"(22, 7); under the single-split search it returned nothing."
+    f"and the valley falls through to {tuple(_kps1[0]['rowcol'])} -- the top of its real-ground block "
+    f"(see TEST 11). Under the plain fill the tracer stopped at the rim and returned (22, 7); under the "
+    f"single-split search it returned nothing; under best-residual selection, the rim (27, 7)."
 )
 
 # Inline raw-vs-filled contrast along the known center-column stem.
@@ -481,34 +490,44 @@ print(
 # asserted now: nothing further than the margin is ever returned. The old
 # assertion tested the implementation's order of operations, not that
 # invariant, which is why it moved.
+#
+# ANCHOR MOVED BY THE HIGHEST-SURVIVOR BRANCH. With the whole grid inside the
+# boundary the detector now selects (17, 7) -- the highest of the fifteen
+# surviving splits, rows 17-31 -- not the fit's (24, 7) (TEST 14 is that
+# change). The margin behaviour is anchored on whatever the unconstrained
+# selection is, so the boundaries now lie SOUTH of (17, 7): at 10 m and 20 m
+# it is kept and flagged; at 60 m it is inadmissible, and the highest
+# admissible survivor answers instead. (24, 7), the fit's own split, stays
+# named as _P6 because TEST 6b's fit-level checks are anchored on it.
 # ============================================================================
 _arr6 = _v_valley(_rows1, _cols1, _profile1, cross=2.0)
 _dem6 = _dem(_arr6)
 _kps6_full = detect_keypoints(_dem6, _full_boundary(_rows1, _cols1))
 assert len(_kps6_full) == 1, [k["rowcol"] for k in _kps6_full]
 _kp6 = _kps6_full[0]
-assert tuple(_kp6["rowcol"]) == (24, 7), _kp6["rowcol"]
-_P6 = _kp6["point_utm"]
+assert tuple(_kp6["rowcol"]) == (17, 7), _kp6["rowcol"]
+_P6_TOP = _kp6["point_utm"]
+_P6 = Point(*pixel_center_xy(_dem6, 24, 7))
 _kept6 = {}
 for _offset in (10.0, 20.0, 60.0):
-    # A box lying entirely to the north of P, its southern edge _offset metres away.
-    _bnd = box(_P6.x - 100.0, _P6.y + _offset, _P6.x + 100.0, _P6.y + _offset + 300.0)
-    assert not _bnd.contains(_P6)
+    # A box lying entirely to the SOUTH of the selection, its northern edge _offset metres away.
+    _bnd = box(_P6_TOP.x - 100.0, _P6_TOP.y - _offset - 300.0, _P6_TOP.x + 100.0, _P6_TOP.y - _offset)
+    assert not _bnd.contains(_P6_TOP)
     _res = detect_keypoints(_dem6, _bnd)
     _kept6[_offset] = _res
 
-# Inside the margin: the terrain's own split is returned, flagged and measured.
+# Inside the margin: the unconstrained selection is returned, flagged and measured.
 assert len(_kept6[10.0]) == 1 and _kept6[10.0][0]["on_parcel"] is False
-assert tuple(_kept6[10.0][0]["rowcol"]) == (24, 7)
+assert tuple(_kept6[10.0][0]["rowcol"]) == (17, 7)
 assert abs(_kept6[10.0][0]["distance_outside_boundary_m"] - 10.0) < 0.01
 assert len(_kept6[20.0]) == 1 and _kept6[20.0][0]["on_parcel"] is False
-assert tuple(_kept6[20.0][0]["rowcol"]) == (24, 7)
+assert tuple(_kept6[20.0][0]["rowcol"]) == (17, 7)
 assert abs(_kept6[20.0][0]["distance_outside_boundary_m"] - 20.0) < 0.01
 
-# Beyond it: (24, 7) is NOT returned, and whatever is returned is inside the
+# Beyond it: (17, 7) is NOT returned, and whatever is returned is inside the
 # margin -- the gate's actual guarantee, asserted over every case at once.
 assert all(
-    tuple(_k["rowcol"]) != (24, 7) for _k in _kept6[60.0]
+    tuple(_k["rowcol"]) != (17, 7) for _k in _kept6[60.0]
 ), "the split 60 m outside the boundary must never be the one chosen"
 for _offset, _res in _kept6.items():
     for _k in _res:
@@ -520,9 +539,9 @@ for _offset, _res in _kept6.items():
 _far6 = _kept6[60.0][0]
 print(
     f"Test 6: on the bowl-free landform DEM the unconstrained keypoint lands at {tuple(_kp6['rowcol'])} "
-    "(row 24 is the profile's true inflection). Kept at 10 m outside (on_parcel=False, distance="
+    "(the highest survivor). Kept at 10 m outside (on_parcel=False, distance="
     f"{_kept6[10.0][0]['distance_outside_boundary_m']} m) and at 20 m outside (distance="
-    f"{_kept6[20.0][0]['distance_outside_boundary_m']} m). With the boundary 60 m away row 24 is "
+    f"{_kept6[20.0][0]['distance_outside_boundary_m']} m). With the boundary 60 m away row 17 is "
     f"inadmissible and is not chosen; the valley offers {tuple(_far6['rowcol'])} instead, at "
     f"{_far6['distance_outside_boundary_m']} m -- inside the {KEYPOINT_BOUNDARY_MARGIN_METERS} m margin, "
     "which no returned keypoint in any case exceeds."
@@ -595,7 +614,15 @@ assert _held6b[0] == _best_admissible6b[0], (
     f"constrained fit chose split {_held6b[0]} (residual {_held6b[4]:.4f}) but the best "
     f"admissible split is {_best_admissible6b[0]} (residual {_best_admissible6b[4]:.4f})"
 )
-assert tuple(_stem6b[_held6b[0]]) == tuple(detect_keypoints(_dem6, _bnd6b)[0]["rowcol"])
+# detect_keypoints() selects the HIGHEST admissible survivor, not the fit's
+# answer; on this boundary the only admissible survivor is the fit's
+# constrained split, so the two coincide -- asserted as such, not as the
+# selection rule.
+_det6b = {}
+_kps6b = detect_keypoints(_dem6, _bnd6b, diagnostics=_det6b)
+_surv6b = [_c for _c in _det6b["valley_candidates"][0]["candidates"] if not _c["rejected_by"]]
+assert [_c["index"] for _c in _surv6b] == [_held6b[0]], [_c["index"] for _c in _surv6b]
+assert tuple(_stem6b[_held6b[0]]) == tuple(_kps6b[0]["rowcol"])
 
 _diag6b = {}
 _far_boundary6b = box(_P6.x - 100.0, _P6.y + 500.0, _P6.x + 100.0, _P6.y + 800.0)
@@ -612,7 +639,7 @@ print(
     f"(inadmissible, {_margin6b[_free6b[0]][2]:.1f} m outside) and the constrained fit picks "
     f"{_held6b[0]} -- the lowest-residual admissible split of "
     f"{sum(1 for _i in range(len(_elev6b)) if _admissible6b(_i))} cells within the margin, and the "
-    f"cell detect_keypoints returns. With the boundary 500 m out no stem cell is within the margin: "
+    f"only admissible survivor, so the cell detect_keypoints returns. With the boundary 500 m out no stem cell is within the margin: "
     f"[] returned, counted as rejected_valley_off_margin=1 (off_margin=0, no_slope_drop=0)."
 )
 
@@ -740,21 +767,23 @@ def _stem_profile(dem):
 
 # ============================================================================
 # TEST 10 -- Regression: generation changed how many splits are considered,
-# not what a keypoint IS.
+# not what a qualifying split IS; the selection rule is the only thing that
+# moved.
 #
 # (a) On the bowl-free landform valley (TEST 6's DEM), the global argmin of
 #     the full candidate set -- no filter applied -- is the split the retired
-#     search returned, and the new selection agrees with it.
-# (b) The retired oracle and the new two_segment_keypoint_split() agree,
-#     tuple for tuple, on every hand-built profile in this file, with and
-#     without the margin predicate.
-# (c) BYTE-IDENTICAL OUTPUT. With no filter rejecting the global argmin,
-#     detect_keypoints() returns exactly the dict the retired code did. The
-#     expected values below were captured from the retired code at 1af9c3e
-#     (repr-exact floats); confidence_notes is the module constant.
-# (d) The same on REAL terrain: terrain_reference_fixture.json holds the
-#     reference property's keypoints as the retired code produced them
-#     (captured 2026-09-22), and the new code reproduces every stored field.
+#     search returned.
+# (b) The retired oracle and two_segment_keypoint_split() (the fit's own
+#     answer) agree, tuple for tuple, on every hand-built profile in this
+#     file, with and without the margin predicate.
+# (c) FILTERS UNCHANGED. The SURVIVOR SET is byte-identical to the one the
+#     candidate-set commit (d1f3ee2, best-residual selection) produced:
+#     indices below, and every survivor's residual, slope drop and elevation
+#     repr-exact, captured from that commit. Only the selection within the
+#     set moves.
+# (d) On REAL terrain: the reference property's survivor sets are the ones
+#     d1f3ee2 produced, and the three keypoints move exactly from its
+#     selections to the highest survivors.
 # ============================================================================
 _stem10, (_dist10, _elev10, _slope10) = _stem_profile(_dem6)
 _cands10 = kd.keypoint_split_candidates(_dist10, _elev10, _slope10, KEYPOINT_MIN_RUN_CELLS)
@@ -781,20 +810,39 @@ for _label, (_d, _e, _s), _pred in (
         _new = two_segment_keypoint_split(_d, _e, _s, KEYPOINT_MIN_RUN_CELLS, _min_drop, position_is_eligible=_pred)
         assert _old == _new, (_label, _min_drop, _old, _new)
 
-_RETIRED_DEM6_KEYPOINT = {
-    "valley_id": 0, "rowcol": (24, 7), "point_utm": "POINT (500037.5 4499877.5)",
-    "geometry_wgs84": {"type": "Point", "coordinates": (-80.99955645001062, 40.64975293831694)},
-    "elevation_m": 104.0, "contributing_acres": 2.32, "slope_above_pct": 70.67,
-    "slope_below_pct": 19.33, "slope_drop_pct": 51.33, "stem_length_cells": 40,
-    "position_along_stem": 24, "on_parcel": True, "distance_outside_boundary_m": 0.0,
-    "confidence": "low", "confidence_notes": kd.KEYPOINT_CONFIDENCE_NOTES, "id": 0,
-}
+
+def _survivor_record(diag, valley_index=0):
+    return [
+        (_c["index"], _c["rowcol"], repr(_c["residual"]), repr(_c["slope_drop_pct"]), repr(_c["elevation_m"]))
+        for _c in diag["valley_candidates"][valley_index]["candidates"]
+        if not _c["rejected_by"]
+    ]
+
+
 _diag10 = {}
 _kps10 = detect_keypoints(_dem6, _full_boundary(_rows1, _cols1), diagnostics=_diag10)
-assert len(_kps10) == 1
-_got10 = dict(_kps10[0], point_utm=_kps10[0]["point_utm"].wkt)
-assert repr(_got10) == repr(_RETIRED_DEM6_KEYPOINT), (_got10, _RETIRED_DEM6_KEYPOINT)
-assert _diag10["fall_through_valleys"] == 0 and _diag10["valley_candidates"][0]["fall_through"] is False
+# Captured from d1f3ee2 (best-residual selection), repr-exact.
+_D1F3_DEM6_SURVIVORS = [
+    (17, (17, 7), '511.38090580794363', '4.666666666666671', '132.0'),
+    (18, (18, 7), '382.47847662907617', '9.333333333333329', '128.0'),
+    (19, (19, 7), '270.14687240718484', '16.333333333333336', '124.0'),
+    (20, (20, 7), '177.2636217767742', '25.199999999999996', '120.0'),
+    (21, (21, 7), '106.41913456269499', '34.53333333333333', '116.0'),
+    (22, (22, 7), '59.27223531742346', '42.933333333333344', '112.0'),
+    (23, (23, 7), '35.12310601359781', '49.0', '108.0'),
+    (24, (24, 7), '26.76143934611997', '51.33333333333334', '104.0'),
+    (25, (25, 7), '32.7738472940079', '49.0', '103.5'),
+    (26, (26, 7), '58.151744854018226', '42.93333333333334', '103.0'),
+    (27, (27, 7), '114.38500331966407', '34.53333333333333', '102.5'),
+    (28, (28, 7), '205.93021121497296', '25.199999999999996', '102.0'),
+    (29, (29, 7), '334.62046487278496', '16.333333333333332', '101.5'),
+    (30, (30, 7), '500.27999305177076', '9.499999999999998', '101.0'),
+    (31, (31, 7), '701.4668351784678', '5.166666666666666', '100.5'),
+]
+assert _survivor_record(_diag10) == _D1F3_DEM6_SURVIVORS, _survivor_record(_diag10)
+assert [_c[0] for _c in _survivor_record(_diag1)] == list(range(17, 28)), "the bowl's survivors, as at d1f3ee2"
+assert _diag10["valley_candidates"][0]["fit_best_survivor_index"] == 24, "d1f3ee2's selection, still on record"
+assert _kps10[0]["position_along_stem"] == 17 and _diag10["selection_moved_valleys"] == 1
 
 import terrain_reference_fixture  # noqa: E402  (the real reference terrain, offline)
 from reference_fixture import BOUNDARY_POLYGON_UTM as _REF_BOUNDARY  # noqa: E402
@@ -803,6 +851,20 @@ _ref_dem = terrain_reference_fixture.load_dem()
 _ref_stored = terrain_reference_fixture.load_derivations()
 _ref_diag = {}
 _ref_kps = detect_keypoints(_ref_dem, _REF_BOUNDARY, diagnostics=_ref_diag)
+# d1f3ee2's survivor sets per valley, and its (best-residual) selections.
+_D1F3_REF = {2: (56, 40, [40, 56]), 4: (34, 33, [33, 34, 35, 36, 37, 38, 51, 52, 53, 54, 55, 56, 57]),
+             8: (25, 13, list(range(13, 26)))}
+for _rec in _ref_diag["valley_candidates"]:
+    _old_sel, _new_sel, _surv = _D1F3_REF[_rec["valley_id"]]
+    assert [_c["index"] for _c in _rec["candidates"] if not _c["rejected_by"]] == _surv, _rec["valley_id"]
+    assert _rec["fit_best_survivor_index"] == _old_sel and _rec["selected_index"] == _new_sel, (
+        _rec["valley_id"], _rec["fit_best_survivor_index"], _rec["selected_index"]
+    )
+assert [(_k["valley_id"], _k["rowcol"], _k["elevation_m"]) for _k in _ref_kps] == [
+    (4, (25, 37), 358.85), (8, (54, 34), 342.26), (2, (40, 72), 346.92)
+], [(_k["valley_id"], _k["rowcol"], _k["elevation_m"]) for _k in _ref_kps]
+# ...and terrain_reference_fixture.json was re-derived on its own stored DEM
+# (make_terrain_reference_fixture.py --from-stored) to pin exactly this.
 assert len(_ref_kps) == len(_ref_stored["keypoints"]) == 3
 for _got, _stored in zip(_ref_kps, _ref_stored["keypoints"]):
     for _field, _value in _stored.items():
@@ -810,11 +872,11 @@ for _got, _stored in zip(_ref_kps, _ref_stored["keypoints"]):
 for _counter, _value in _ref_stored["keypoint_diagnostics"].items():
     assert _ref_diag[_counter] == _value, (_counter, _ref_diag[_counter], _value)
 print(
-    f"Test 10: on the landform valley the global-argmin candidate is split {_argmin10['index']}, the "
-    f"retired search's answer (residual {_argmin10['residual']:.4f} both); the oracle and the new fit "
-    f"agree on every profile in this file; the selected keypoint is byte-identical to the retired "
-    f"output; and the reference property's 3 stored keypoints and valley counters are reproduced "
-    f"field for field."
+    f"Test 10: the landform valley's global argmin is split {_argmin10['index']}, the retired search's "
+    f"answer (residual {_argmin10['residual']:.4f} both); the oracle and the fit agree on every profile "
+    f"here; the survivor sets -- synthetic and the reference property's -- are byte-identical to "
+    f"d1f3ee2's, and only the selection within them moved (reference: valley 8 idx 25 -> 13, valley 4 "
+    f"34 -> 33, valley 2 56 -> 40)."
 )
 
 
@@ -824,20 +886,16 @@ print(
 #
 # TEST 1's bowl. Global argmin: stem index 30, cell (30, 7), residual
 # 134.637, 8.51 m of fill -- inside the bowl, rejected as a fill artifact.
-# The next candidates by residual are ALSO bowl cells (29: 143.082, 28:
-# 169.813, 31: 172.569, all filled). The best SURVIVING split is index 27,
-# cell (27, 7), residual 211.180, fill 0.00 m -- selected, and the valley
-# keeps a keypoint where the retired search returned none.
-#
-# Asserted as the mechanism, not as a verdict on (27, 7): it is the bowl's
-# rim, three rows below the true break at row 24 (TEST 1's note), because
-# the residual itself is shaped by the depression. Filtering candidates
-# cannot fix that; scoping the fit to unfilled ground can, and is a
-# separate change.
+# It is also the split the retired single-split search returned (and then
+# lost the valley over). Every candidate fitting better than the best
+# survivor is a bowl cell. The survivors are rows 17-27 on real ground; the
+# best-residual survivor is (27, 7) at 211.180 (the rim), and the SELECTED
+# one is the highest, (17, 7) at 132.0 m, residual 1073.302.
 # ============================================================================
 _rec11 = _diag1["valley_candidates"][0]
 _by11 = {_c["index"]: _c for _c in _rec11["candidates"]}
 _argmin11 = _by11[_rec11["global_argmin_index"]]
+_fit11 = _by11[_rec11["fit_best_survivor_index"]]
 _sel11 = _by11[_rec11["selected_index"]]
 assert _argmin11["rowcol"] == (30, 7) and _argmin11["rejected_by"] == [kd.REJECT_FILL_ARTIFACT], _argmin11
 assert _argmin11["fill_depth_m"] > KEYPOINT_FILL_ARTIFACT_THRESHOLD_M and _argmin11["outcome"] == "rejected"
@@ -845,27 +903,26 @@ assert _rec11["pre_fill_best_index"] == _argmin11["index"], "the split the retir
 assert _retired_two_segment_split(
     _dist1, _elev_raw, _slope_raw, KEYPOINT_MIN_RUN_CELLS, KEYPOINT_MIN_SLOPE_DROP_PCT
 )[0] == _argmin11["index"], "and the retired oracle confirms it: that split is what used to be tested and lost"
-assert _sel11["rowcol"] == (27, 7) and _sel11["rejected_by"] == [] and _sel11["outcome"] == "selected"
-assert abs(_argmin11["residual"] - 134.637) < 1e-3 and abs(_sel11["residual"] - 211.180) < 1e-3
-# The selection is the best-residual SURVIVOR: every candidate that fits
-# better was rejected, every other survivor fits worse.
+assert abs(_argmin11["residual"] - 134.637) < 1e-3 and abs(_fit11["residual"] - 211.180) < 1e-3
+assert _fit11["rowcol"] == (27, 7), "the best-residual survivor is still the rim -- the residual is still contaminated"
 for _c in _rec11["candidates"]:
-    if _c["residual"] < _sel11["residual"]:
+    if _c["residual"] < _fit11["residual"]:
         assert kd.REJECT_FILL_ARTIFACT in _c["rejected_by"], _c
-    elif _c is not _sel11 and not _c["rejected_by"]:
-        assert _c["residual"] > _sel11["residual"], _c
+assert _sel11["rowcol"] == (17, 7) and _sel11["rejected_by"] == [] and _sel11["outcome"] == "selected"
 assert _rec11["fall_through"] and _rec11["fill_fall_through"] and _rec11["outcome"] == "selected"
 assert tuple(_kps1[0]["rowcol"]) == _sel11["rowcol"] and _kps1[0]["position_along_stem"] == _sel11["index"]
 print(
     f"Test 11: the bowl's global argmin {_argmin11['rowcol']} (residual {_argmin11['residual']:.3f}, fill "
-    f"{_argmin11['fill_depth_m']:.2f} m) is rejected as {_argmin11['rejected_by']}; the best survivor "
-    f"{_sel11['rowcol']} (residual {_sel11['residual']:.3f}, fill {_sel11['fill_depth_m']:.2f} m) is "
-    f"selected, and the valley keeps a keypoint."
+    f"{_argmin11['fill_depth_m']:.2f} m) is rejected as {_argmin11['rejected_by']}; the valley keeps a "
+    f"keypoint, the highest survivor {_sel11['rowcol']} (the best-residual survivor would be the rim, "
+    f"{_fit11['rowcol']} at {_fit11['residual']:.3f})."
 )
 
 
 # ============================================================================
 # TEST 12 -- Every candidate rejected: no keypoint, every reason recorded.
+# (Unchanged by the selection rule: with no survivor there is nothing to
+# select.)
 #
 # The bowl DEM again, with the boundary drawn only over the ground south of
 # row 33's centre. Every real-ground split that drops slope (rows 17-27) is
@@ -879,6 +936,7 @@ _kps12 = detect_keypoints(_dem1, box(_x12 - 200.0, _y12 - 400.0, _x12 + 200.0, _
 assert _kps12 == [], [k["rowcol"] for k in _kps12]
 _rec12 = _diag12["valley_candidates"][0]
 assert _rec12["selected_index"] is None and _rec12["outcome"] == "rejected_fill_artifact"
+assert _rec12["survivor_blocks"] == [] and _rec12["fit_best_survivor_index"] is None
 assert _diag12["rejected_fill_artifact"] == 1 and _diag12["surviving"] == 0
 assert _rec12["candidates"], "a profiled valley with no survivor still reports its candidates"
 for _c in _rec12["candidates"]:
@@ -892,6 +950,7 @@ for _c in _rec12["candidates"]:
     assert (kd.REJECT_FILL_ARTIFACT in _c["rejected_by"]) == (_c["fill_depth_m"] > KEYPOINT_FILL_ARTIFACT_THRESHOLD_M)
 _tally12 = {_r: sum(_r in _c["rejected_by"] for _c in _rec12["candidates"]) for _r in kd.KEYPOINT_REJECTION_REASONS}
 assert _tally12 == _diag12["candidate_rejections"] and all(_tally12.values()), (_tally12, _diag12)
+assert kd.select_keypoint_candidate(_rec12["candidates"]) is None
 print(
     f"Test 12: with the boundary south of row 33 all {len(_rec12['candidates'])} candidates are rejected "
     f"-- {_tally12} -- so the valley yields no keypoint (outcome {_rec12['outcome']}), every reason "
@@ -924,34 +983,102 @@ print(
 
 
 # ============================================================================
-# TEST 14 -- Elevation is not a selector.
+# TEST 14 -- Highest-elevation selection (the change of basis).
 #
-# The landform valley (TEST 6's DEM): 15 candidates survive every filter,
-# from (17, 7) at 132.0 m down to (31, 7) at 100.5 m. The best fit is
-# (24, 7) at 104.0 m, residual 26.76 -- the true steep-to-gentle break.
-# The HIGHEST survivor, (17, 7), fits far worse (residual 511.38): it is a
-# point on the steep reach, not its end. The best fit wins. Why elevation
-# is reported and never selected on is recorded at select_keypoint_
-# candidate(): the keypoint's value is being THE inflection, not being
-# high, and "can it serve production" is a use criterion that lives
-# downstream as the gravity relationship.
+# The landform valley (TEST 6's DEM): fifteen candidates survive every
+# filter, one block, (17, 7) at 132.0 m down to (31, 7) at 100.5 m. The
+# RESIDUAL-best survivor is (24, 7) at 104.0 m, residual 26.76 -- the
+# selection before this change, and the profile's true steep-to-gentle
+# break. The HIGHEST survivor is (17, 7) at 132.0 m, residual 511.38, and it
+# is selected: the survivors are all qualifying inflections, and among them
+# the choice is by use -- the ground a keypoint commands by gravity -- which
+# is monotone in elevation (the reasoning, and the position it reverses, at
+# select_keypoint_candidate()).
+#
+# THE EDGE-CELL CONSEQUENCE, asserted so it cannot drift silently: (17, 7)
+# is the TOP of its block, directly below index 16, rejected for a 1.87%
+# drop; its own drop, 4.67%, is the WEAKEST in the block, while the
+# block's strongest is (24, 7) at 51.33%.
 # ============================================================================
-_surv14 = [_c for _c in _diag10["valley_candidates"][0]["candidates"] if not _c["rejected_by"]]
+_rec14 = _diag10["valley_candidates"][0]
+_surv14 = [_c for _c in _rec14["candidates"] if not _c["rejected_by"]]
+_by14 = {_c["index"]: _c for _c in _rec14["candidates"]}
 _highest14 = max(_surv14, key=lambda _c: _c["elevation_m"])
-_best14 = min(_surv14, key=lambda _c: _c["residual"])
-assert _highest14 is not _best14 and _highest14["elevation_m"] > _best14["elevation_m"]
-assert _highest14["residual"] > _best14["residual"]
-assert kd.select_keypoint_candidate(_diag10["valley_candidates"][0]["candidates"]) is _best14
-assert tuple(_kps10[0]["rowcol"]) == _best14["rowcol"] == (24, 7)
-assert _kps10[0]["elevation_m"] < _highest14["elevation_m"]
-# And reordering by elevation changes nothing: selection reads residual only.
-_shuffled14 = sorted(_diag10["valley_candidates"][0]["candidates"], key=lambda _c: -_c["elevation_m"])
-assert kd.select_keypoint_candidate(_shuffled14) is _best14
+_fitbest14 = min(_surv14, key=lambda _c: _c["residual"])
+assert _highest14["rowcol"] == (17, 7) and _highest14["elevation_m"] == 132.0
+assert _fitbest14["rowcol"] == (24, 7) and abs(_fitbest14["residual"] - 26.761) < 1e-3
+assert kd.select_keypoint_candidate(_rec14["candidates"]) is _highest14
+assert tuple(_kps10[0]["rowcol"]) == (17, 7) and _kps10[0]["elevation_m"] == 132.0
+assert _rec14["survivor_blocks"] == [(17, 31)]
+assert _by14[16]["rejected_by"] == [kd.REJECT_SLOPE_DROP], "the cell above the selection is a slope-drop rejection"
+assert _rec14["selected_slope_drop_pct"] == min(_c["slope_drop_pct"] for _c in _surv14)
+assert _rec14["best_survivor_slope_drop_index"] == 24
+# Reordering the candidates changes nothing: the rule reads the values, not the order.
+assert kd.select_keypoint_candidate(sorted(_rec14["candidates"], key=lambda _c: _c["residual"])) is _highest14
 print(
-    f"Test 14: of {len(_surv14)} survivors the highest is {_highest14['rowcol']} at "
-    f"{_highest14['elevation_m']} m (residual {_highest14['residual']:.2f}); the best fit is "
-    f"{_best14['rowcol']} at {_best14['elevation_m']} m (residual {_best14['residual']:.2f}) and it is "
-    f"the keypoint."
+    f"Test 14: of {len(_surv14)} survivors the residual-best is {_fitbest14['rowcol']} at "
+    f"{_fitbest14['elevation_m']} m (residual {_fitbest14['residual']:.2f}); the highest, "
+    f"{_highest14['rowcol']} at {_highest14['elevation_m']} m (residual {_highest14['residual']:.2f}), is "
+    f"selected -- the top edge of block {_rec14['survivor_blocks'][0]}, drop "
+    f"{_rec14['selected_slope_drop_pct']:.2f}% against the block's best {_rec14['best_survivor_slope_drop_pct']:.2f}%."
+)
+
+
+# ============================================================================
+# TEST 16 -- Tie on elevation: the lowest residual wins, deterministically.
+# (Numbered after 15 to keep the existing numbers stable.)
+#
+# Three survivors share the top elevation (120.0 m) with residuals 9.0, 4.0
+# and 7.0; a fourth, lower one (110.0 m) fits best of all (1.0) and must not
+# win; a fifth at 130.0 m fits best but is REJECTED and must be ignored. The
+# selection is the 4.0 one, whatever order the candidates arrive in, run
+# after run. A further exact tie on residual falls to the lowest index.
+# ============================================================================
+def _cand(index, elevation, residual, rejected_by=()):
+    return {"index": index, "elevation_m": elevation, "residual": residual, "rejected_by": list(rejected_by)}
+
+
+_tie16 = [
+    _cand(3, 130.0, 0.5, [kd.REJECT_SLOPE_DROP]),
+    _cand(5, 120.0, 9.0), _cand(6, 120.0, 4.0), _cand(7, 120.0, 7.0), _cand(9, 110.0, 1.0),
+]
+import itertools  # noqa: E402
+
+for _perm in itertools.permutations(_tie16):
+    assert kd.select_keypoint_candidate(list(_perm))["index"] == 6
+_exact16 = [_cand(8, 120.0, 4.0), _cand(6, 120.0, 4.0), _cand(7, 119.0, 0.1)]
+for _perm in itertools.permutations(_exact16):
+    assert kd.select_keypoint_candidate(list(_perm))["index"] == 6
+print(
+    "Test 16: three survivors tied at 120.0 m -> the one with the lowest residual (4.0) is selected in "
+    "every one of 120 orderings, over a lower best-fitting survivor and a higher rejected one; an exact "
+    "tie on residual too falls to the lowest index."
+)
+
+
+# ============================================================================
+# TEST 17 -- A single survivor is selected, whatever its elevation or residual.
+#
+# The bowl DEM with the boundary south of row 32's centre: of the real-
+# ground block (rows 17-27) only (27, 7) is within the 25 m margin, so it is
+# the one survivor. It is the LOWEST cell of that block -- ten others stand
+# higher on the full-boundary run -- and it is returned, because there is
+# nothing else to choose. The synthetic lone survivor makes the same point
+# with an absurd elevation and residual.
+# ============================================================================
+_x17, _y17 = pixel_center_xy(_dem1, 32, _c0_1)
+_diag17 = {}
+_kps17 = detect_keypoints(_dem1, box(_x17 - 200.0, _y17 - 400.0, _x17 + 200.0, _y17), diagnostics=_diag17)
+_rec17 = _diag17["valley_candidates"][0]
+_surv17 = [_c for _c in _rec17["candidates"] if not _c["rejected_by"]]
+assert [_c["rowcol"] for _c in _surv17] == [(27, 7)], [_c["rowcol"] for _c in _surv17]
+assert [tuple(_k["rowcol"]) for _k in _kps17] == [(27, 7)]
+assert _surv17[0]["elevation_m"] < _highest14["elevation_m"], "not high by any standard of this valley"
+assert kd.select_keypoint_candidate([_cand(4, -50.0, 1.0e9)])["index"] == 4
+print(
+    f"Test 17: with the boundary south of row 32 the only survivor is (27, 7) at "
+    f"{_surv17[0]['elevation_m']} m, and it is the keypoint; a lone synthetic survivor at -50 m with a "
+    f"residual of 1e9 is selected too."
 )
 
 
@@ -980,7 +1107,7 @@ _CONSUMER_FIELDS = {
     "confidence": str, "confidence_notes": str,
 }
 assert set(_CONSUMER_FIELDS) == _EXPECTED_KEYS
-for _kps in (_kps1, _kps5, _kps10, _ref_kps):
+for _kps in (_kps1, _kps5, _kps10, _kps17, _ref_kps):
     _vids = [_k["valley_id"] for _k in _kps]
     assert len(_vids) == len(set(_vids)), f"more than one keypoint for a valley: {_vids}"
     assert [_k["id"] for _k in _kps] == list(range(len(_kps)))
@@ -993,6 +1120,5 @@ print(
     "Test 15: one keypoint per valley on every fixture (reference terrain included), each carrying "
     f"exactly the {len(_CONSUMER_FIELDS)} fields its consumers read, with their retired types."
 )
-
 
 print("\nAll keypoint_detection checks passed.")

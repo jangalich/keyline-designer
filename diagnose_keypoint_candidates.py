@@ -30,10 +30,18 @@ WHAT IT ANSWERS.
      where fall-through lands: the residual surface itself is shaped by the
      depression, so the best UNFILLED split is the rim. Counted here so a
      real run shows whether it happens, not whether it could.
-  6. ELEVATION, FOR THE RECORD ONLY. Each selected keypoint's and each
-     rejected candidate's elevation against the parcel's on-parcel raw
-     elevation range. Nothing acts on this; it is the evidence for whether
-     low keypoint placement is terrain or contamination.
+  6. ELEVATION. Each selected keypoint's and each rejected candidate's
+     elevation against the parcel's on-parcel raw elevation range.
+  7. THE SELECTION RULE'S EFFECT. The detector selects the HIGHEST survivor
+     (select_keypoint_candidate()). Per valley: the selected survivor
+     against the one the retired residual rule would have picked from the
+     same survivors (elevation and percentile of the parcel's span), the
+     survivor blocks, and the SLOPE-DROP GAP -- the selected split's drop
+     against the best drop among the valley's survivors. The highest
+     survivor sits at the top edge of its block, the weakest-drop cell of
+     it, so this gap is the cost of the rule, printed every run. If it is
+     routinely large, the flagged within-a-fraction-of-best-drop rule
+     (keypoint_detection.py module docstring) is the follow-up.
 
 The ONE figure computed here rather than read is the on-parcel elevation
 range in 6: the detector has no reason to know it, and it is a plain
@@ -127,7 +135,9 @@ def main() -> int:
               f"{len(record['candidates'])} candidates; outcome {record['outcome']}; "
               f"global argmin idx {record['global_argmin_index']}, "
               f"retired (pre-fill-gate) best idx {record['pre_fill_best_index']}, "
-              f"selected idx {record['selected_index']}")
+              f"fit-best survivor idx {record['fit_best_survivor_index']}, "
+              f"selected (highest survivor) idx {record['selected_index']}")
+        print(f"  survivor blocks (first-last index): {record['survivor_blocks']}")
         print(f"  {'idx':>4} {'cell':>10} {'elev m':>8} {'drop %':>7} {'resid':>11} {'fill m':>7} "
               f"{'out m':>6}  outcome")
         for cand in record["candidates"]:
@@ -136,6 +146,10 @@ def main() -> int:
                 marks.append("global-argmin")
             if cand["index"] == record["pre_fill_best_index"]:
                 marks.append("retired-best")
+            if cand["index"] == record["fit_best_survivor_index"]:
+                marks.append("fit-best-survivor")
+            if cand["index"] == record["best_survivor_slope_drop_index"]:
+                marks.append("best-drop-survivor")
             outcome = cand["outcome"] if not cand["rejected_by"] else "rejected: " + ", ".join(cand["rejected_by"])
             print(f"  {cand['index']:>4} {str(cand['rowcol']):>10} {cand['elevation_m']:>8.2f} "
                   f"{cand['slope_drop_pct']:>7.2f} {cand['residual']:>11.3f} {cand['fill_depth_m']:>7.2f} "
@@ -144,7 +158,8 @@ def main() -> int:
 
     # 2. Fall-through.
     print()
-    print(f"fall-through fired (selected != global argmin): {diagnostics['fall_through_valleys']} of "
+    print(f"fall-through fired (a filter rejected the global argmin, the valley kept a keypoint): "
+          f"{diagnostics['fall_through_valleys']} of "
           f"{sum(1 for r in records if r['outcome'] == 'selected')} valleys with a keypoint")
     for record in records:
         if record["fall_through"]:
@@ -174,9 +189,32 @@ def main() -> int:
     rim = [r["valley_id"] for r in records if r["selected_index"] is not None and _fill_adjacent(r, r["selected_index"])]
     print(f"selected keypoints adjacent to a fill-rejected split (rim of filled ground): {rim or 'none'}")
 
-    # 6. Elevation, for the record only.
+    # 7. The selection rule's effect.
     print()
-    print(f"ELEVATION (record only -- selection never reads it); parcel range {lo:.2f} - {hi:.2f} m")
+    print(f"SELECTION: highest survivor vs the residual rule's pick from the same survivors "
+          f"(moved in {diagnostics['selection_moved_valleys']} valley(s)); parcel range {lo:.2f} - {hi:.2f} m")
+    for record in records:
+        if record["selected_index"] is None:
+            continue
+        by_index = {cand["index"]: cand for cand in record["candidates"]}
+        new, old = by_index[record["selected_index"]], by_index[record["fit_best_survivor_index"]]
+        gap = record["best_survivor_slope_drop_pct"] - record["selected_slope_drop_pct"]
+        where = "on parcel" if new["on_parcel"] else f"{new['distance_outside_boundary_m']:.1f} m out"
+        print(f"  valley {record['valley_id']}: residual rule idx {old['index']} {old['rowcol']} "
+              f"{old['elevation_m']:.2f} m ({_position(old['elevation_m'], lo, hi, on_parcel)}) -> "
+              f"highest survivor idx {new['index']} {new['rowcol']} {new['elevation_m']:.2f} m "
+              f"({_position(new['elevation_m'], lo, hi, on_parcel)}), rise {new['elevation_m'] - old['elevation_m']:+.2f} m, "
+              f"{where}")
+        above = by_index.get(new["index"] - 1)
+        edge = (f"cell above idx {above['index']}: drop {above['slope_drop_pct']:.2f}%, rejected by {above['rejected_by']}"
+                if above is not None else "no candidate above (top of the valid range)")
+        print(f"    drop gap: selected {record['selected_slope_drop_pct']:.2f}% vs best survivor "
+              f"{record['best_survivor_slope_drop_pct']:.2f}% (idx {record['best_survivor_slope_drop_index']}), "
+              f"gap {gap:.2f} pts; {edge}; blocks {record['survivor_blocks']}")
+
+    # 6. Elevation.
+    print()
+    print(f"ELEVATION; parcel range {lo:.2f} - {hi:.2f} m")
     for kp in keypoints:
         where = "on parcel" if kp["on_parcel"] else f"{kp['distance_outside_boundary_m']} m out"
         print(f"  keypoint {kp['id']} valley {kp['valley_id']} {kp['rowcol']}: {kp['elevation_m']:.2f} m, "

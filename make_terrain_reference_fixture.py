@@ -9,6 +9,14 @@ boundary, a change to the valley or keypoint derivation whose effect on
 the real parcel must be pinned again); the tests never do.
 
     python3 make_terrain_reference_fixture.py
+    python3 make_terrain_reference_fixture.py --from-stored
+
+--from-stored re-derives the valleys and keypoints on the DEM ALREADY in
+terrain_reference_fixture.npz, fetching nothing and keeping the stored
+retrieval date: the refresh for a change to the DERIVATION alone (a new
+selection rule, say), which must not also swap the terrain under every
+other test pinned to it -- a fresh 3DEP fetch can come back on a different
+grid.
 
 What it writes:
 
@@ -75,6 +83,22 @@ def derivations(dem: dict) -> dict:
 
 
 def main(argv) -> int:
+    if "--from-stored" in argv:
+        import terrain_reference_fixture
+
+        dem = terrain_reference_fixture.load_dem()
+        stored = terrain_reference_fixture.load_record()
+        derived = derivations(dem)
+        record = {**stored, **derived}
+        with open(JSON_PATH, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, separators=(",", ":"))
+        print(f"re-derived on the stored DEM (retrieved {stored['retrieved_on']}); nothing fetched")
+        for kp in derived["keypoints"]:
+            where = "on parcel" if kp["on_parcel"] else f"{kp['distance_outside_boundary_m']} m outside"
+            print(f"keypoint {kp['id']}: valley {kp['valley_id']} cell {kp['rowcol']} {kp['elevation_m']} m, "
+                  f"{kp['slope_above_pct']}% -> {kp['slope_below_pct']}%, {where}")
+        print(f"detector: {derived['keypoint_diagnostics']}")
+        return 0
     dem = dem_data.get_dem_for_boundary(REAL_BOUNDARY)
     array = dem["array"]
     print(f"3DEP: {array.shape[0]}x{array.shape[1]} at {dem['resolution_meters']}, {dem['crs']}, "
