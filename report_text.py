@@ -53,7 +53,19 @@ EN_DASH = "–"
 TERMS = (
     "1%-annual-chance",
     "0.2%-annual-chance",
+    "100-year",
+    "Atlas 14",
+    "Atlas 15",
+    "Atlas 2",
 )
+# ONE PLAIN WORD PER SURVEY UNIT, the same in every section: a soil map
+# unit glossed where it is read (Water, Soils), singular and plural. The
+# Trees section's "wooded patch" is its 30 m closure block; no other
+# section names a cell-based unit in its prose.
+MAP_UNIT = "an area of one kind of soil"
+MAP_UNITS = "areas of one kind of soil"
+# A share of a whole, in percent: what a share column sums to.
+WHOLE_PERCENT = 100.0
 
 
 class Value(dict):
@@ -105,9 +117,14 @@ def feet(meters: float) -> Value:
     return Value(value=f"{_grouped(round(meters / METERS_PER_FOOT), 0)} ft")
 
 
-def feet_of(feet_value: float) -> Value:
-    """A length already in feet: '1,263 ft'."""
-    return Value(value=f"{_grouped(round(feet_value), 0)} ft")
+def feet_of(feet_value: float, places: int = 0) -> Value:
+    """A length already in feet: '1,263 ft'; a small one to a tenth, '1.1 ft'."""
+    return Value(value=f"{_grouped(round(feet_value, places) if places else round(feet_value), places)} ft")
+
+
+def feet_range(low_ft: float, high_ft: float) -> Value:
+    """A range already in feet: '100–300 ft'."""
+    return Value(value=f"{_grouped(low_ft, 0)}{EN_DASH}{_grouped(high_ft, 0)} ft")
 
 
 def meters(value: float) -> Value:
@@ -128,12 +145,18 @@ def inches_of(inches_value: float, places: int = 1) -> Value:
     return Value(value=f"{_grouped(inches_value, places)} in")
 
 
-def acres(value: float) -> Value:
+def acres(value: float, places: int = 1) -> Value:
     """An area already in acres, one decimal, the unit inside: '1.6 acres'.
-    A value that is not zero but rounds below a tenth reads '<0.1 acres'."""
-    if 0 < value < 0.05:
+    A value that is not zero but rounds below a tenth reads '<0.1 acres'.
+    A catchment's hundreds take `places=0`: '532 acres'."""
+    if places == 1 and 0 < value < 0.05:
         return Value(value="<0.1 acres")
-    return Value(value=f"{_grouped(value, 1)} acres")
+    return Value(value=f"{_grouped(value, places)} acres")
+
+
+def acres_adjective(value: float) -> Value:
+    """An area in acres as a modifier: 'this 13.2-acre parcel'."""
+    return Value(value=f"{_grouped(value, 1)}-acre")
 
 
 def acres_of_m2(square_meters: float) -> Value:
@@ -145,9 +168,24 @@ def percent(value: float, places: int = 0) -> Value:
     return Value(value=f"{value:.{places}f}%")
 
 
+def percent_range(low: float, high: float) -> Value:
+    """A range of shares already in percent: '25–27%'."""
+    return Value(value=f"{low:.0f}{EN_DASH}{high:.0f}%")
+
+
+def centimeters(value: float) -> Value:
+    """A depth in the source's own centimetres: '150 cm'."""
+    return Value(value=f"{value:g} cm")
+
+
 def share(fraction: float, places: int = 0) -> Value:
     """A share given as a fraction of one: 0.38 -> '38%'."""
     return percent(fraction * 100.0, places)
+
+
+def times(factor) -> Value:
+    """A multiplier the data gives -- a chart's vertical exaggeration: '3×'."""
+    return Value(value=f"{factor}\u00d7")
 
 
 def year(value) -> Value:
@@ -159,6 +197,27 @@ def year(value) -> Value:
 def scale(denominator: int) -> Value:
     """A map scale from the source's own figure: '1:24,000'."""
     return Value(value=f"1:{denominator:,}")
+
+
+# ======================================================================
+# Bare figures for table cells and key figures: the same rounding as the
+# formatters above, without the unit (a column's header carries it)
+# ======================================================================
+
+
+def whole_text(value: float) -> str:
+    """'1,234': a figure rounded to a whole number."""
+    return _grouped(round(value), 0)
+
+
+def feet_text(meters: float) -> str:
+    """A length in metres as whole feet, without the unit."""
+    return whole_text(meters / METERS_PER_FOOT)
+
+
+def percent_text(value: float) -> str:
+    """A share already in percent: '38%'."""
+    return percent(value)["value"]
 
 
 # ======================================================================

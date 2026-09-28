@@ -79,13 +79,16 @@ import nhdplus_data
 import nlcd_landcover_data
 import nwi_data
 import report_map
+import report_text as rt
+import water_survey_areas
+from hydrology_data import NHD_CHANNEL_OFFSET_FT, NHD_COMPILATION_SCALE
+from soil_data import SSURGO_COMPILATION_SCALE
 import soil_water_table
 import water_derivations as wd
 from contour_lines import _grid_axes
 from climate_section import MONTH_INITIALS, MONTH_NAMES
 from landform_section import (
     ZERO_DASH,
-    _feet,
     _one_decimal,
     _one_decimal_or_dash,
     _polygonal,
@@ -137,17 +140,23 @@ WETNESS_TINT_OPACITY = (0.10, 0.22, 0.36, 0.52)
 DEPRESSION_FILL_OPACITY = 0.85
 
 # --- captions and statements --------------------------------------------
-NHD_CAVEAT = ("NHD streams are compiled at 1:24,000 and can sit 100–300 ft from the channel on the ground; seeps and "
-              "springs are not reliably mapped, and any on the ground need field verification.")
-NWI_CAVEAT = ("Wetlands are mapped from imagery interpretation, not field-delineated, and are not a jurisdictional "
-              "determination.")
-FEMA_CAVEAT = ("Not mapped is not not at risk: large parts of rural America have no detailed flood study, and Zone X "
-               "means only that no 1%-annual-chance floodplain has been mapped there.")
-WATER_TABLE_CAVEAT = ("Survey-scale mapping, from the same 1:24,000 product as the soils section. A depth is the top of "
-                      "the wettest layer NRCS describes, weighted over a map unit's major soils;")
-TWI_CAVEAT = "The wetness index is terrain only: it does not know soil or cover, and a flat, well-drained bench scores wet."
+# THE ADJACENCY BUFFER, SAID ONE WAY. Every "within" on these pages is
+# adjacency_window(): the boundary buffered by ADJACENCY_BUFFER_METERS.
+# It was typed as "500 ft" in the captions while the summary derived
+# 492 ft from the same 150 m; every mention now comes from here.
+WITHIN = rt.feet(wd.ADJACENCY_BUFFER_METERS)
+NHD_CAVEAT = rt.clause("Mapped streams can sit ", rt.feet_range(*NHD_CHANNEL_OFFSET_FT), " from the real channel, and springs and "
+                       "seeps are often missed; check both on the ground.")
+NWI_CAVEAT = "not checked on the ground, and not a legal wetland determination."
+FEMA_CAVEAT = ("Unmapped does not mean safe: much of rural America has no detailed flood study, and Zone X means only that no "
+               "1%-annual-chance floodplain has been mapped there.")
+MAP_UNIT_GLOSS = rt.MAP_UNIT
+HYDRIC_GLOSS = "formed under saturation"
+TWI_CAVEAT = "The index reads only the land's shape, not soil or cover, so a flat, well-drained bench can score wet."
 CATCHMENT_TRUNCATION = ("The contributing area is measured within the elevation model's window, the parcel plus 100 m, "
                         "and its watershed reaches the window's edge, so it is a lower bound.")
+# Wetland acreage within the buffer below this reads as none.
+NO_WETLAND_ACRES = 0.05
 
 
 # ======================================================================
@@ -155,8 +164,7 @@ CATCHMENT_TRUNCATION = ("The contributing area is measured within the elevation 
 # ======================================================================
 
 
-def _ft(meters: float) -> str:
-    return _feet(meters / METERS_PER_FOOT)
+_ft = rt.feet_text
 
 
 def _acres(cells: int, cell_acres: float) -> float:
@@ -168,11 +176,10 @@ def _whole_or_dash(value: float) -> str:
 
 
 def _bound(inches: float) -> dict:
-    return {"value": f">{round(inches):,}", "kind": "bound"}
+    return rt.bound(f">{round(inches):,}")
 
 
-def _word(text: str) -> dict:
-    return {"value": text, "kind": "word"}
+_word = rt.word
 
 
 def map_unit_short_name(muname: Optional[str]) -> str:
@@ -188,10 +195,6 @@ def map_unit_short_name(muname: Optional[str]) -> str:
 
 def _permanence_word(label: str) -> str:
     return {"perennial": "perennial", "intermittent": "intermittent", "ephemeral": "ephemeral"}.get(label, "of unknown permanence")
-
-
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 # ======================================================================
@@ -346,11 +349,11 @@ def empty_parcel_note(derived: wd.WaterDerived, boundary_polygon_utm) -> Optiona
         return None
     if derived.flood["fetched"] and derived.flood["sfha_cells"] > 0:
         return None
-    absent = ["stream", "waterbody"]
+    absent = ["stream", "open water"]
     if derived.wetlands["fetched"]:
         absent.append("wetland")
     if derived.flood["fetched"] and derived.flood["available"]:
-        absent.append("1%-annual-chance flood zone")
+        absent.append("1%-annual-chance (100-year) flood zone")
     if len(absent) > 2:
         first, last = ", ".join(absent[:-1]), absent[-1]
     else:
@@ -438,48 +441,50 @@ def build_wetness_layers(inputs: wd.WaterInputs, derived: wd.WaterDerived, conto
 # ======================================================================
 
 
+def _stream_named(stream: dict, fallback: str) -> list:
+    """'Montour Run, perennial and of stream order 2 (counted up from the
+    smallest headwaters)': the order glossed where it is first read."""
+    parts = [stream["name"] or fallback, f", {_permanence_word(stream['permanence'])}"]
+    if stream["stream_order"] is not None:
+        parts += [" and of stream order ", rt.number(stream["stream_order"]), " (counted up from the smallest headwaters)"]
+    return rt.clause(*parts)
+
+
 def _stream_sentence(surface: dict) -> list:
     streams = [s for s in surface["streams"] if s["length_in_window_m"] > 0]
     if not streams:
-        return ["No mapped stream lies within ", {"value": f"{_ft(wd.ADJACENCY_BUFFER_METERS)} ft"}, " of the boundary."]
+        return rt.clause("No mapped stream lies within ", WITHIN, " of the boundary.")
     on_parcel = [s for s in streams if s["length_on_parcel_m"] > 0]
     if on_parcel:
         longest = max(on_parcel, key=lambda s: s["length_on_parcel_m"])
-        parts = [longest["name"] or "An unnamed stream", f", {_permanence_word(longest['permanence'])}"]
-        if longest["stream_order"] is not None:
-            parts += [" and order ", {"value": str(longest["stream_order"])}]
-        parts += [", crosses the parcel for ", {"value": f"{_ft(longest['length_on_parcel_m'])} ft"}, "."]
-        return parts
+        return rt.clause(_stream_named(longest, "An unnamed stream"), ", crosses the parcel for ", rt.feet(longest["length_on_parcel_m"]), ".")
     nearest = min(streams, key=lambda s: s["distance_m"])
-    parts = ["No mapped stream crosses the parcel; ", nearest["name"] or "an unnamed stream", f", {_permanence_word(nearest['permanence'])}"]
-    if nearest["stream_order"] is not None:
-        parts += [" and order ", {"value": str(nearest["stream_order"])}]
-    parts += [", runs ", {"value": f"{_ft(nearest['distance_m'])} ft"}, " beyond the boundary."]
-    return parts
+    return rt.clause("No mapped stream crosses the parcel; ", _stream_named(nearest, "an unnamed stream"), ", runs ",
+                     rt.feet(nearest["distance_m"]), " beyond the boundary.")
+
+
+def _wet_ground_sentence(derived: wd.WaterDerived) -> list:
+    cells = derived.cells
+    hydric = rt.acres(_acres(derived.hydric["counts"][wd.HYDRIC_PREDOMINANT], cells["cell_acres"]))
+    terrain = rt.acres(_acres(derived.wetness["wet_cells"], cells["cell_acres"]))
+    lead = rt.clause("The soil survey maps ", hydric, f" as hydric — {HYDRIC_GLOSS} — and the lie of the land marks ", terrain,
+                     " as likely wet")
+    flood = derived.flood
+    if flood["fetched"] and flood["available"]:
+        sfha = [z for z in flood["zones"] if z["sfha"] and z["cells_on_parcel"] > 0]
+        if sfha:
+            acres = rt.acres(_acres(sum(z["cells_on_parcel"] for z in sfha), cells["cell_acres"]))
+            return rt.clause(lead, "; ", acres, " lie in a FEMA 1%-annual-chance (100-year) flood zone.")
+        # The zone's own description is on the flood page; here the zone is enough.
+        dominant = max(flood["counts"], key=flood["counts"].get)
+        return rt.clause(lead, f"; the whole parcel lies in FEMA {dominant.split(',')[0]}.")
+    if flood["fetched"]:
+        return rt.clause(lead, "; no digital flood map covers the parcel.")
+    return rt.clause(lead, ".")
 
 
 def build_summary(derived: wd.WaterDerived) -> list:
-    cells = derived.cells
-    parts = _stream_sentence(derived.surface_water)
-    hydric_acres = _acres(derived.hydric["counts"][wd.HYDRIC_PREDOMINANT], cells["cell_acres"])
-    terrain_acres = _acres(derived.wetness["wet_cells"], cells["cell_acres"])
-    parts += [" The soil survey maps ", {"value": _one_decimal(hydric_acres)}, " acres as hydric and terrain wetness marks ",
-              {"value": _one_decimal(terrain_acres)}, " acres"]
-    flood = derived.flood
-    if flood["fetched"] and flood["available"]:
-        counts = flood["counts"]
-        sfha = [z for z in flood["zones"] if z["sfha"] and z["cells_on_parcel"] > 0]
-        if sfha:
-            acres = _acres(sum(z["cells_on_parcel"] for z in sfha), cells["cell_acres"])
-            parts += ["; ", {"value": _one_decimal(acres)}, " acres lie in a FEMA 1%-annual-chance flood zone."]
-        else:
-            dominant = max(counts, key=counts.get)
-            parts += [f"; the whole parcel lies in FEMA {dominant.split(',')[0]}."]
-    elif flood["fetched"]:
-        parts += ["; no digital flood map covers the parcel."]
-    else:
-        parts += ["."]
-    return parts
+    return rt.sentences(_stream_sentence(derived.surface_water), _wet_ground_sentence(derived))
 
 
 # ======================================================================
@@ -507,30 +512,34 @@ def build_surface_water_table(derived: wd.WaterDerived) -> Optional[dict]:
                 _whole_or_dash(stream["distance_m"] / METERS_PER_FOOT),
             ],
         })
-    return {"corner": "Stream", "columns": ["Permanence", "Order", "On the parcel, ft", "Within 500 ft, ft", "Distance, ft"],
+    return {"corner": "Stream", "columns": ["Permanence", "Order", "On the parcel, ft", f"Within {WITHIN['value']}, ft", "Distance, ft"],
             "rows": rows}
+
+
+def _mapped_within(features: list, on_parcel: int, singular: str, plural_form: str) -> list:
+    return rt.clause(rt.count(len(features), singular, plural_form), " mapped within ", WITHIN, ", ", rt.number(on_parcel), " on the parcel.")
+
+
+def _open_water_and_springs(surface: dict) -> list:
+    waterbodies, springs = surface["waterbodies"], surface["springs"]
+    if not waterbodies and springs == []:
+        return rt.clause("No lake, open water, spring or seep is mapped within ", WITHIN, ".")
+    open_water = (_mapped_within(waterbodies, sum(1 for w in waterbodies if w["area_on_parcel_m2"] > 0), "lake or open water", "lakes or open waters")
+             if waterbodies else rt.clause("No lake or open water is mapped within ", WITHIN, "."))
+    if springs is None:
+        seeps = ["Springs and seeps could not be checked when this report was generated."]
+    elif springs:
+        seeps = _mapped_within(springs, sum(1 for x in springs if x["on_parcel"]), "spring or seep", "springs or seeps")
+    else:
+        seeps = rt.clause("No spring or seep is mapped within ", WITHIN, ".")
+    return rt.sentences(open_water, seeps)
 
 
 def build_surface_water_caption(derived: wd.WaterDerived, inputs: wd.WaterInputs) -> list:
     surface = derived.surface_water
-    parts = []
-    waterbodies = surface["waterbodies"]
-    if waterbodies:
-        on = sum(1 for w in waterbodies if w["area_on_parcel_m2"] > 0)
-        parts.append(f"{_plural(len(waterbodies), 'mapped waterbody')} within 500 ft, {on} on the parcel. ")
-    else:
-        parts.append("No mapped waterbody lies within 500 ft. ")
-    if surface["springs"] is None:
-        parts.append("NHD's springs and seeps could not be checked when this report was generated. ")
-    elif surface["springs"]:
-        on = sum(1 for s in surface["springs"] if s["on_parcel"])
-        parts.append(f"{_plural(len(surface['springs']), 'spring or seep')} mapped within 500 ft, {on} on the parcel. ")
-    else:
-        parts.append("No spring or seep is mapped within 500 ft. ")
-    if not surface["order_available"] and surface["streams"]:
-        parts.append("Stream order could not be read when this report was generated. ")
-    parts.append(NHD_CAVEAT)
-    return parts
+    order = (["Stream order could not be read when this report was generated."]
+             if not surface["order_available"] and surface["streams"] else None)
+    return rt.sentences(_open_water_and_springs(surface), order, NHD_CAVEAT)
 
 
 def build_map_caption(derived: wd.WaterDerived, inputs: wd.WaterInputs) -> list:
@@ -543,22 +552,17 @@ def build_map_caption(derived: wd.WaterDerived, inputs: wd.WaterInputs) -> list:
                 "Look the parcel up on the USFWS Wetlands Mapper."]
     project = wetlands["project"] or {}
     window_acres = sum(wetlands["window_area_by_type_m2"].values()) / SQUARE_METERS_PER_ACRE
-    parts = []
-    if wetlands["on_parcel_cells"] == 0 and window_acres <= 0.05:
-        parts.append("No NWI wetland is mapped on the parcel or within 500 ft. ")
-    elif wetlands["on_parcel_cells"] == 0:
+    photographs = (rt.clause(", traced from ", rt.year(project["image_year"]), " aerial photographs") if project.get("image_year")
+                   else [", traced from aerial photographs"])
+    if wetlands["on_parcel_cells"] == 0 and window_acres <= NO_WETLAND_ACRES:
+        return rt.clause("The National Wetlands Inventory maps no wetland on the parcel or within ", WITHIN, photographs, ": ", NWI_CAVEAT)
+    if wetlands["on_parcel_cells"] == 0:
         nearest = min((f["distance_m"] for f in wetlands["features"] if f["distance_m"] is not None), default=None)
-        parts += ["No NWI wetland is mapped on the parcel; ", {"value": _one_decimal(window_acres)}, " acres lie within 500 ft"]
-        if nearest is not None:
-            parts += [", the nearest ", {"value": f"{_ft(nearest)} ft"}, " from the boundary"]
-        parts.append(". ")
-    else:
-        acres = _acres(wetlands["on_parcel_cells"], derived.cells["cell_acres"])
-        parts += ["NWI maps ", {"value": _one_decimal(acres)}, " acres of wetland on the parcel. "]
-    if project.get("image_year"):
-        parts += [f"Mapped by the {project.get('name')} project from ", {"value": str(project["image_year"])}, " imagery. "]
-    parts.append(NWI_CAVEAT)
-    return parts
+        where = rt.clause(", the nearest ", rt.feet(nearest), " from the boundary") if nearest is not None else None
+        return rt.clause("The National Wetlands Inventory maps ", rt.acres(window_acres), " of wetland within ", WITHIN, where,
+                         photographs, ": ", NWI_CAVEAT)
+    acres = _acres(wetlands["on_parcel_cells"], derived.cells["cell_acres"])
+    return rt.clause("The National Wetlands Inventory maps ", rt.acres(acres), " of wetland on the parcel", photographs, ": ", NWI_CAVEAT)
 
 
 # The wetness page holds the map, its legend and caption, and the water
@@ -632,30 +636,51 @@ def build_water_table(derived: wd.WaterDerived) -> Optional[dict]:
             "months": months, "unit_acres": unit_acres}
 
 
+def _four_months_clause(derived: wd.WaterDerived) -> list:
+    months = water_table_months(derived)
+    if len(months) == len(MONTH_NAMES):
+        return None
+    return rt.clause("Only ", rt.series_text([MONTH_NAMES[m - 1] for m in months]), " are shown: the parcel's ",
+                     rt.count(len(derived.water_table["map_units"]), "map unit"), " need the room.")
+
+
+def _bound_clause(derived: wd.WaterDerived) -> list:
+    """The table's own bound, read back from it: '“>72” means none within
+    the 72 in the survey describes'. None when no cell is a bound."""
+    table = build_water_table(derived)
+    bounds = [c for r in (table or {}).get("rows", []) for c in r["cells"] if isinstance(c, dict) and c.get("kind") == "bound"]
+    if not bounds:
+        return ["“No data” is a month the survey does not describe."]
+    mark = bounds[0]["value"]
+    return rt.clause("“", rt.bound(mark), "” means none within the ", rt.inches_of(float(mark.lstrip(">").replace(",", "")), places=0),
+                     " the survey describes; “no data”, a month it does not describe.")
+
+
 def build_water_table_caption(derived: wd.WaterDerived) -> list:
-    table = derived.water_table
-    parts = [WATER_TABLE_CAVEAT, " “", {"value": ">72"}, "” is not a depth: no water table within the ", {"value": "72"},
-             " in described; “no data” means no month described. The parcel depth is over the share of the parcel with a "
-             "water table, beneath it; flooding and ponding are the share rated at any frequency."]
-    if len(water_table_months(derived)) < 12:
-        parts.append(f" Four representative months: the parcel's {len(table['map_units'])} map units are more than the "
-                     "twelve-month form holds on one page.")
-    return parts
+    """What the table's rows and marks mean. How a depth is weighted is in
+    the methods note."""
+    return rt.sentences(
+        [f"Depth to the seasonal water table by month, from the soil survey; each row is a map unit, {MAP_UNIT_GLOSS}."],
+        _bound_clause(derived),
+        ["The parcel rows average the ground that has a water table; flooding and ponding give the share rated to flood or to hold "
+         "standing water at all."],
+        _four_months_clause(derived))
 
 
 def build_wetness_caption(derived: wd.WaterDerived) -> list:
+    """The one thing that could change a decision: what the index cannot
+    see. Its threshold and the percentile it is read at are in the methods
+    note."""
     wetness = derived.wetness
     cells = derived.cells
-    parts = ["Wet ground by terrain: ", {"value": _one_decimal(_acres(wetness["wet_cells"], cells["cell_acres"]))},
-             " acres at or above a wetness index of ", {"value": f"{wetness['threshold']:.1f}"},
-             ", the pipeline's own threshold, the 90th percentile of the elevation model's window. "]
+    wet = rt.clause(rt.acres(_acres(wetness["wet_cells"], cells["cell_acres"])), " rank among the wettest ground around the parcel "
+                    "on the wetness index — how much land drains to a spot against how fast it sheds water.")
     if wetness["depression_cells"]:
-        parts += [{"value": _one_decimal_or_dash(_acres(wetness["depression_cells"], cells["cell_acres"]), wetness["depression_cells"])},
-                  " acres of closed depressions, the deepest ", {"value": f"{wetness['depression_max_m'] / METERS_PER_FOOT:.1f} ft"}, ". "]
+        hollows = rt.clause(rt.acres(_acres(wetness["depression_cells"], cells["cell_acres"])), " sit in closed hollows, the deepest ",
+                            rt.feet_of(wetness["depression_max_m"] / METERS_PER_FOOT, places=1), ".")
     else:
-        parts.append("No closed depression deeper than the noise floor. ")
-    parts.append(TWI_CAVEAT)
-    return parts
+        hollows = ["No closed hollow is deep enough to hold water."]
+    return rt.sentences(wet, hollows, [TWI_CAVEAT])
 
 
 def build_comparison_table(derived: wd.WaterDerived) -> dict:
@@ -677,25 +702,34 @@ def build_comparison_table(derived: wd.WaterDerived) -> dict:
     return {"corner": "Wet ground", "columns": ["Acres", "% of parcel"], "rows": rows, "compact": True, "acres": acres, "shares": shares}
 
 
-def build_comparison_caption(derived: wd.WaterDerived) -> list:
-    c = derived.comparison
+WETTEST_WHERE = {wd.HYDRIC_PREDOMINANT: "predominantly hydric", wd.HYDRIC_PARTIAL: "partly hydric",
+                 wd.HYDRIC_NONE: "non-hydric", wd.HYDRIC_NO_POLYGON: None}
+
+
+def _hydric_clause(derived: wd.WaterDerived) -> list:
     h = derived.hydric
-    cells = derived.cells
-    parts = ["Hydric soil is a map unit whose hydric components reach ", {"value": f"{h['threshold_pct']:.0f}%"}, "; another ",
-             {"value": _one_decimal_or_dash(_acres(h["counts"][wd.HYDRIC_PARTIAL], cells["cell_acres"]), h["counts"][wd.HYDRIC_PARTIAL])},
-             " acres are partially hydric. "]
-    if not derived.wetlands["fetched"]:
-        parts += ["Mapped wetland could not be read when this report was generated. "]
-    wettest = c["wettest_cell"]
-    if wettest is not None:
-        cls = wettest["hydric_class"]
-        where = {wd.HYDRIC_PREDOMINANT: "a predominantly hydric map unit", wd.HYDRIC_PARTIAL: "a partially hydric map unit",
-                 wd.HYDRIC_NONE: "a map unit the survey maps as non-hydric", wd.HYDRIC_NO_POLYGON: "ground the survey does not cover"}[cls]
-        parts += ["The wettest ground by terrain (index ", {"value": f"{wettest['twi']:.1f}"}, f") is on {where}"]
-        if wettest["muname"]:
-            parts += [f", {map_unit_short_name(wettest['muname'])}"]
-        parts += [": survey-scale mapping does not resolve ground this size."]
-    return parts
+    partial = h["counts"][wd.HYDRIC_PARTIAL]
+    counts = rt.clause(f"Hydric soil ({HYDRIC_GLOSS}) counts where at least ", rt.percent(h["threshold_pct"]),
+                       f" of a map unit — {MAP_UNIT_GLOSS} — is hydric")
+    if not partial:
+        return rt.clause(counts, "; none of the parcel is partly hydric.")
+    return rt.clause(counts, "; ", rt.acres(_acres(partial, derived.cells["cell_acres"])), " more are partly hydric.")
+
+
+def _wettest_clause(derived: wd.WaterDerived) -> list:
+    wettest = derived.comparison["wettest_cell"]
+    if wettest is None:
+        return None
+    kind = WETTEST_WHERE[wettest["hydric_class"]]
+    if kind is None:
+        return ["The wettest spot by the land's shape is on ground the soil survey does not cover."]
+    name = f" {map_unit_short_name(wettest['muname'])}" if wettest["muname"] else " ground"
+    return [f"The wettest spot by the land's shape is on {kind}{name}, too small for the soil map to resolve."]
+
+
+def build_comparison_caption(derived: wd.WaterDerived) -> list:
+    unread = None if derived.wetlands["fetched"] else ["Mapped wetland could not be read when this report was generated."]
+    return rt.sentences(_hydric_clause(derived), unread, _wettest_clause(derived))
 
 
 def build_land_cover_table(derived: wd.WaterDerived) -> Optional[dict]:
@@ -735,26 +769,36 @@ def build_land_cover_table(derived: wd.WaterDerived) -> Optional[dict]:
             "catchment_shares": catchment_shares, "parcel_shares": parcel_shares}
 
 
-def build_land_cover_caption(derived: wd.WaterDerived) -> list:
+def _two_areas_clause(derived: wd.WaterDerived) -> list:
+    at_least = " — at least this much, since it runs past the edge of the elevation data" if derived.catchment["truncated"] else ""
+    return [f"The first row is the land that drains onto the parcel{at_least}; the rows describe two areas, not the parcel "
+            "against its surroundings."]
+
+
+def _stream_catchment_clause(derived: wd.WaterDerived) -> list:
     catchment = derived.catchment
+    if catchment["stream_catchment_acres"] is None:
+        return None
+    reach = max((r for r in catchment["reaches"] if r["in_window"]), key=lambda r: r["total_drainage_acres"])
+    return rt.clause(f"{reach['name'] or 'The stream'} drains ", rt.acres(reach["total_drainage_acres"], places=0),
+                     " where it passes the parcel.")
+
+
+def _land_cover_source_clause(derived: wd.WaterDerived) -> list:
     land = derived.land_cover
-    parts = ["Two extents, two questions: the contributing area within the elevation model's window"]
-    if catchment["truncated"]:
-        parts += [" (a lower bound: ", {"value": f"{catchment['rim_cells']:,}"}, " of its cells lie on the window's edge)"]
-    parts += [" and the parcel; the rows are not a comparison of the parcel with its surroundings. "]
-    if catchment["stream_catchment_acres"] is not None:
-        reach = max((r for r in catchment["reaches"] if r["in_window"]), key=lambda r: r["total_drainage_acres"])
-        parts += [f"{reach['name'] or 'The stream'}'s catchment at the reach beside the parcel is ",
-                  {"value": f"{round(reach['total_drainage_acres']):,}"}, " acres (NHDPlus HR). "]
-    if land["fetched"]:
-        parts += ["NLCD ", {"value": str(land["year"])}, " at 30 m; catchment vegetation and sediment condition remain unmodelled."]
-    return parts
+    if not land["fetched"]:
+        return None
+    return rt.clause("Cover from NLCD ", rt.year(land["year"]), ", a national satellite map; what grows upstream and how much soil "
+                     "washes down are not modelled.")
+
+
+def build_land_cover_caption(derived: wd.WaterDerived) -> list:
+    return rt.sentences(_two_areas_clause(derived), _stream_catchment_clause(derived), _land_cover_source_clause(derived))
 
 
 def build_land_cover_unavailable(derived: wd.WaterDerived, inputs: wd.WaterInputs) -> list:
-    parts = build_land_cover_caption(derived)
-    parts.append(" NLCD land cover did not answer when this report was generated; look it up on the MRLC viewer.")
-    return parts
+    return rt.sentences(build_land_cover_caption(derived),
+                        ["NLCD land cover did not answer when this report was generated; look it up on the MRLC viewer."])
 
 
 def single_flood_zone(derived: wd.WaterDerived) -> Optional[str]:
@@ -780,11 +824,12 @@ def build_flood_statement(derived: wd.WaterDerived) -> Optional[list]:
         parts.append(f", {'an ' if subtype[0] in 'aeiou' else 'a '}{subtype}")
     panel = derived.flood["panel"]
     if panel and panel.get("firm_pan"):
-        parts.append(f", on FIRM panel {panel['firm_pan']}")
+        # The panel and its date are labels, set in prose; "flood insurance rate map" is what FIRM stands for.
+        parts += [", on flood insurance rate map panel ", rt.word(panel["firm_pan"])]
         if panel.get("effective_on"):
-            parts += [" effective ", {"value": format_retrieved_on(panel["effective_on"])}]
+            parts += [" effective ", rt.word(format_retrieved_on(panel["effective_on"]))]
     parts.append(".")
-    return parts
+    return rt.clause(*parts)
 
 
 def build_flood_table(derived: wd.WaterDerived) -> Optional[dict]:
@@ -806,25 +851,24 @@ def build_flood_table(derived: wd.WaterDerived) -> Optional[dict]:
     return {"corner": "Flood zone", "columns": ["Acres", "% of parcel"], "rows": rows, "compact": True, "acres": acres, "shares": shares}
 
 
+def _adjacent_floodplain_clause(derived: wd.WaterDerived) -> list:
+    adjacent = [z for z in derived.flood["zones"] if z["sfha"] and z["cells_on_parcel"] == 0 and z["area_in_window_m2"] > 0]
+    if not adjacent:
+        return None
+    labels = rt.series_text(sorted({z["label"] for z in adjacent}))
+    return rt.clause(f"{labels}, the 1%-annual-chance (100-year) floodplain, lies within ", WITHIN, " of the boundary (",
+                     rt.acres_of_m2(sum(z["area_in_window_m2"] for z in adjacent)), ") but nowhere on the parcel.")
+
+
 def build_flood_caption(derived: wd.WaterDerived) -> list:
-    flood = derived.flood
-    parts = []
-    adjacent = [z for z in flood["zones"] if z["sfha"] and z["cells_on_parcel"] == 0 and z["area_in_window_m2"] > 0]
-    if adjacent:
-        labels = sorted({z["label"] for z in adjacent})
-        acres = sum(z["area_in_window_m2"] for z in adjacent) / SQUARE_METERS_PER_ACRE
-        parts += [f"{' and '.join(labels)}, the 1%-annual-chance floodplain, lies within 500 ft of the boundary (",
-                  {"value": _one_decimal(acres)}, " acres) and nowhere on the parcel. "]
-    parts.append(FEMA_CAVEAT)
-    return parts
+    return rt.sentences(_adjacent_floodplain_clause(derived), [FEMA_CAVEAT])
 
 
 def build_flood_unavailable(derived: wd.WaterDerived, inputs: wd.WaterInputs) -> list:
     flood = derived.flood
     if flood["fetched"] and not flood["available"]:
-        return ["No digital flood map covers this parcel: FEMA's National Flood Hazard Layer has no study here. Not mapped does "
-                "not mean not at risk -- large parts of rural America have no detailed flood study -- and the flood zone must be "
-                "read from the county's paper map or a site study. " + FEMA_CAVEAT]
+        return ["No digital flood map covers this parcel: FEMA's National Flood Hazard Layer has no study here, so the flood zone "
+                "must be read from the county's paper map or a site study. " + FEMA_CAVEAT]
     return ["FEMA's National Flood Hazard Layer did not answer when this report was generated, so the flood zone is not "
             "reported. Look the parcel up at the FEMA Flood Map Service Center. " + FEMA_CAVEAT]
 
@@ -846,7 +890,7 @@ def build_key_figures(derived: wd.WaterDerived) -> list:
         else:
             figures.append({"value": f"{_ft(nearest['distance_m'])} ft", "label": "to the nearest mapped stream"})
     else:
-        figures.append({"value": "None", "label": "mapped stream within 500 ft", "word": True})
+        figures.append({"value": "None", "label": f"mapped stream within {WITHIN['value']}", "word": True})
     figures.append({"value": f"{_one_decimal(_acres(derived.hydric['counts'][wd.HYDRIC_PREDOMINANT], cells['cell_acres']))} ac",
                     "label": "hydric soil, predominantly"})
     if derived.wetlands["fetched"]:
@@ -895,7 +939,7 @@ def build_sources(inputs: wd.WaterInputs, derived: wd.WaterDerived) -> list:
     retrieved = format_retrieved_on(inputs.retrieved_on)
     lines = [
         [f"USGS 3DEP elevation, 1/3 arc-second, resampled to 5 m, retrieved {retrieved}."],
-        [f"USGS National Hydrography Dataset, flowlines and waterbodies at 1:24,000, retrieved {retrieved}."],
+        [f"USGS National Hydrography Dataset, flowlines and waterbodies at 1:{NHD_COMPILATION_SCALE:,}, retrieved {retrieved}."],
     ]
     if inputs.nhdplus_hr is not None:
         lines.append(["USGS NHDPlus High Resolution, network flowline attributes (stream order, total drainage area)."])
@@ -930,18 +974,21 @@ def build_methods(inputs: wd.WaterInputs, derived: wd.WaterDerived) -> list:
          "period": retrieved, "citation": "U.S. Geological Survey, National Hydrography Dataset, served by The National Map's NHD map service.",
          "terms": "U.S. federal work; USGS states its data are in the public domain.",
          "method": "Permanence from FCode (46006 perennial, 46003 intermittent, 46007 ephemeral); lengths on the parcel and within "
-                   "150 m by intersection in the parcel's UTM zone; distance from the boundary to the nearest flowline; springs and "
-                   "seeps from the Point layer (FCode 45800)."},
+                   f"{wd.ADJACENCY_BUFFER_METERS:g} m ({WITHIN['value']}) of the boundary by intersection in the parcel's UTM zone; distance "
+                   "from the boundary to the nearest flowline; springs and seeps from the Point layer (FCode 45800)."},
         {"source": "USGS NHDPlus HR", "identifier": "NetworkNHDFlowline value-added attributes joined by permanent_identifier",
          "period": retrieved, "citation": nhdplus_data.NHDPLUS_CITATION, "terms": "U.S. federal work; public domain.",
          "method": "Strahler order (streamorde) and total upstream drainage area (totdasqkm, converted to acres) per reach; the "
-                   "largest reach figure within 150 m is the stream's catchment at the parcel."},
+                   f"largest reach figure within {wd.ADJACENCY_BUFFER_METERS:g} m is the stream's catchment at the parcel."},
         {"source": "USDA NRCS SSURGO", "identifier": "comonth, cosoilmoist, muaggatt, sacatalog over the parcel's map units",
          "period": retrieved, "citation": soil_water_table.SSURGO_CITATION, "terms": "U.S. federal work; public domain.",
          "method": "Depth to water table in a month is the top of the shallowest cosoilmoist layer with status Wet, weighted by "
                    "comppct over each map unit's major components; a month without a Wet layer is deeper than the component's "
                    "deepest described layer; a component with no comonth rows is no data. Map units weighted by their cells on "
-                   "the parcel. Hydric: a map unit whose hydric components sum to 50% or more is predominantly hydric."},
+                   f"the parcel. The survey is compiled at 1:{SSURGO_COMPILATION_SCALE:,}, so the monthly table is as coarse as the soil "
+                   f"map. Hydric: a map unit whose hydric components sum to {derived.hydric['threshold_pct']:.0f}% or more is predominantly "
+                   "hydric." + (f" The wettest cell by terrain has a raw TWI of {derived.comparison['wettest_cell']['twi']:.1f}."
+                                if derived.comparison["wettest_cell"] else "")},
         {"source": "USFWS NWI", "identifier": "Wetlands map service, two-stage fetch; Data_Source for the mapping project",
          "period": retrieved, "citation": nwi_data.NWI_CITATION,
          "terms": f"FGDC metadata: Access_Constraints \"{nwi_data.NWI_ACCESS_CONSTRAINTS}\"; Use_Constraints \"{nwi_data.NWI_USE_CONSTRAINTS}\".",
@@ -962,9 +1009,11 @@ def build_methods(inputs: wd.WaterInputs, derived: wd.WaterDerived) -> list:
          "terms": "U.S. federal work; public domain.",
          "method": "One priority-flood fill with flat resolution, D8 flow direction and accumulation (the landform derivations' pass); "
                    "raw TWI = ln(specific catchment area / tan slope) on the slope grid Landform classes; wet ground by terrain at "
-                   "or above the 90th percentile of the window's raw TWI; "
+                   f"or above the {water_survey_areas.TWI_WINDOW_FULL_CREDIT_PERCENTILE:.0f}th percentile of the window's raw TWI "
+                   f"({derived.wetness['threshold']:.1f} here); "
                    "depression depth = filled minus raw above a 0.1 m noise floor; the contributing area is the union of the "
-                   "parcel outlets' watersheds within the window, with cells on the window's rim counted as evidence of truncation."},
+                   "parcel outlets' watersheds within the window, with cells on the window's rim counted as evidence of truncation"
+                   + (f" ({derived.catchment['rim_cells']:,} here, so it is a lower bound)." if derived.catchment["truncated"] else ".")},
     ]
     return methods
 
@@ -1006,15 +1055,15 @@ def build_water_section(inputs: wd.WaterInputs, tokens: Optional[dict] = None,
         "heading": SECTION_NAME,
         "summary": build_summary(derived),
         "map": hydrology,
-        "map_caption": ([" ".join(note["lines"]) + " "] if note else []) + build_map_caption(derived, inputs),
+        "map_caption": rt.sentences([" ".join(note["lines"])] if note else None, build_map_caption(derived, inputs)),
         "surface_water_table": build_surface_water_table(derived),
         "surface_water_caption": build_surface_water_caption(derived, inputs),
         "wetness_map": wetness,
         "wetness_caption": build_wetness_caption(derived),
         "water_table": water_table,
         "water_table_caption": build_water_table_caption(derived),
-        "water_table_unavailable": ["SSURGO's seasonal water table did not answer when this report was generated; the monthly "
-                                    "table is not reported. The soils section's map units still stand."],
+        "water_table_unavailable": ["The soil survey's seasonal water table did not answer when this report was generated, so the "
+                                    "monthly table is not reported; the Soils section's map units still stand."],
         "key_figures": build_key_figures(derived),
         "comparison_table": build_comparison_table(derived),
         "comparison_caption": build_comparison_caption(derived),

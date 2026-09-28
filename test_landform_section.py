@@ -249,8 +249,8 @@ summary = _label_text(SECTION["summary"])
 relief = SECTION["contours"]["relief_ft"]
 assert summary.startswith(f"The land rises {round(relief):,} ft across the parcel. Most of it is in slope class ")
 dominant = max((c for c, _, _ in SLOPE_CLASSES), key=lambda c: counts[c])
-assert f"slope class {dominant}, {slope_range_label(dominant)}, and it falls toward the " in summary
-assert SECTION["summary"][1] == {"value": f"{round(relief):,}"}, "the relief figure is data"
+assert f"slope class {dominant} — the soil survey's band for {slope_range_label(dominant)} slopes — and it falls toward the " in summary
+assert SECTION["summary"][1] == {"value": f"{round(relief):,} ft"}, "the relief figure is data, its unit inside the span"
 assert {"value": dominant} in SECTION["summary"] and {"value": slope_range_label(dominant)} in SECTION["summary"]
 assert isinstance(SECTION["summary"][-1], str) and "falls toward the" in SECTION["summary"][-1], "the direction is prose"
 # Key figures: whole feet, one-decimal slope, the aspect as a WORD; nine of them (the last four are

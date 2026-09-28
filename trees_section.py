@@ -377,7 +377,7 @@ def build_forest_type(derived: td.TreesDerived) -> Optional[list]:
     if forest["forest_cells"] == 0:
         return ["A national forest map, FIA BIGMAP, calls none of the parcel woodland."]
     acres = allocate_exactly([forest["forest_cells"], total - forest["forest_cells"]], total * derived.cells["cell_acres"], 1)
-    shares = allocate_exactly([forest["forest_cells"], total - forest["forest_cells"]], 100.0, 1)
+    shares = allocate_exactly([forest["forest_cells"], total - forest["forest_cells"]], rt.WHOLE_PERCENT, 1)
     lead = rt.clause("A national forest map, FIA BIGMAP, calls ", rt.acres(acres[0]), " of the parcel woodland, ", rt.percent(shares[0]))
     if forest["single"] is not None:
         return rt.clause(lead, ", all ", rt.text(group_name(forest["single"])), ".")
@@ -394,7 +394,8 @@ def _canopy_against_forest(derived: td.TreesDerived) -> list:
     total = derived.cells["on_parcel_count"] * derived.cells["cell_acres"]
     c_acres = allocate_exactly([canopy["counts"][td.CANOPY], derived.cells["on_parcel_count"] - canopy["counts"][td.CANOPY]], total, 1)[0]
     f_acres = allocate_exactly([forest["forest_cells"], derived.cells["on_parcel_count"] - forest["forest_cells"]], total, 1)[0]
-    source = "the lidar" if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG else "the satellite map"
+    # "Lidar" glossed again on this page: the forest caption is on the numbers page, the summary's gloss on the map page.
+    source = "the lidar laser survey" if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG else "the satellite map"
     if forest["forest_cells"] < canopy["counts"][td.CANOPY]:
         why = "trees in groups too small for it to call a stand"
     else:
@@ -596,10 +597,9 @@ def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
                       f"({CANOPY_HEIGHT['value']}), the design's threshold. Height classes break at that threshold and at "
                       f"{rt.series_text([b['value'] for b in HEIGHT_BREAKS])}, by each cell's tallest return. Closure: the grid cut "
                       f"into {td.CLOSURE_BLOCK_METERS:g} m blocks from its origin -- the wooded patches of the extent caption; in each "
-                      "block holding a canopy cell, canopy cells over valid on-parcel cells, the figure the cell-weighted mean, the "
-                      "summary's word for it the closure class the mean falls in; a patch is nearly solid in the top class. It is "
-                      "derived from the height threshold, not NLCD's percent cover, and the two are not comparable. A roof is a first "
-                      "return and counts as canopy.",
+                      "block holding a canopy cell, canopy cells over valid on-parcel cells, the figure the cell-weighted mean, worded "
+                      "by the closure class it falls in; a patch is nearly solid in the top class. Derived from the height threshold, "
+                      "not comparable with NLCD's percent cover. A roof is a first return and counts as canopy.",
             "notes": [no_value_note] if no_value_note else [],
         }
     else:

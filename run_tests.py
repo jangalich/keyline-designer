@@ -104,6 +104,9 @@ FULL_ONLY = (
     # Branch 17 phase 2: builds every section's inputs and renders the
     # twenty-three-page report once. Measured at 20 s.
     "test_whole_report.py",
+    # The report's words: builds every section of the whole-report fixture
+    # and reads each prose builder's source. Measured at 9.2 s.
+    "test_report_text.py",
 )
 
 TAIL_LINES = 40

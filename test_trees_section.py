@@ -198,7 +198,7 @@ assert _text(SECTION["height_caption"]) == ("Trees by height, from 15 ft up; hal
 assert SECTION["cover_table"] is None
 assert _text(SECTION["forest_type"]) == "A national forest map, FIA BIGMAP, calls 0.6 acres of the parcel woodland, 5%, all oak/hickory."
 forest_caption = _text(SECTION["forest_type_caption"])
-assert forest_caption == ("The map spreads the Forest Service's field plots of 2014–2018 across the country, so it names the kind of forest in the area, not what stands on any one acre. It counts 0.6 acres as woodland where the lidar finds 1.6 acres of trees: trees in groups too small for it to call a stand."), forest_caption
+assert forest_caption == ("The map spreads the Forest Service's field plots of 2014–2018 across the country, so it names the kind of forest in the area, not what stands on any one acre. It counts 0.6 acres as woodland where the lidar laser survey finds 1.6 acres of trees: trees in groups too small for it to call a stand."), forest_caption
 species = SECTION["species_table"]
 assert species["columns"] == ["Acres rated", "Site index, ft", "Growth, cu ft/ac/yr"] and len(species["rows"]) == 6 == tsn.SPECIES_ROWS_MAX
 assert [r["label"] for r in species["rows"]] == ["northern red oak", "yellow-poplar", "sugar maple", "white ash", "Virginia pine", "eastern white pine"]

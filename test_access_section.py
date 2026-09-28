@@ -52,6 +52,7 @@ offline_harness.install()
 import access_derivations as ad  # noqa: E402
 import access_reference_fixture as fixture  # noqa: E402
 import access_section as acs  # noqa: E402
+import report_text as rt  # noqa: E402
 import landform_derivations  # noqa: E402
 import landform_section  # noqa: E402
 import report_chart  # noqa: E402
@@ -178,7 +179,7 @@ COVER = round(INPUTS.parcel_acres, 1)
 summary = _text(SECTION["summary"])
 assert summary == ("Mapped roads front 1,521 ft of the 3,265 ft boundary, N Montour Rd on the west and an unnamed road on the north. "
                    "1,296 ft of the boundary is under 15% slope, 583 ft of it on that frontage; the edges from east round to north are "
-                   "steeper. Soil rated very limited for a local road covers 65% of the parcel."), summary
+                   "steeper. Soil the survey rates worst for a local road covers 65% of the parcel."), summary
 assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["1,521 ft", "3,265 ft", "1,296 ft", "15%", "583 ft", "65%"]
 assert DERIVED.frontage["total_m"] < DERIVED.frontage["perimeter_m"] and round(DERIVED.frontage["total_m"] / DERIVED.frontage["perimeter_m"], 3) == 0.466
 frontage = SECTION["frontage_table"]
@@ -195,15 +196,17 @@ assert [_cell(c) for c in soil["rows"][1]["cells"]] == ["4.7", "35.2", "slope, f
 assert [_cell(c) for c in soil["rows"][2]["cells"]] == ["8.5", "64.8", "frost action, slope, depth to saturated zone, low strength and shrink-swell"]
 assert soil["rows"][2]["cells"][2]["kind"] == "text" and [_cell(c) for c in soil["rows"][3]["cells"]] == ["13.2", "100.0", ""]
 map_caption = _text(SECTION["map_caption"])
-assert map_caption == ("Steep boundary: slope 16 ft inside the line of 15% or more; runs under two samples are merged for drawing only. "
-                       "The mapped lane climbs 14% over 126 ft, 19% at the steepest step, entering on 25–27% ground; no stream crosses the parcel."), map_caption
+assert map_caption == ("Marked steep where the slope 16 ft inside the boundary is 15% or more; short runs are merged for drawing. "
+                       "The mapped lane climbs 14% over 126 ft, 19% at its steepest, entering on 25–27% ground; no stream crosses the parcel."), map_caption
+# "Runs under two samples" was a typed DRAWN_RUN_MIN_STATIONS; the number is the methods note's, from the constant.
+assert f"runs shorter than {acs.DRAWN_RUN_MIN_STATIONS} stations" in " ".join(SECTION["methods"][0]["notes"])
 frontage_caption = _text(SECTION["frontage_caption"])
 assert frontage_caption.startswith("Frontage is the boundary within 49 ft of a mapped road; the second column is its length under 15%. ")
-assert "both frontage and track and may be a private lane" in frontage_caption and frontage_caption.endswith(acs.ROADS_CAVEAT[:1].lower() + acs.ROADS_CAVEAT[1:])
+assert "both frontage and track and may be a private lane" in frontage_caption and frontage_caption.endswith(rt.lower_first(acs.ROADS_CAVEAT))
 soil_caption = _text(SECTION["soil_caption"])
-assert soil_caption == ("NRCS's rating by dominant components; its slope feature is the survey's slope phase, not the elevation model's grid "
-                        "above. Atkins is very limited partly for a shallow water table, as the Water section shows; roadfill is poor on "
-                        "every map unit."), soil_caption
+assert soil_caption == ("The soil survey's ratings for a local road; very limited is its worst class, and its slope is the survey's "
+                        "own, not the slopes measured above. Atkins is very limited partly for a shallow water table, as the Water "
+                        "section shows; roadfill — soil dug to raise a roadbed — is poor on every soil on the parcel."), soil_caption
 sources = [_text(line) for line in SECTION["sources"]]
 assert len(sources) == 3 and sources[0].startswith("USGS National Map transportation") and "2016" in sources[0]
 assert sources[1] == "USDA NRCS SSURGO, soil survey PA003, version of 9/5/2025: cointerp, local roads and streets, roadfill."
@@ -215,8 +218,8 @@ degraded_data = fixture.report_data(soil_road_ratings_rows=None, unavailable={
     "soil_road_ratings": {"label": "soil road-construction ratings", "reason": "source_unavailable", "error": "down"}})
 degraded_inputs = ad.access_inputs_from_context(CONTEXT, DOCUMENT, degraded_data)
 degraded = acs.build_access_section(degraded_inputs, TOKENS)
-assert degraded["soil_table"] is None and _text(degraded["soil_unavailable"]).startswith("SSURGO's road-construction ratings did not answer")
-assert _text(degraded["summary"]).endswith("the edges from east round to north are steeper. ") and len(degraded["sources"]) == 2
+assert degraded["soil_table"] is None and _text(degraded["soil_unavailable"]).startswith("The soil survey's road ratings did not answer")
+assert _text(degraded["summary"]).endswith("the edges from east round to north are steeper.") and len(degraded["sources"]) == 2
 assert degraded["frontage_table"]["rows"] == frontage["rows"]
 # A landlocked parcel: one road 40 m east, no frontage, the nearest road's distance and bearing in the summary.
 xs, ys = warp_transform(INPUTS.dem["crs"], "EPSG:4326", [maxx + 40.0, maxx + 40.0], [miny, maxy])
@@ -226,7 +229,7 @@ far = acs.build_access_section(ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads
 assert _text(far["summary"]).startswith("No mapped road touches the boundary: the nearest, Far Rd, lies 131 ft to the E. ")
 assert far["frontage_table"] is None and _text(far["frontage_caption"]).startswith("No mapped road runs within 49 ft of the boundary.")
 assert "layer-frontage" not in far["map"]["svg"] and "map-note" not in far["map"]["svg"], "the road is in the frame, the parcel has no frontage"
-assert _text(far["map_caption"]).startswith("Steep boundary") and "No mapped lane lies on the parcel" in _text(far["map_caption"])
+assert _text(far["map_caption"]).startswith("Marked steep") and "No mapped lane lies on the parcel" in _text(far["map_caption"])
 print(f"   summary {len(summary.split())} words; soil acres {soil['acres']} -> {sum(soil['acres'])}; landlocked: 131 ft to the E")
 
 # ======================================================================
@@ -307,7 +310,7 @@ for table_box, columns in zip(_tables(page) + _tables(numbers), (2, 2)):
 assert len(advances) == 1, sorted(advances)
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in (page, numbers))
 squash = "".join(flat.split())
-for needle in ("merged for drawing only", "shallow water table", "may be a private lane", "not the elevation model's grid above"):
+for needle in ("short runs are merged for drawing", "shallow water table", "may be a private lane", "not the slopes measured above"):
     assert "".join(needle.split()) in squash, needle
 assert "V·ACCESS" in squash.upper() and "V·ACCESS,CONTINUED" in squash.upper()
 # The landform maps and Water intact ahead of it.

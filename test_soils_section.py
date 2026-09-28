@@ -163,12 +163,12 @@ horizon = SECTION["properties_table"]
 assert not any("texture" in c.lower() for c in horizon["columns"]), horizon["columns"]
 summary_words = "".join(p if isinstance(p, str) else str(p["value"]) for p in SECTION["summary"])
 assert "silt loam" in summary_words and "pH 5.0–5.9" in summary_words.replace(" –", "–")
-assert "across the parcel" in summary_words
+assert "soil map units here, areas of one kind of soil" in summary_words, "the map unit glossed on the page it is read"
 assert "very strongly to moderately acid" in summary_words
 assert ssn.texture_classes(DERIVED)[0]["texture"] == "Silt loam"
 # The one unit whose survey phrase differs is the caption's, not a column's.
 properties_words = "".join(p if isinstance(p, str) else str(p["value"]) for p in SECTION["properties_caption"])
-assert "GSF is a channery silt loam" in properties_words and "0.1" in properties_words
+assert "GSF is a channery silt loam" in properties_words and "0.1 acres" in properties_words
 
 # THE FRAGIPAN NOTE IS IN THE CELL IT CORRECTS, not in a caption below the table.
 rows = {r["label"][0]["value"]: r for r in horizon["rows"]}
@@ -352,10 +352,10 @@ flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ ==
 squash = "".join(flat.split())
 for needle in ("a soil test is the only way to know either on this parcel",
                "fragipan at 28 in stops roots above the rock",
-               "the tint separates neighbouring units and carries no value",
-               "The map unit table overleaf names every symbol",
-               "a different depth basis from the surface horizon's figures above",
-               "at that scale a contact is not placed to parcel precision",
+               "shades only tell neighbours apart",
+               "the table overleaf names every symbol",
+               "a deeper measure than the top-layer figures above",
+               "too coarse to place a rock boundary within a parcel",
                "The same soil survey supplies the seasonal water table"):
     assert "".join(needle.split()) in squash, needle
 assert "VII·SOILS&GEOLOGY,CONTINUED" in squash.upper()

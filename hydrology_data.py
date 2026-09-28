@@ -26,6 +26,12 @@ WATERBODY_LAYER = 12  # Waterbody - Large Scale (ponds, lakes, reservoirs)
 # dataset (survey/compilation scale and update cadence), not of any single
 # stream or pond, so it's the same note on every feature rather than
 # computed per-feature.
+# The scale NHD flowlines and waterbodies are compiled at, and how far a
+# mapped flowline commonly sits from the channel on the ground at that
+# scale, in feet -- the report's water captions state both from here.
+NHD_COMPILATION_SCALE = 24_000
+NHD_CHANNEL_OFFSET_FT = (100, 300)
+
 NHD_CONFIDENCE_NOTES = (
     "USGS NHD stream and water body geometry is compiled at roughly "
     "1:24,000 scale (1:100,000 in some areas). Small, seasonal, or "

@@ -90,6 +90,9 @@ STORM_DURATION_LABELS = {"60-min": "1-hour, in", "24-hr": "24-hour, in"}
 SEVERE_TYPE_LABELS = {"hail": "Hail", "wind": "Damaging wind", "tornado": "Tornado"}
 
 PFDS_URL = "hdsc.nws.noaa.gov/pfds"
+# The precipitation-frequency atlases a parcel outside Atlas 14 falls back on, and the one due to replace it.
+ATLAS_2_YEAR = 1973
+ATLAS_15_DUE = 2027
 
 _VERSION_RE = re.compile(r"Version\s+\d+(?:\s+R\d+)?", re.IGNORECASE)
 
@@ -208,7 +211,7 @@ def _water_balance(annual: dict) -> list:
         return rt.clause("Warm weather can evaporate more than falls in every month, about ", short, " more over the year.")
     return rt.clause(f"More rain falls than can evaporate {'from ' if len(surplus) > 1 else 'in '}{month_run(surplus)}; "
                      f"{month_run(deficit)} {rt.agree(len(deficit), 'runs', 'run')} about ", short,
-                     " short, when crops and ponds draw on water stored earlier in the year.")
+                     " short, when crops live on water stored earlier in the year.")
 
 
 def build_summary(climate: dict) -> list:
@@ -344,24 +347,23 @@ def build_table_caption(correction, heavy_rain) -> list:
         heavy = ["; the days over ", HEAVY_RAIN, " are the same stations' count."]
     else:
         heavy = ["; Daymet undercounts the days over ", HEAVY_RAIN, "."]
-    return rt.clause(checked, heavy)
+    # Glossed again here: the row is on this page, the water balance's gloss on the one before.
+    return rt.sentences(rt.clause(checked, heavy), ["Potential evaporation is what warm weather could draw from wet ground."])
 
 
 def _storm_unavailable(record: dict, centroid) -> list:
     error = record.get("error", "")
     if "not within a project area" in error:
-        return [
+        return rt.clause(
             "Design storm depths are unavailable: NOAA Atlas 14 does not cover this location. Washington, "
-            "Oregon, Idaho, Montana and Wyoming have no Atlas 14 volume and remain on NOAA Atlas 2 of 1973. "
-            "NOAA Atlas 15, due to cover the whole country with published estimates in 2027, will fill the gap."
-        ]
+            "Oregon, Idaho, Montana and Wyoming have no Atlas 14 volume and remain on NOAA Atlas 2 of ", rt.year(ATLAS_2_YEAR),
+            ". NOAA Atlas 15, due to cover the whole country with published estimates in ", rt.year(ATLAS_15_DUE),
+            ", will fill the gap.")
     lat, lon = centroid
-    return [
+    return rt.clause(
         "Design storm depths are unavailable: the NOAA Precipitation Frequency Data Server did not answer when "
         f"this report was generated ({error or 'no answer'}). The point estimates can be read at {PFDS_URL} for ",
-        {"value": f"{lat:.4f}, {lon:.4f}"},
-        ".",
-    ]
+        rt.text(f"{lat:.4f}, {lon:.4f}"), ".")
 
 
 def build_design_storms(atlas14, storms, unavailable: dict, centroid) -> dict:
@@ -520,7 +522,7 @@ def build_methods(report_data) -> list:
                     "Handbook Part 630 Chapter 4: engineering projects are subject to all storms, not only the "
                     "largest each year; the two series differ only at the 2- and 5-year return periods.",
                     "NOAA Atlas 15 is scheduled to supersede Atlas 14 with published estimates for the whole "
-                    "country in 2027 and will account for trends in the record.",
+                    f"country in {ATLAS_15_DUE} and will account for trends in the record.",
                 ],
             }
         )

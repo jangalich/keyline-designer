@@ -124,7 +124,7 @@ prose = "".join(p if isinstance(p, str) else "{}" for p in section["summary"])
 assert prose == (
     "The frost-free season runs about {} days, from late April to mid October. "
     "More rain falls than can evaporate from September through May; June through August run about {} short, when crops "
-    "and ponds draw on water stored earlier in the year."
+    "live on water stored earlier in the year."
 ), prose
 assert climate_section.month_run([10, 11, 12, 1, 2]) == "October through February"
 assert climate_section.month_run([6, 7, 9]) == "June, July and September"
@@ -182,7 +182,7 @@ caption = section["table_caption"]
 assert [p["value"] for p in caption if isinstance(p, dict)] == ["5", "1 in"]
 assert "".join(p if isinstance(p, str) else "{}" for p in caption) == (
     "Precipitation is checked against the long-term averages of the {} nearest weather stations and adjusted to them; "
-    "the days over {} are the same stations' count."
+    "the days over {} are the same stations' count. Potential evaporation is what warm weather could draw from wet ground."
 )
 assert any("factor 0.960" in n for n in section["methods"][1]["notes"])
 
