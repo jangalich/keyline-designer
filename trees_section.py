@@ -49,8 +49,10 @@ import re
 from datetime import date
 from typing import Optional
 
+import canopy_cover_data
 import forest_type_data as ftd
 import report_map
+import report_text as rt
 import soil_woodland as sw
 import trees_derivations as td
 import water_derivations as wd
@@ -90,8 +92,16 @@ FEATURE_NAME_MAX = 4
 HAG_NATIVE_M = 2.0
 YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 
-FOREST_TYPE_CAVEAT = "a model imputing inventory plots to 30 m pixels, the type of forest occupying an area, not what stands on any acre"
-CLOSURE_LABEL = "closure at a 30 m grain, derived from the height threshold"
+# The canopy's figures, from the constants that make them.
+CANOPY_HEIGHT = rt.feet(td.CANOPY_HEIGHT_THRESHOLD_METERS)
+HEIGHT_BREAKS = [rt.feet(low) for _, low, _ in td.HEIGHT_CLASSES[2:]]
+TCC_PIXEL = rt.meters(canopy_cover_data.TCC_NATIVE_RESOLUTION_METERS)
+# How closed the canopy is where there are trees, in words, by the closure
+# classes the extent and cover tables use: the class the mean falls in.
+CLOSURE_WORDS = {"1-25": "sparse, a few trees", "26-50": "scattered trees rather than closed woodland",
+                 "51-75": "fairly dense, with gaps", "76-100": "closed woodland"}
+# The closure class a block must reach to count as nearly solid canopy.
+SOLID_CLASS = td.DENSITY_CLASSES[-1][0]
 
 
 # ======================================================================
@@ -99,32 +109,11 @@ CLOSURE_LABEL = "closure at a 30 m grain, derived from the height threshold"
 # ======================================================================
 
 
-def _ft(meters: float) -> str:
-    return f"{round(meters / METERS_PER_FOOT):,}"
-
-
-def _pct(value: float) -> str:
-    return f"{value:.0f}%"
-
-
-def _acres_word(value: float) -> str:
-    return f"{value:,.1f} ac"
-
-
-def _lower(name: str) -> str:
-    return name[:1].lower() + name[1:] if name else name
-
-
-def _list(words: list) -> str:
-    if not words:
-        return ""
-    if len(words) == 1:
-        return words[0]
-    return ", ".join(words[:-1]) + " and " + words[-1]
-
-
-def _word(text: str) -> dict:
-    return {"value": text, "kind": "word"}
+def _closure_word(mean_pct: float) -> str:
+    for name, low, high in td.DENSITY_CLASSES:
+        if mean_pct <= high:
+            return CLOSURE_WORDS[name]
+    return CLOSURE_WORDS[td.DENSITY_CLASSES[-1][0]]
 
 
 def hag_acquisition_year(source_item_id) -> Optional[int]:
@@ -143,7 +132,7 @@ def hag_acquisition_year(source_item_id) -> Optional[int]:
 
 def group_name(code: int) -> str:
     """The service's label in running text: 'Oak / hickory' -> 'oak/hickory'."""
-    return _lower(ftd.FOREST_TYPE_GROUPS[code]).replace(" / ", "/")
+    return rt.lower_first(ftd.FOREST_TYPE_GROUPS[code]).replace(" / ", "/")
 
 
 def compass_word(sector: Optional[str]) -> Optional[str]:
@@ -226,63 +215,67 @@ def _acre_values(derived: td.TreesDerived, counts: list) -> tuple:
     return allocate_exactly(counts, total, 1), allocate_exactly(counts, 100.0, 1)
 
 
-def build_summary(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
+WINDTHROW_GLOSS = "windthrow hazard — how likely trees are to blow over —"
+
+
+def _canopy_sentence(derived: td.TreesDerived) -> list:
     canopy = derived.canopy
     counts = canopy["counts"]
     acres, shares = _acre_values(derived, [counts[td.CANOPY], counts[td.OPEN], counts[td.NO_DATA]])
-    parts = []
     if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG:
         year = hag_acquisition_year(canopy["source_item_id"])
-        parts += ["Lidar" + (f" of {year}" if year else "") + " measures ", {"value": _acres_word(acres[0])}, " of canopy at 15 ft and over, ",
-                  {"value": _pct(shares[0])}, " of the parcel"]
-        if counts[td.CANOPY] > 0:
-            parts += [", ", {"value": _pct(derived.closure["mean_pct"])}, " closed at a 30 m grain; the tallest cell is ",
-                      {"value": f"{_ft(derived.heights['max_m'])} ft"}, ". "]
-        else:
-            parts += [". "]
-    else:
-        parts += ["NLCD Tree Canopy Cover of ", {"value": str(canopy["year"])}, " marks ", {"value": _acres_word(acres[0])}, " of canopy, ",
-                  {"value": _pct(shares[0])}, " of the parcel"]
-        if counts[td.CANOPY] > 0:
-            parts += [", ", {"value": _pct(derived.cover["mean_pct"])}, " mean cover within it; no lidar height is available here. "]
-        else:
-            parts += ["; no lidar height is available here. "]
+        flown = rt.clause(" flown in ", rt.year(year)) if year else [" from the air, its year not stated by the source record"]
+        lead = rt.clause("Lidar, a laser survey", flown, ", finds trees ", CANOPY_HEIGHT, " or taller")
+        if counts[td.CANOPY] == 0:
+            return rt.clause(lead, " nowhere on the parcel.")
+        return rt.clause(lead, " on ", rt.acres(acres[0]), ", ", rt.percent(shares[0]), " of the parcel; the tallest reach ",
+                         rt.feet(derived.heights["max_m"]), ".")
+    lead = rt.clause("NLCD Tree Canopy Cover, a national satellite map of ", rt.year(canopy["year"]), ", puts trees on ",
+                     rt.acres(acres[0]), ", ", rt.percent(shares[0]), " of the parcel")
+    return rt.clause(lead, "; no height survey covers this parcel.")
+
+
+def _forest_sentence(derived: td.TreesDerived) -> list:
     forest = derived.forest_type
-    if forest["fetched"]:
-        if forest["forest_cells"] == 0:
-            parts += ["The forest type model calls none of the parcel forest. "]
-        else:
-            f_acres = allocate_exactly([forest["forest_cells"], derived.cells["on_parcel_count"] - forest["forest_cells"]],
-                                       derived.cells["on_parcel_count"] * derived.cells["cell_acres"], 1)
-            names = _list([group_name(code) for code in forest["groups"] if code != ftd.NON_FOREST])
-            parts += ["The forest type model calls ", {"value": _acres_word(f_acres[0])}, f" of it forest, {names}. "]
+    if not forest["fetched"]:
+        return None
+    if forest["forest_cells"] == 0:
+        return ["A national forest map calls none of the parcel woodland."]
+    f_acres = allocate_exactly([forest["forest_cells"], derived.cells["on_parcel_count"] - forest["forest_cells"]],
+                               derived.cells["on_parcel_count"] * derived.cells["cell_acres"], 1)
+    names = rt.series_text([group_name(code) for code in forest["groups"] if code != ftd.NON_FOREST])
+    return rt.clause("A national forest map calls ", rt.acres(f_acres[0]), f" of it woodland, {names}.")
+
+
+def _windthrow_sentence(derived: td.TreesDerived) -> list:
     lim = derived.limitations
-    if lim["fetched"]:
-        wind = lim["interpretations"][sw.WINDTHROW]["counts"]
-        w_acres, _ = _acre_values(derived, list(wind.values()))
-        moderate = w_acres[list(wind).index("Moderate")]
-        severe = w_acres[list(wind).index("Severe")]
-        if wind["Moderate"] or wind["Severe"]:
-            parts += ["The soil survey rates windthrow hazard moderate on ", {"value": _acres_word(moderate)}]
-            if wind["Severe"]:
-                parts += [" and severe on ", {"value": _acres_word(severe)}]
-            parts += ["."]
-        else:
-            parts += ["The soil survey rates windthrow hazard slight on the whole parcel."]
-    return parts
+    if not lim["fetched"]:
+        return None
+    wind = lim["interpretations"][sw.WINDTHROW]["counts"]
+    w_acres, _ = _acre_values(derived, list(wind.values()))
+    moderate = w_acres[list(wind).index("Moderate")]
+    severe = w_acres[list(wind).index("Severe")]
+    if not (wind["Moderate"] or wind["Severe"]):
+        return [f"The soil survey rates {WINDTHROW_GLOSS} slight on the whole parcel."]
+    return rt.clause(f"The soil survey rates {WINDTHROW_GLOSS} moderate on ", rt.acres(moderate),
+                     rt.clause(" and severe on ", rt.acres(severe)) if wind["Severe"] else None, ".")
+
+
+def build_summary(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
+    return rt.sentences(_canopy_sentence(derived), _forest_sentence(derived), _windthrow_sentence(derived))
 
 
 def build_map_caption(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
-    canopy = derived.canopy
-    if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG:
-        year = hag_acquisition_year(canopy["source_item_id"])
-        when = f"acquired {year}" if year else "acquisition year not stated by the source record"
-        return ["Lidar first-return height above ground, ", {"value": f"{HAG_NATIVE_M:.0f} m"}, f", {when}, resampled to the ",
-                {"value": "5 m"}, " grid; canopy is a cell at or above the design's ", {"value": "15 ft"},
-                " threshold, so a roof reads as canopy too. Contours at Landform's interval."]
-    return ["NLCD Tree Canopy Cover ", {"value": str(canopy["year"])}, ", percent cover per ", {"value": "30 m"},
-            " pixel sampled onto the 5 m grid, any nonzero pixel counted, so edges are 30 m steps and thin strips may be missed; "
-            "no lidar height exists here, so the canopy is one tint. Contours at Landform's interval."]
+    """The one caveat that changes how the map is read: what counts as a
+    tree. Resolution and resampling are in the methods note."""
+    if derived.canopy["source"] == CANOPY_SOURCE_LIDAR_HAG:
+        return rt.sentences(rt.clause("Shaded wherever the lidar finds something ", CANOPY_HEIGHT,
+                                      " or taller, darker as it gets taller. A roof or a barn counts too, so check buildings "
+                                      "against the aerial photograph."),
+                            ["Contours as on the Landform map."])
+    return rt.sentences(rt.clause("Shaded wherever the satellite map finds any tree cover. It works in squares about ", TCC_PIXEL,
+                                  " across, so edges are blocky and a thin hedgerow may be missed."),
+                        ["There is no height survey here, so all trees share one shade. Contours as on the Landform map."])
 
 
 def build_extent_table(derived: td.TreesDerived) -> dict:
@@ -300,21 +293,28 @@ def build_extent_table(derived: td.TreesDerived) -> dict:
             "acres": acres, "shares": shares}
 
 
-def build_extent_caption(derived: td.TreesDerived) -> list:
+def _closure_clause(derived: td.TreesDerived) -> list:
     canopy = derived.canopy
-    counts = canopy["counts"]
-    parts = []
-    if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG and counts[td.CANOPY] > 0:
+    if canopy["counts"][td.CANOPY] == 0:
+        return None
+    if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG:
         closure = derived.closure
-        blocks = closure["classes"]
-        parts += ["Within the ", {"value": "30 m"}, " blocks that hold canopy, ", {"value": _pct(closure["mean_pct"])},
-                  " of the ground is canopy: " + CLOSURE_LABEL + ", not the fallback product's percent cover; ",
-                  {"value": str(blocks["76-100"]["blocks"])}, f" of {closure['blocks']} blocks are over three-quarters closed. "]
-    elif canopy["source"] == CANOPY_SOURCE_NLCD_TCC and counts[td.CANOPY] > 0:
-        parts += ["Mean cover within the canopy pixels is ", {"value": _pct(derived.cover["mean_pct"])}, ", the product's own percent cover. "]
-    if counts[td.NO_DATA]:
-        parts += ["The ", {"value": str(counts[td.NO_DATA])}, " cells with no value are the edge of the resampling, not a gap in coverage."]
-    return parts
+        solid = closure["classes"][SOLID_CLASS]["blocks"]
+        return rt.clause("Where there are trees, they cover ", rt.percent(closure["mean_pct"]), " of the ground — ",
+                         _closure_word(closure["mean_pct"]), " — and ", rt.number(solid), " of the ",
+                         rt.count(closure["blocks"], "wooded patch", "wooded patches"), " are nearly solid canopy.")
+    mean = derived.cover["mean_pct"]
+    return rt.clause("Where there are trees, the satellite map puts their cover at ", rt.percent(mean), " — ", _closure_word(mean), ".")
+
+
+def _no_value_clause(derived: td.TreesDerived) -> list:
+    if not derived.canopy["counts"][td.NO_DATA]:
+        return None
+    return ["The row with no value is a thin strip along the boundary where the survey stops, not a gap in the trees."]
+
+
+def build_extent_caption(derived: td.TreesDerived) -> list:
+    return rt.sentences(_closure_clause(derived), _no_value_clause(derived))
 
 
 def build_height_table(derived: td.TreesDerived) -> Optional[dict]:
@@ -334,17 +334,17 @@ def build_height_table(derived: td.TreesDerived) -> Optional[dict]:
 
 def build_height_caption(derived: td.TreesDerived) -> list:
     heights = derived.heights
+    lead = rt.clause("Trees by height, from ", CANOPY_HEIGHT, " up")
     if heights is None or derived.canopy["counts"][td.CANOPY] == 0:
-        return ["Lidar height above ground classed at the design's ", {"value": "15 ft"}, " threshold and at ", {"value": "30"}, " and ",
-                {"value": "50 ft"}, "."]
-    return ["Classed at the design's ", {"value": "15 ft"}, " threshold and at ", {"value": "30"}, " and ", {"value": "50 ft"},
-            ", the height of a cell's tallest return; the tallest cell is ", {"value": f"{_ft(heights['max_m'])} ft"}, ", the canopy's median ",
-            {"value": f"{_ft(heights['canopy_median_m'])} ft"}, "."]
+        return rt.clause(lead, ".")
+    return rt.clause(lead, "; half the canopy stands taller than ", rt.feet(heights["canopy_median_m"]),
+                     ", and the tallest reaches ", rt.feet(heights["max_m"]), ".")
 
 
 def build_height_unavailable(derived: td.TreesDerived) -> list:
-    return ["No canopy height is reported: this parcel's canopy is NLCD Tree Canopy Cover ", {"value": str(derived.canopy["year"])},
-            ", percent cover per ", {"value": "30 m"}, " pixel; no lidar height product covers it, so height classes are not available."]
+    return rt.clause("No tree heights here: the only tree map that covers this parcel is NLCD Tree Canopy Cover of ",
+                     rt.year(derived.canopy["year"]), ", a satellite estimate of cover in squares about ", TCC_PIXEL,
+                     " across, which does not measure height.")
 
 
 def build_cover_table(derived: td.TreesDerived) -> Optional[dict]:
@@ -365,7 +365,8 @@ def build_cover_table(derived: td.TreesDerived) -> Optional[dict]:
 
 
 def build_cover_caption(derived: td.TreesDerived) -> list:
-    return ["The product's own percent cover within the canopy pixels, not comparable with a lidar parcel's closure."]
+    return ["How thick the tree cover is, by the satellite map's own measure; it is not comparable with the cover a lidar "
+            "survey gives on other parcels."]
 
 
 def build_forest_type(derived: td.TreesDerived) -> Optional[list]:
@@ -374,46 +375,46 @@ def build_forest_type(derived: td.TreesDerived) -> Optional[list]:
         return None
     total = derived.cells["on_parcel_count"]
     if forest["forest_cells"] == 0:
-        return ["The forest type group model calls none of the parcel forest: every ", {"value": "30 m"}, " pixel is non-forest."]
+        return ["A national forest map, FIA BIGMAP, calls none of the parcel woodland."]
     acres = allocate_exactly([forest["forest_cells"], total - forest["forest_cells"]], total * derived.cells["cell_acres"], 1)
     shares = allocate_exactly([forest["forest_cells"], total - forest["forest_cells"]], 100.0, 1)
+    lead = rt.clause("A national forest map, FIA BIGMAP, calls ", rt.acres(acres[0]), " of the parcel woodland, ", rt.percent(shares[0]))
     if forest["single"] is not None:
-        return ["The forest type model calls ", {"value": _acres_word(acres[0])}, " of the parcel forest, ", {"value": _pct(shares[0])},
-                ", all ", {"value": group_name(forest["single"])}, "."]
-    parts = ["The forest type model calls ", {"value": _acres_word(acres[0])}, " of the parcel forest, ", {"value": _pct(shares[0])}, ": "]
+        return rt.clause(lead, ", all ", rt.text(group_name(forest["single"])), ".")
     groups = [code for code in forest["groups"] if code != ftd.NON_FOREST]
     g_acres = allocate_exactly([forest["counts"][c] for c in groups], acres[0], 1)
-    pieces = []
-    for code, a in zip(groups, g_acres):
-        pieces.append([{"value": group_name(code)}, " on ", {"value": _acres_word(a)}])
-    for index, piece in enumerate(pieces):
-        if index:
-            parts.append(", " if index < len(pieces) - 1 else " and ")
-        parts += piece
-    parts.append(".")
-    return parts
+    return rt.clause(lead, ": ", rt.series([[rt.text(group_name(code)), " on ", rt.acres(a)] for code, a in zip(groups, g_acres)]), ".")
+
+
+def _canopy_against_forest(derived: td.TreesDerived) -> list:
+    forest = derived.forest_type
+    canopy = derived.canopy
+    if forest["forest_cells"] == canopy["counts"][td.CANOPY] or canopy["counts"][td.CANOPY] == 0:
+        return None
+    total = derived.cells["on_parcel_count"] * derived.cells["cell_acres"]
+    c_acres = allocate_exactly([canopy["counts"][td.CANOPY], derived.cells["on_parcel_count"] - canopy["counts"][td.CANOPY]], total, 1)[0]
+    f_acres = allocate_exactly([forest["forest_cells"], derived.cells["on_parcel_count"] - forest["forest_cells"]], total, 1)[0]
+    source = "the lidar" if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG else "the satellite map"
+    if forest["forest_cells"] < canopy["counts"][td.CANOPY]:
+        why = "trees in groups too small for it to call a stand"
+    else:
+        why = "it maps whole stands, gaps included"
+    return rt.clause("It counts ", rt.acres(f_acres), f" as woodland where {source} finds ", rt.acres(c_acres), f" of trees: {why}.")
 
 
 def build_forest_type_caption(derived: td.TreesDerived) -> list:
-    forest = derived.forest_type
-    canopy = derived.canopy
-    parts = ["FIA BIGMAP, plots of ", {"value": forest.get("vintage") or ""}, ", " + FOREST_TYPE_CAVEAT + ". "]
-    if forest["forest_cells"] != canopy["counts"][td.CANOPY] and canopy["counts"][td.CANOPY] > 0:
-        total = derived.cells["on_parcel_count"] * derived.cells["cell_acres"]
-        c_acres = allocate_exactly([canopy["counts"][td.CANOPY], derived.cells["on_parcel_count"] - canopy["counts"][td.CANOPY]], total, 1)[0]
-        f_acres = allocate_exactly([forest["forest_cells"], derived.cells["on_parcel_count"] - forest["forest_cells"]], total, 1)[0]
-        source = "The lidar" if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG else "The cover product"
-        what = "height returns" if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG else "percent cover"
-        parts += [f"{source} sees ", {"value": _acres_word(c_acres)}, " of canopy where the model calls ", {"value": _acres_word(f_acres)},
-                  f" forest: {what} at 5 m against a classification of stands at 30 m."]
-    return parts
+    vintage = derived.forest_type.get("vintage")
+    plots = rt.clause(" of ", rt.text(vintage)) if vintage else []
+    return rt.sentences(rt.clause("The map spreads the Forest Service's field plots", plots, " across the country, so it names the kind "
+                                  "of forest in the area, not what stands on any one acre."),
+                        _canopy_against_forest(derived))
 
 
 def build_forest_type_unavailable(inputs: td.TreesInputs) -> list:
     reason = inputs.unavailable.get("forest_type_group", {}).get("reason")
     if reason == "no_data_for_parcel":
-        return ["The forest type group model carries no pixel for this parcel."]
-    return ["The forest type group service did not answer when this report was generated; the modelled forest type is not reported."]
+        return ["The national forest map has nothing for this parcel."]
+    return ["The national forest map did not answer when this report was generated, so the kind of forest is not reported."]
 
 
 def select_species(derived: td.TreesDerived) -> list:
@@ -440,27 +441,30 @@ def build_species_table(derived: td.TreesDerived) -> Optional[dict]:
             "compact": True, "species": [s["symbol"] for s in select_species(derived)]}
 
 
-def build_species_caption(derived: td.TreesDerived) -> list:
-    prod = derived.productivity
-    shown = len(select_species(derived))
-    parts = [f"The survey's list for these map units, the {shown} species rated on the most ground of {len(prod['species'])}, not a "
-             "recommendation; site index is height in feet at the base age of the survey's curve. "]
-    unrated = [(mukey, unit) for mukey, unit in prod["units"].items() if unit["unrated_major"]]
-    for mukey, unit in unrated:
-        from water_section import map_unit_short_name
+def _species_list_clause(derived: td.TreesDerived) -> list:
+    return rt.clause("The soil survey's ", rt.number(len(select_species(derived))), " trees rated on the most ground, of the ",
+                     rt.number(len(derived.productivity["species"])), " it lists for these soils: the survey's ratings, not a "
+                     "recommendation. Site index is the height in feet a tree reaches by a set age on this soil.")
 
-        names = _list([u["compname"] for u in unit["unrated_major"]])
-        pct = unit["unrated_major"][0]["comppct"]
-        acres = unit["cells"] * derived.cells["cell_acres"]
-        rated = _list([u["compname"] for u in unit["rated_major"]]) or "no major component"
-        parts += [f"{names}, ", {"value": f"{pct:.0f}%"}, f" of the {map_unit_short_name(unit['muname'])} unit (",
-                  {"value": _acres_word(acres)}, f"), carries no rows, so that unit rests on {rated}. "]
-    return parts
+
+def _unrated_clause(derived: td.TreesDerived, unit: dict) -> list:
+    from water_section import map_unit_short_name
+
+    names = rt.series_text([u["compname"] for u in unit["unrated_major"]])
+    rated = rt.series_text([u["compname"] for u in unit["rated_major"]]) or "no other major soil"
+    return rt.clause(f"The survey rates no trees for {names}, ", rt.percent(unit["unrated_major"][0]["comppct"]),
+                     f" of the {map_unit_short_name(unit['muname'])} soil (", rt.acres(unit["cells"] * derived.cells["cell_acres"]),
+                     f"), so those acres are rated on {rated} alone.")
+
+
+def build_species_caption(derived: td.TreesDerived) -> list:
+    units = derived.productivity["units"].values()
+    return rt.sentences(_species_list_clause(derived), *[_unrated_clause(derived, u) for u in units if u["unrated_major"]])
 
 
 def build_species_unavailable(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
     if derived.productivity["fetched"]:
-        return ["The survey rates no species for this parcel's map units."]
+        return ["The soil survey rates no trees for this parcel's soils."]
     return ["SSURGO's woodland ratings did not answer when this report was generated; the productivity and limitation tables are "
             "not reported. Look the map units up in Web Soil Survey, Forestland Productivity."]
 
@@ -490,14 +494,14 @@ def build_limitations_table(derived: td.TreesDerived) -> Optional[dict]:
         for cls, a, s in zip(present, acres, shares):
             if cls in classes and cls != classes[0]:
                 features = named_features(block["features"][cls], counts[cls])
-                text = _list([_feature_name(f) for f in features]) if features else ZERO_DASH
+                text = rt.series_text([_feature_name(f) for f in features]) if features else ZERO_DASH
             elif cls in classes:
                 text = ZERO_DASH
             else:
                 text = {sw.NOT_RATED: "not rated by the survey", td.SOIL_NO_DATA: "no rating returned",
                         wd.HYDRIC_NO_POLYGON: "no survey polygon"}.get(cls, cls)
-            label = f"{sw.INTERPRETATION_LABELS[name]}, {_lower(cls)}" if cls in classes else \
-                f"{sw.INTERPRETATION_LABELS[name]}, " + {wd.HYDRIC_NO_POLYGON: "not surveyed", td.SOIL_NO_DATA: "no data"}.get(cls, _lower(cls))
+            label = f"{sw.INTERPRETATION_LABELS[name]}, {rt.lower_first(cls)}" if cls in classes else \
+                f"{sw.INTERPRETATION_LABELS[name]}, " + {wd.HYDRIC_NO_POLYGON: "not surveyed", td.SOIL_NO_DATA: "no data"}.get(cls, rt.lower_first(cls))
             rows.append({"label": label, "cells": [_one_decimal_or_dash(a, counts[cls]), _one_decimal_or_dash(s, counts[cls]),
                                                    {"value": text, "kind": "text"}]})
     return {"corner": "Woodland limitation", "columns": ["Acres", "% of parcel", "Limiting features"], "rows": rows,
@@ -505,39 +509,33 @@ def build_limitations_table(derived: td.TreesDerived) -> Optional[dict]:
 
 
 def _feature_name(name: str) -> str:
-    return {"Surface kw times slope times R index": "erodibility, slope and rainfall"}.get(name, _lower(name))
+    return {"Surface kw times slope times R index": "erodibility, slope and rainfall"}.get(name, rt.lower_first(name))
+
+
+def _windthrow_clause(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
+    wind = derived.limitations["interpretations"][sw.WINDTHROW]
+    counts = wind["counts"]
+    limited = [c for c in ("Moderate", "Severe") if counts[c]]
+    if not limited:
+        return None
+    cell_acres = derived.cells["cell_acres"]
+    total = derived.cells["on_parcel_count"] * cell_acres
+    present = [c for c, n in counts.items() if n]
+    acres = dict(zip(present, allocate_exactly([counts[c] for c in present], total, 1)))
+    parts = rt.clause(rt.upper_first(WINDTHROW_GLOSS), " is ", rt.series([[f"{rt.lower_first(c)} on ", rt.acres(acres[c])] for c in limited]))
+    water_table = sum(wind["features"][c].get("Water table depth", 0.0) for c in limited)
+    if water_table > 0:
+        wt_acres = allocate_exactly([water_table, derived.cells["on_parcel_count"] - water_table], total, 1)[0]
+        parts = rt.clause(parts, ", on ", rt.acres(wt_acres), " of it because the water table rises near the surface in wet "
+                          "seasons, as the Water section maps")
+    winter = ((inputs.wind or {}).get("seasons") or {}).get("winter") or {}
+    word = compass_word(winter.get("prevailing_sector"))
+    return rt.clause(parts, f"; winter wind here comes mostly from the {word}." if word else ".")
 
 
 def build_limitations_caption(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
-    lim = derived.limitations
-    parts = ["NRCS's rating by dominant components, each interpretation partitioning the parcel: the soil's capacity, the same under a "
-             "field as under a stand. "]
-    wind = lim["interpretations"][sw.WINDTHROW]
-    counts = wind["counts"]
-    limited = [c for c in ("Moderate", "Severe") if counts[c]]
-    if limited:
-        cell_acres = derived.cells["cell_acres"]
-        total = derived.cells["on_parcel_count"] * cell_acres
-        present = [c for c, n in counts.items() if n]
-        acres = dict(zip(present, allocate_exactly([counts[c] for c in present], total, 1)))
-        pieces = []
-        for cls in limited:
-            pieces += [f"{_lower(cls)} on ", {"value": _acres_word(acres[cls])}]
-            if cls != limited[-1]:
-                pieces.append(" and ")
-        parts += ["Windthrow hazard is "] + pieces
-        water_table = sum(wind["features"][c].get("Water table depth", 0.0) for c in limited)
-        if water_table > 0:
-            wt_acres = allocate_exactly([water_table, derived.cells["on_parcel_count"] - water_table], total, 1)[0]
-            parts += [", water table depth the feature on ", {"value": _acres_word(wt_acres)},
-                      " of them, the shallow seasonal water table the Water section maps"]
-        winter = ((inputs.wind or {}).get("seasons") or {}).get("winter") or {}
-        word = compass_word(winter.get("prevailing_sector"))
-        if word:
-            parts += [f"; Climate's winter wind prevails from the {word}."]
-        else:
-            parts += ["."]
-    return parts
+    return rt.sentences(["These ratings describe the soil, so they hold whether the ground is in trees or in field."],
+                        _windthrow_clause(inputs, derived))
 
 
 # ======================================================================
@@ -580,6 +578,10 @@ def build_sources(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
 def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
     retrieved = format_retrieved_on(inputs.retrieved_on)
     canopy = derived.canopy
+    grid_m = max(inputs.dem["resolution_meters"])
+    no_data = canopy["counts"][td.NO_DATA]
+    no_value_note = (f"{no_data:,} on-parcel {rt.plural(no_data, 'cell')} carry no value -- the edge of the resampling along the "
+                     "boundary, not a gap in coverage -- the extent table's no-value row." if no_data else None)
     if canopy["source"] == CANOPY_SOURCE_LIDAR_HAG:
         canopy_method = {
             "source": "USGS 3DEP lidar height above ground",
@@ -589,10 +591,16 @@ def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
                         "Computer (PDAL smrf ground classification and hag_nn), 2 m.",
             "terms": "USGS 3DEP data are U.S. federal works in the public domain; Microsoft Planetary Computer's hosting terms for "
                      "the derived collection are not yet confirmed.",
-            "method": "First-return height above bare earth, warped bilinearly onto the session's 5 m DEM grid. A cell is canopy at or "
-                      f"above {td.CANOPY_HEIGHT_THRESHOLD_METERS} m (15 ft). Height classes break at that threshold and at "
-                      "30 and 50 ft. Closure: the grid cut into 30 m blocks from its origin; in each block holding a canopy cell, canopy "
-                      "cells over valid on-parcel cells, the figure the cell-weighted mean. A roof is a first return and counts as canopy.",
+            "method": f"First-return height above bare earth at {HAG_NATIVE_M:g} m, warped bilinearly onto the session's "
+                      f"{grid_m:.0f} m DEM grid. A cell is canopy at or above {td.CANOPY_HEIGHT_THRESHOLD_METERS:g} m "
+                      f"({CANOPY_HEIGHT['value']}), the design's threshold. Height classes break at that threshold and at "
+                      f"{rt.series_text([b['value'] for b in HEIGHT_BREAKS])}, by each cell's tallest return. Closure: the grid cut "
+                      f"into {td.CLOSURE_BLOCK_METERS:g} m blocks from its origin -- the wooded patches of the extent caption; in each "
+                      "block holding a canopy cell, canopy cells over valid on-parcel cells, the figure the cell-weighted mean, the "
+                      "summary's word for it the closure class the mean falls in; a patch is nearly solid in the top class. It is "
+                      "derived from the height threshold, not NLCD's percent cover, and the two are not comparable. A roof is a first "
+                      "return and counts as canopy.",
+            "notes": [no_value_note] if no_value_note else [],
         }
     else:
         canopy_method = {
@@ -602,8 +610,11 @@ def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
             "citation": "USDA Forest Service, NLCD Tree Canopy Cover, conterminous United States, 30 m, produced by RedCastle Resources "
                         "under contract to the Forest Service Field Services and Innovation Center Geospatial Office.",
             "terms": "U.S. federal work; public domain.",
-            "method": "Percent cover per 30 m pixel, exported nearest-neighbour onto the session's 5 m DEM grid with the year pinned "
-                      "by a mosaic rule; any nonzero pixel is canopy, the design's own rule. Heights are not measured by this product.",
+            "method": f"Percent cover per {canopy_cover_data.TCC_NATIVE_RESOLUTION_METERS:g} m pixel, exported nearest-neighbour onto "
+                      f"the session's {grid_m:.0f} m DEM grid with the year pinned by a mosaic rule; any nonzero pixel is canopy, the "
+                      "design's own rule, so edges are pixel steps and a strip narrower than a pixel may be missed. Heights are not "
+                      "measured by this product.",
+            "notes": [no_value_note] if no_value_note else [],
         }
     methods = [canopy_method]
     if inputs.forest_type_group is not None:
@@ -613,9 +624,11 @@ def build_methods(inputs: td.TreesInputs, derived: td.TreesDerived) -> list:
             "period": retrieved,
             "citation": ftd.FOREST_TYPE_CITATION,
             "terms": ftd.FOREST_TYPE_TERMS,
-            "method": "Forest type group codes sampled nearest-neighbour onto the 5 m grid and counted over the parcel's cells; a share is "
-                      "a share of 30 m pixels. Non-forest is a class. The model imputes inventory plots to pixels and says what type of "
-                      "forest occupies an area, not what stands on any acre; it is reported beside the canopy, never reconciled with it.",
+            "method": f"Forest type group codes sampled nearest-neighbour onto the {grid_m:.0f} m grid and counted over the parcel's cells; "
+                      f"a share is a share of {ftd.FOREST_TYPE_NATIVE_RESOLUTION_METERS:g} m pixels. Non-forest is a class. The model imputes inventory plots to pixels and says what type of "
+                      "forest occupies an area, not what stands on any acre; it is reported beside the canopy, never reconciled with it. "
+                      f"Where the two disagree, the canopy is height returns on the {grid_m:.0f} m grid and the model a classification "
+                      f"of stands in {ftd.FOREST_TYPE_NATIVE_RESOLUTION_METERS:g} m pixels.",
         })
     if inputs.soil_woodland is not None:
         bases = sorted({b for s in derived.productivity["species"] for b in s["bases"]})

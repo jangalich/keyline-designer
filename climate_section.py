@@ -62,12 +62,15 @@ import re
 from datetime import date
 
 import report_chart
-from climate_report import celsius_to_fahrenheit
+import report_text as rt
+from climate_report import HEAVY_RAIN_MM, celsius_to_fahrenheit
 import landform_section
 from landform_section import ZERO_DASH
 from report_outline import section_number
 
-MM_PER_INCH = 25.4
+MM_PER_INCH = rt.MM_PER_INCH
+# "Days over 1 in": the heavy-rain threshold, from the constant that counts them.
+HEAVY_RAIN = rt.inches(HEAVY_RAIN_MM, places=0)
 MPH_PER_M_S = 2.23694
 MINUS = "−"
 EN_DASH = "–"
@@ -187,32 +190,29 @@ def month_run(months: list) -> str:
 # ======================================================================
 
 
-def build_summary(climate: dict) -> list:
-    frost = climate["frost"]
-    annual = climate["annual"]
-    parts = []
+def _frost_season(frost: dict) -> list:
     # ONLY THE COUNTS ARE MEASUREMENTS. "late April" and "June through
     # August" are words derived from measurements, and words are prose.
-    if frost["frost_free_days"] is not None and frost["last_spring"] and frost["first_fall"]:
-        parts += [
-            "The frost-free season runs about ",
-            {"value": _whole(frost["frost_free_days"])},
-            f" days, from {month_part(frost['last_spring'])} to {month_part(frost['first_fall'])}. ",
-        ]
+    if frost["frost_free_days"] is None or not frost["last_spring"] or not frost["first_fall"]:
+        return None
+    return rt.clause("The frost-free season runs about ", rt.count(round(frost["frost_free_days"]), "day"),
+                     f", from {month_part(frost['last_spring'])} to {month_part(frost['first_fall'])}.")
+
+
+def _water_balance(annual: dict) -> list:
     deficit, surplus = annual["deficit_months"], annual["surplus_months"]
+    short = rt.inches(annual["deficit_mm"])
     if not deficit:
-        parts += ["Rainfall exceeds evaporation in every month."]
-    elif not surplus:
-        parts += ["Evaporation exceeds rainfall in every month; the year runs a deficit of about ",
-                  {"value": _one_decimal(_inches(annual["deficit_mm"]))}, " in."]
-    else:
-        parts += [
-            f"Rainfall exceeds evaporation {'from ' if len(surplus) > 1 else 'in '}{month_run(surplus)}; "
-            f"{month_run(deficit)} {'run' if len(deficit) > 1 else 'runs'} a deficit of about ",
-            {"value": _one_decimal(_inches(annual["deficit_mm"]))},
-            " in.",
-        ]
-    return parts
+        return ["More rain falls than can evaporate in every month."]
+    if not surplus:
+        return rt.clause("Warm weather can evaporate more than falls in every month, about ", short, " more over the year.")
+    return rt.clause(f"More rain falls than can evaporate {'from ' if len(surplus) > 1 else 'in '}{month_run(surplus)}; "
+                     f"{month_run(deficit)} {rt.agree(len(deficit), 'runs', 'run')} about ", short,
+                     " short, when crops and ponds draw on water stored earlier in the year.")
+
+
+def build_summary(climate: dict) -> list:
+    return rt.sentences(_frost_season(climate["frost"]), _water_balance(climate["annual"]))
 
 
 def build_water_balance(climate: dict, tokens: dict) -> dict:
@@ -226,7 +226,8 @@ def build_water_balance(climate: dict, tokens: dict) -> dict:
     )
     return {
         "chart": chart,
-        "caption": ["Potential evaporation is estimated from temperature; actual loss depends on cover and soil."],
+        "caption": ["Potential evaporation — what warm weather could draw from wet ground — is estimated from temperature; "
+                    "how much actually leaves depends on what grows and on the soil."],
     }
 
 
@@ -259,7 +260,7 @@ def build_wind_roses(wind, unavailable: dict, tokens: dict) -> dict:
     return {
         "chart": report_chart.render_wind_roses(seasons, tokens),
         "unavailable": None,
-        "caption": ["A regional estimate from a 55 km reanalysis cell; valleys and ridges channel local wind."],
+        "caption": ["Wind for the region, not for this parcel: valleys and ridges bend and channel the wind on the ground."],
     }
 
 
@@ -323,7 +324,7 @@ def build_table(climate: dict, heavy_rain) -> dict:
             {"label": "Precipitation, in", "cells": [_one_decimal(_inches(m["prcp_total_mm"])) for m in monthly]},
             {"label": "Potential evaporation, in", "cells": [_one_decimal_or_dash(_inches(m["pet_mm"])) for m in monthly]},
             {"label": "Water balance, in", "cells": [_signed_one_decimal(_inches(m["balance_mm"])) for m in monthly]},
-            {"label": "Days over 1 in", "cells": heavy_cells},
+            {"label": f"Days over {HEAVY_RAIN['value']}", "cells": heavy_cells},
             {"label": "GDD, base 50°F", "cells": [_whole(m["gdd_f"]) for m in monthly]},
             {"label": "Day length, h", "cells": [_one_decimal(m["day_length_h"]) for m in monthly]},
             {"label": "Solar, kWh/m²/day", "cells": [_one_decimal(m["solar_kwh_m2_day"]) for m in monthly]},
@@ -332,20 +333,18 @@ def build_table(climate: dict, heavy_rain) -> dict:
 
 
 def build_table_caption(correction, heavy_rain) -> list:
-    parts = []
+    """What the precipitation rows rest on. The factor and the stations
+    behind it are in the methods note."""
     if correction and correction["applied"]:
-        parts += [
-            "Precipitation scaled by ",
-            {"value": f"{correction['factor']:.2f}"},
-            f" to the {correction['station_count']} nearest NOAA station normals; ",
-        ]
+        checked = rt.clause("Precipitation is checked against the long-term averages of the ",
+                            rt.count(correction["station_count"], "nearest weather station"), " and adjusted to them")
     else:
-        parts += ["Precipitation is Daymet's, uncorrected (too few station normals nearby); "]
+        checked = ["Too few weather stations lie near enough to check the precipitation, so it is Daymet's gridded estimate as served"]
     if heavy_rain and heavy_rain["applied"]:
-        parts += ["days over 1 in from the same stations."]
+        heavy = ["; the days over ", HEAVY_RAIN, " are the same stations' count."]
     else:
-        parts += ["days over 1 in are Daymet's, which understates them."]
-    return parts
+        heavy = ["; Daymet undercounts the days over ", HEAVY_RAIN, "."]
+    return rt.clause(checked, heavy)
 
 
 def _storm_unavailable(record: dict, centroid) -> list:
@@ -380,7 +379,8 @@ def build_design_storms(atlas14, storms, unavailable: dict, centroid) -> dict:
             "compact": True,
         },
         "unavailable": None,
-        "caption": [f"Point estimates from records through {atlas14['record_ends']}; heavier recent storms are not reflected."],
+        "caption": rt.clause("Storm depths for this spot from rain records that end in ", rt.year(atlas14["record_ends"]),
+                             "; the heavier storms of recent years are not in them."),
     }
 
 
@@ -403,14 +403,19 @@ def build_severe_weather(severe: dict) -> dict:
     }
 
 
+def _frost_years(name: str, count: int, years: int) -> list:
+    if count >= years:
+        return None
+    return rt.clause("Only ", rt.number(count), " of the ", rt.count(years, "year"), f" had a {name} frost; the {name} date "
+                     "is the middle of those.")
+
+
 def build_key_figures_caption(climate: dict) -> list:
     frost = climate["frost"]
     years = climate["year_count"]
-    parts = ["Low ground and valley floors typically frost later in spring and earlier in fall than these dates."]
-    for name, count in (("spring", frost["years_with_spring_frost"]), ("fall", frost["years_with_fall_frost"])):
-        if count < years:
-            parts.append(f" The median {name} frost stands on {count} of the {years} years; the rest recorded no {name} frost.")
-    return parts
+    return rt.sentences(["Low ground and valley floors typically frost later in spring and earlier in fall than these dates."],
+                        _frost_years("spring", frost["years_with_spring_frost"], years),
+                        _frost_years("fall", frost["years_with_fall_frost"], years))
 
 
 def build_sources(report_data) -> list:
@@ -488,9 +493,9 @@ def build_methods(report_data) -> list:
                          f"{s['name']} ({s['distance_miles']:.1f} mi, normal {s['normal_in']:.2f} in, Daymet "
                          f"{s['daymet_mm'] / MM_PER_INCH:.2f} in, ratio {s['ratio']:.3f})" for s in correction["stations"]
                      ) + ".") if correction["applied"] else f"Precipitation not corrected: {correction['reason']}.",
-                    ("Days with at least 1.00 in of precipitation: median of the same stations' monthly normals "
+                    (f"Days with at least {HEAVY_RAIN_MM / MM_PER_INCH:.2f} in of precipitation: median of the same stations' monthly normals "
                      "(MLY-PRCP-AVGNDS-GE100HI)." if heavy and heavy["applied"] else
-                     "Days with at least 1.00 in of precipitation: Daymet's count, which understates them."),
+                     f"Days with at least {HEAVY_RAIN_MM / MM_PER_INCH:.2f} in of precipitation: Daymet's count, which understates them."),
                     "Daymet at each station: the 1991–2020 mean annual total at the station's coordinates, "
                     "bundled with the normals (Daymet " + ", ".join(
                         f"version {version} at {count:,} stations"

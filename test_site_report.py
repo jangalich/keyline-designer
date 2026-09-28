@@ -54,6 +54,7 @@ offline_harness.install()
 import requests
 
 import climate_section
+import report_text
 import report_chart
 import report_layout
 import report_map
@@ -118,11 +119,12 @@ assert climate_section.month_part({"month": 10, "day": 21}) == "late October"
 
 # ONLY THE COUNTS ARE DATA; the month-parts and the month runs are prose.
 summary_values = [p["value"] for p in section["summary"] if isinstance(p, dict)]
-assert summary_values == ["177", "1.9"], summary_values
+assert summary_values == ["177", "1.9 in"], summary_values
 prose = "".join(p if isinstance(p, str) else "{}" for p in section["summary"])
 assert prose == (
     "The frost-free season runs about {} days, from late April to mid October. "
-    "Rainfall exceeds evaporation from September through May; June through August run a deficit of about {} in."
+    "More rain falls than can evaporate from September through May; June through August run about {} short, when crops "
+    "and ponds draw on water stored earlier in the year."
 ), prose
 assert climate_section.month_run([10, 11, 12, 1, 2]) == "October through February"
 assert climate_section.month_run([6, 7, 9]) == "June, July and September"
@@ -176,10 +178,13 @@ for label in ("Potential evaporation, in", "Days over 1 in"):
     assert all(v in (ZERO_DASH, "<0.1") or re.fullmatch(r"\d+\.\d", v) for v in rows[label]), label
 assert all(v == ZERO_DASH or re.fullmatch(MINUS + r"?\d+\.\d", v) for v in balance)
 caption = section["table_caption"]
-assert [p["value"] for p in caption if isinstance(p, dict)] == ["0.96"]
+# The factor itself is in the methods note; the caption says what it means. The heavy-rain threshold is the constant's.
+assert [p["value"] for p in caption if isinstance(p, dict)] == ["5", "1 in"]
 assert "".join(p if isinstance(p, str) else "{}" for p in caption) == (
-    "Precipitation scaled by {} to the 5 nearest NOAA station normals; days over 1 in from the same stations."
+    "Precipitation is checked against the long-term averages of the {} nearest weather stations and adjusted to them; "
+    "the days over {} are the same stations' count."
 )
+assert any("factor 0.960" in n for n in section["methods"][1]["notes"])
 
 # DESIGN STORMS at the source's own precision; SEVERE WEATHER as reports per year and a peak month.
 storms = section["design_storms"]
@@ -189,7 +194,9 @@ assert [(r["label"], r["cells"]) for r in storms["table"]["rows"]] == [
     ("1-hour, in", ["1.19", "1.74", "2.07", "2.58"]),
     ("24-hour, in", ["2.38", "3.34", "3.96", "4.98"]),
 ]
-assert storms["caption"] == ["Point estimates from records through 2000; heavier recent storms are not reflected."]
+assert report_text.flatten(storms["caption"]) == ("Storm depths for this spot from rain records that end in 2000; the heavier storms of "
+                                                 "recent years are not in them.")
+assert [p for p in storms["caption"] if isinstance(p, dict)] == [{"value": "2000", "kind": "word"}], "a year, set as prose"
 severe = section["severe_weather"]
 assert severe["table"]["corner"] == "Within 25 miles" and severe["table"]["columns"] == ["Reports per year", "Peak month"]
 severe_rows = severe["table"]["rows"]
@@ -202,14 +209,15 @@ assert "cluster near roads and towns" in severe["caption"][0]
 wb = section["water_balance"]
 assert wb["chart"]["svg"].startswith("<svg") and [round(x, 2) for x in wb["chart"]["crossings"]] == [4.92, 7.65], wb["chart"]["crossings"]
 assert [b["sign"] for b in wb["chart"]["bands"]] == ["surplus", "deficit", "surplus"]
-assert wb["caption"] == ["Potential evaporation is estimated from temperature; actual loss depends on cover and soil."]
+assert wb["caption"] == ["Potential evaporation — what warm weather could draw from wet ground — is estimated from temperature; "
+                         "how much actually leaves depends on what grows and on the soil."]
 roses = section["wind_roses"]
 assert roses["unavailable"] is None and roses["chart"]["svg"].count(">wind from</text>") == 2
 assert [r["prevailing"] for r in roses["chart"]["roses"]] == ["W", "SW"], "the modal sectors, and the solid wedges"
 for rose in roses["chart"]["roses"]:
     assert rose["wedge_radii"][rose["prevailing"]] == max(rose["wedge_radii"].values()), "the solid wedge is the longest"
 assert any("Resultant wind" in n and "winter from SW (246°)" in n for n in section["methods"][3]["notes"])
-assert "regional estimate" in roses["caption"][0]
+assert "Wind for the region, not for this parcel" in roses["caption"][0]
 
 # THE SOURCES: one line per source, names and periods only, no data part.
 sources = ["".join(line) for line in section["sources"]]
@@ -238,11 +246,11 @@ short.climate["frost"]["first_fall"] = None
 short.climate["frost"]["frost_free_days"] = None
 short.climate["frost"]["years_with_fall_frost"] = 12
 short_section = climate_section.build_climate_section(short)
-assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == ["1.9"]
-assert "".join(p if isinstance(p, str) else "{}" for p in short_section["summary"]).startswith("Rainfall exceeds evaporation")
+assert [p["value"] for p in short_section["summary"] if isinstance(p, dict)] == ["1.9 in"]
+assert "".join(p if isinstance(p, str) else "{}" for p in short_section["summary"]).startswith("More rain falls than can evaporate")
 short_figures = {f["label"]: f for f in short_section["key_figures"]}
 assert short_figures["median first fall frost"]["value"] == "none recorded" and short_figures["median first fall frost"]["word"] is True
-assert "The median fall frost stands on 12 of the 30 years" in "".join(short_section["key_figures_caption"])
+assert "Only 12 of the 30 years had a fall frost; the fall date is the middle of those." in report_text.flatten(short_section["key_figures_caption"])
 
 # DEGRADED LAYERS leave a visible statement: "not covered" is told from "did not answer".
 uncovered = report_data_from_fixtures(
@@ -331,10 +339,11 @@ for marker in ('class="eyebrow"', 'class="heading"', 'class="summary"', 'class="
     assert html.count(marker) == 1, marker
 assert html.count('class="data-table') == 3 and html.count('class="caption"') == 6
 assert '<span class="eyebrow__number">II</span> · Climate' in html
-assert '<span class="data">177</span>' in html and '<span class="data">1.9</span>' in html
+assert '<span class="data">177</span>' in html and '<span class="data">1.9 in</span>' in html
 assert 'from late April to mid October' in html and '<span class="data">late April</span>' not in html
-# The data spans on the page: the summary's two, the table caption's factor, the hail label's size.
-assert html.count('<span class="data">') == 4, html.count('<span class="data">')
+# The data spans on the page: the summary's two, the table caption's station count and threshold, the hail label's
+# size. The design storms' record year is a date, set as prose.
+assert html.count('<span class="data">') == 5, html.count('<span class="data">')
 assert html.count('class="key-figure"') == 9
 assert html.count('<td class="num">') == 9 * 12 + 2 * 4 + 3 * 2 and html.count('<th class="num">') == 12 + 4 + 2
 assert html.count('class="source-footer__citation source-footer__line"') == 5 and 'class="source-footer__caveat"' not in html
