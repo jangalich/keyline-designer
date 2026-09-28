@@ -140,6 +140,7 @@ from shapely.geometry import LineString, MultiLineString, Point, box, mapping, s
 
 import design_record
 import naip_imagery
+import report_text as rt
 import report_map
 from display_outline import DISPLAY_ONLY_OUTLINE_PROPERTY
 from fence_display_geometry import DISPLAY_ONLY_FENCE_LINE_PROPERTY
@@ -440,8 +441,10 @@ def build_imagery_line(inputs: DesignInputs, underlay: Optional[dict]) -> list:
         return ["Aerial imagery unavailable: the NAIP imagery service did not answer for this parcel, and the map is "
                 "drawn without it."]
     acquired = naip_imagery.format_acquired(inputs.imagery)
-    return ["Aerial imagery: USDA NAIP, acquired ", {"value": acquired}, ", ",
-            {"value": f"{inputs.imagery['gsd']:g} m"}, " ground resolution. Outside the parcel the photograph is set back."]
+    # The date is a label, set as prose; the resolution is a measurement.
+    return rt.sentences(rt.clause("Aerial photograph: USDA NAIP, taken ", rt.word(acquired), ", showing detail down to about ",
+                                  rt.meters(inputs.imagery["gsd"]), "."),
+                        ["Outside the parcel it is faded back."])
 
 
 # ======================================================================
@@ -563,9 +566,9 @@ def build_record(record: dict, document: Optional[dict] = None) -> list:
             block["cards"] = [_card(_page_rows(card, empty, features.get(card.get("id")), committed_zone_ids))
                               for card in step["cards"]]
             if step["step_id"] == "roads":
-                block["note"] = ["Access point ", {"value": step["access_point"]["text"]}, ", placed."]
+                block["note"] = rt.clause("Access point ", rt.text(step["access_point"]["text"]), ", placed.")
             else:
-                block["note"] = [{"value": str(step["count"]["n"])}, f" {step['count']['noun']} committed."]
+                block["note"] = rt.clause(rt.number(step["count"]["n"]), f" {step['count']['noun']} committed.")
         blocks.append(block)
     return blocks
 

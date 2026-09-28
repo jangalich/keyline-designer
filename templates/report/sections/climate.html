@@ -19,29 +19,23 @@
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
-    {{ c8.chart(section.water_balance.chart, "water-balance") }}
-    {{ c9.caption(section.water_balance.caption) }}
+    {% call c9.captioned(section.water_balance.caption) %}{{ c8.chart(section.water_balance.chart, "water-balance") }}{% endcall %}
 {%- if section.wind_roses.chart %}
-    {{ c8.chart(section.wind_roses.chart, "wind-roses") }}
-    {{ c9.caption(section.wind_roses.caption) }}
+    {% call c9.captioned(section.wind_roses.caption) %}{{ c8.chart(section.wind_roses.chart, "wind-roses") }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.wind_roses.unavailable) }}
 {%- endif %}
   </div>
   <div class="section__detail">
-    {{ c4.key_figures(section.key_figures) }}
-    {{ c9.caption(section.key_figures_caption) }}
-    {{ c5.data_table(section.table) }}
-    {{ c9.caption(section.table_caption) }}
+    {% call c9.captioned(section.key_figures_caption) %}{{ c4.key_figures(section.key_figures) }}{% endcall %}
+    {% call c9.captioned(section.table_caption) %}{{ c5.data_table(section.table) }}{% endcall %}
 {%- if section.design_storms.table %}
-    {{ c5.data_table(section.design_storms.table) }}
-    {{ c9.caption(section.design_storms.caption) }}
+    {% call c9.captioned(section.design_storms.caption) %}{{ c5.data_table(section.design_storms.table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.design_storms.unavailable) }}
 {%- endif %}
 {%- if section.severe_weather %}
-    {{ c5.data_table(section.severe_weather.table) }}
-    {{ c9.caption(section.severe_weather.caption) }}
+    {% call c9.captioned(section.severe_weather.caption) %}{{ c5.data_table(section.severe_weather.table) }}{% endcall %}
 {%- endif %}
     {{ c6.source_footer({"lines": section.sources}) }}
   </div>

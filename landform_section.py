@@ -87,6 +87,7 @@ from shapely.ops import substring, unary_union
 import landform_derivations
 import report_chart
 import report_map
+import report_text as rt
 from contour_lines import _grid_axes
 from raster_grid import SQUARE_METERS_PER_ACRE, cells_in_polygon
 from report_outline import section_number
@@ -426,7 +427,7 @@ def outside_keypoints(terrain: TerrainInputs) -> list:
 
 
 def _feet(meters_or_feet: float) -> str:
-    return f"{round(meters_or_feet):,}"
+    return rt.whole_text(meters_or_feet)
 
 
 def _one_decimal(value: float) -> str:
@@ -505,16 +506,11 @@ def dominant_slope_class(counts: dict) -> str:
 
 def build_summary(relief_ft: float, slope_counts: dict, aspect_counts: dict) -> list:
     cls = dominant_slope_class(slope_counts)
-    parts = [
-        "The land rises ", {"value": _feet(relief_ft)}, " ft across the parcel. Most of it is in slope class ",
-        {"value": cls}, ", ", {"value": slope_range_label(cls)},
-    ]
     sector = dominant_aspect(aspect_counts)
-    if sector is None:
-        parts.append(", and it is essentially flat.")
-    else:
-        parts.append(f", and it falls toward the {ASPECT_WORDS[sector]}.")
-    return parts
+    falls = ", and it is essentially flat." if sector is None else f", and it falls toward the {ASPECT_WORDS[sector]}."
+    return rt.sentences(rt.clause("The land rises ", rt.feet_of(relief_ft), " across the parcel."),
+                        rt.clause("Most of it is in slope class ", rt.text(cls), " — the soil survey's band for ",
+                                  rt.text(slope_range_label(cls)), " slopes —", falls[1:]))
 
 
 def build_key_figures(contours: dict, classified: dict, derived: landform_derivations.TerrainDerived) -> list:
@@ -555,8 +551,12 @@ def keypoint_figure_label(counts: dict) -> str:
     return f"keypoints detected, {outside} just outside the boundary"
 
 
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+# The profile calls a reach short under this share of the valley's length.
+SHORT_REACH_SHARE = 0.25
+# A reach on the parcel needs the stem to cross the boundary going in and coming out.
+REACH_CROSSINGS = 2
+# The keypoint glossed at first use on each page it appears: the structure page and the numbers page.
+KEYPOINT_WHERE = "where a valley's floor eases from steep to gentle"
 
 
 def build_keypoint_statement(derived: landform_derivations.TerrainDerived, keypoints: list) -> list:
@@ -566,27 +566,22 @@ def build_keypoint_statement(derived: landform_derivations.TerrainDerived, keypo
     counts = derived.keypoint_counts
     if counts["detected"] == 0:
         return ["No keypoint was found on this property, so there is no keyline to draw."]
-    parts = [{"value": str(counts["detected"])}, " keypoint" + ("s" if counts["detected"] != 1 else "")]
-    if counts["outside"] == 0:
-        parts += [", all on the property."]
-    else:
-        outside = [kp for kp in keypoints if not kp.get("on_parcel")]
-        farthest_ft = max(float(kp.get("distance_outside_boundary_m") or 0.0) for kp in outside) / METERS_PER_FOOT
-        parts += [
-            ": ", {"value": str(counts["on_parcel"])}, " on the property and ",
-            {"value": str(counts["outside"])}, " just outside the boundary, within ",
-            {"value": f"{_feet(farthest_ft)} ft"}, " of it",
-        ]
-        crossing = sum(1 for k in derived.keylines if not k["keypoint_on_parcel"] and k["on_parcel"] is not None)
-        if crossing:
-            parts += ["; its keyline still crosses the parcel and is drawn." if crossing == 1
-                      else "; their keylines still cross the parcel and are drawn."]
-        else:
-            parts += ["."]
+    lead = rt.count(counts["detected"], "keypoint")
     missing = [k for k in derived.keylines if k["geometry"] is None]
-    if missing:
-        parts += [f" {_plural(len(missing), 'keypoint')} could not be given a keyline: {missing[0]['reason']}."]
-    return parts
+    unkeyed = rt.clause(rt.count(len(missing), "keypoint"), f" could not be given a keyline: {missing[0]['reason']}.") if missing else None
+    if counts["outside"] == 0:
+        return rt.sentences(rt.clause(lead, ", all on the property."), unkeyed)
+    outside = [kp for kp in keypoints if not kp.get("on_parcel")]
+    farthest = max(float(kp.get("distance_outside_boundary_m") or 0.0) for kp in outside)
+    crossing = sum(1 for k in derived.keylines if not k["keypoint_on_parcel"] and k["on_parcel"] is not None)
+    if crossing:
+        tail = ("; its keyline still crosses the parcel and is drawn." if crossing == 1
+                else "; their keylines still cross the parcel and are drawn.")
+    else:
+        tail = "."
+    return rt.sentences(rt.clause(lead, ": ", rt.number(counts["on_parcel"]), " on the property and ", rt.number(counts["outside"]),
+                                  " just outside the boundary, within ", rt.feet(farthest), " of it", tail),
+                        unkeyed)
 
 
 def build_valley_table(derived: landform_derivations.TerrainDerived) -> Optional[dict]:
@@ -615,17 +610,26 @@ def build_valley_table(derived: landform_derivations.TerrainDerived) -> Optional
     }
 
 
+def _valley(number) -> rt.Value:
+    """'Valley 1': the valley's number is a label, not a measurement."""
+    return rt.word(f"Valley {number}")
+
+
+def _valley_keypoint_clause(row: dict) -> list:
+    kp = row["keypoint"]
+    if kp is None:
+        return rt.clause(_valley(row["number"]), " has no keypoint, so it has no keyline.")
+    if not kp["on_parcel"]:
+        return rt.clause(_valley(row["number"]), "'s keypoint lies ", rt.feet(kp["distance_outside_boundary_m"]), " outside the boundary.")
+    return None
+
+
 def build_valley_table_caption(derived: landform_derivations.TerrainDerived) -> list:
-    parts = ["The stem is the valley's main line traced from its outlet up to the ridge, measured on the parcel; the "
-             "fall is its drop between entering and leaving; above and below are the grades either side of the keypoint."]
-    for row in derived.valley_rows:
-        kp = row["keypoint"]
-        if kp is None:
-            parts.append(f" Valley {row['number']} has no keypoint, so it has no keyline.")
-        elif not kp["on_parcel"]:
-            parts += [f" Valley {row['number']}'s keypoint lies ", {"value": f"{_feet(kp['distance_outside_boundary_m'] / METERS_PER_FOOT)} ft"},
-                      " outside the boundary."]
-    return parts
+    """The column headers stay the survey's own; the caption says what each
+    means. The keypoint is glossed here too: this is its own page."""
+    return rt.sentences([f"Stem is the valley's main line, traced from its outlet up to the ridge and measured on the parcel; fall is "
+                         f"its drop across the parcel; above and below are its grades either side of the keypoint, {KEYPOINT_WHERE}."],
+                        *[_valley_keypoint_clause(row) for row in derived.valley_rows])
 
 
 def build_profile(derived: landform_derivations.TerrainDerived, tokens: dict) -> dict:
@@ -650,25 +654,28 @@ def build_profile(derived: landform_derivations.TerrainDerived, tokens: dict) ->
         },
     }
     chart = report_chart.render_valley_profile(chart_input, tokens)
-    caption = [f"Valley {number}, the full stem from its head to where it leaves the elevation model; vertical exaggeration ",
-               {"value": f"{chart['exaggeration']}×"}, "."]
+    total_ft = profile["distance_m"][-1] / METERS_PER_FOOT
     crossings = profile["crossings"]
-    if len(crossings) >= 2:
-        reach_ft = sum(b["distance_m"] - a["distance_m"] for a, b in zip(crossings, crossings[1:]) if a["entering"]) / METERS_PER_FOOT
-        caption += [" The parcel is the short reach between the ticks, ", {"value": f"{_feet(reach_ft)} ft"},
-                    " of it." if reach_ft / (profile["distance_m"][-1] / METERS_PER_FOOT) < 0.25 else " of it."]
-        if reach_ft / (profile["distance_m"][-1] / METERS_PER_FOOT) >= 0.25:
-            caption[-3] = " The parcel is the reach between the ticks, "
+    if len(crossings) >= REACH_CROSSINGS:
+        reach_m = sum(b["distance_m"] - a["distance_m"] for a, b in zip(crossings, crossings[1:]) if a["entering"])
+        short = "the short reach" if reach_m / METERS_PER_FOOT / total_ft < SHORT_REACH_SHARE else "the reach"
+        reach = rt.clause(f"The parcel is {short} between the ticks, ", rt.feet(reach_m), " of it.")
     elif len(crossings) == 1:
-        caption.append(" The tick is where the stem enters the parcel." if crossings[0]["entering"]
-                       else " The tick is where the stem leaves the parcel.")
+        reach = ["The tick is where the valley enters the parcel." if crossings[0]["entering"] else "The tick is where the valley leaves the parcel."]
     elif all(profile["on_parcel"]):
-        caption.append(" The whole stem lies on the parcel.")
+        reach = ["The whole valley floor shown lies on the parcel."]
+    else:
+        reach = None
     if keypoint is None:
-        caption.append(" No keypoint was found on this valley, so no grades are marked and it has no keyline.")
+        marked = ["No keypoint was found on this valley, so no grades are marked and it has no keyline."]
     elif not keypoint["on_parcel"]:
-        caption += [" The keypoint lies ", {"value": f"{_feet(keypoint['distance_outside_boundary_m'] / METERS_PER_FOOT)} ft"},
-                    " outside the boundary."]
+        # The structure caption above gives the distance; a second figure on the same page would read as new.
+        marked = ["Its keypoint is just outside the boundary."]
+    else:
+        marked = None
+    caption = rt.sentences(rt.clause(_valley(number), "'s floor from its head to the edge of the elevation data, drawn ",
+                                     rt.times(chart["exaggeration"]), " steeper than life."),
+                           reach, marked)
     return {"chart": chart, "caption": caption, "valley_number": number, "unavailable": None}
 
 
@@ -777,9 +784,9 @@ def build_structure_layers(terrain: TerrainInputs, contours: dict, derived: land
 def build_structure_caption(derived: landform_derivations.TerrainDerived, keypoints: list) -> list:
     """Under the keyline-structure map: what a keyline is, then the
     keypoint count as a rule."""
-    parts = ["A keyline is the contour through its keypoint, drawn out to the ridges either side of its valley: "
-             "the reference line from which cultivation is laid out. "]
-    return parts + build_keypoint_statement(derived, keypoints)
+    return rt.sentences([f"A keypoint is {KEYPOINT_WHERE}; its keyline, the contour through it out to the ridges, is the line "
+                         "keyline cultivation follows."],
+                        build_keypoint_statement(derived, keypoints))
 
 
 # ======================================================================

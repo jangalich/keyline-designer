@@ -50,6 +50,7 @@ import census_geography
 import overview_derivations as od
 import report_map
 import structures_data
+import report_text as rt
 import transmission_lines
 from climate_section import format_generated_on
 from report_outline import section_number
@@ -87,8 +88,7 @@ BOUNDARY_STATEMENT = "The boundary is as drawn by the user and is not a survey."
 # ======================================================================
 
 
-def _ft(value_ft: float) -> str:
-    return f"{round(value_ft):,}"
+_ft = rt.whole_text
 
 
 def _mi(meters: float) -> str:
@@ -118,10 +118,9 @@ def relief_position(percentile: float) -> str:
     return "high in"
 
 
-def _series(words: list) -> str:
-    if len(words) <= 1:
-        return "".join(words)
-    return ", ".join(words[:-1]) + " and " + words[-1]
+_series = rt.series_text
+# The transmission search reaches this far; said from the constant, never typed.
+SEARCH_RADIUS = rt.miles(transmission_lines.SEARCH_RADIUS_MILES)
 
 
 # ======================================================================
@@ -257,7 +256,6 @@ def build_summary(derived: od.OverviewDerived) -> list:
     """Two sentences: the drainage fact first when more ground drains onto
     the parcel than it covers -- the one fact about its setting a reader
     would act on -- then where it sits, in words, and where it is."""
-    parts = []
     acres = round(derived.acres, 1)
     landscape = derived.landscape
     place = []
@@ -271,16 +269,13 @@ def build_summary(derived: od.OverviewDerived) -> list:
         bound = "at least " if inflow["truncated"] else ""
         position = relief_position(landscape["percentile_mean"])
         if inflow["acres"] > derived.acres:
-            parts += [f"{bound.capitalize()}", {"value": f"{_acres(inflow['acres'])} acres"},
-                      " of higher ground drain onto this ", {"value": f"{_acres(acres)}-acre"},
-                      " parcel, more than its own area. "]
+            drains = rt.clause(bound.capitalize(), rt.acres(inflow["acres"]), " of higher ground drain onto this ",
+                               rt.acres_adjective(acres), " parcel, more than its own area.")
         else:
-            parts += ["This ", {"value": f"{_acres(acres)}-acre"}, " parcel takes the drainage of ", bound,
-                      {"value": f"{_acres(inflow['acres'])} acres"}, " of higher ground. "]
-        parts += [f"It sits on a {landscape['class']} {position} the surrounding terrain{where}."]
-    else:
-        parts += ["A ", {"value": f"{_acres(acres)}-acre"}, f" parcel{where}."]
-    return [p for p in parts if p != ""]
+            drains = rt.clause("This ", rt.acres_adjective(acres), " parcel takes the drainage of ", bound, rt.acres(inflow["acres"]),
+                               " of higher ground.")
+        return rt.sentences(drains, [f"It sits on a {landscape['class']} {position} the surrounding terrain{where}."])
+    return rt.clause("A ", rt.acres_adjective(acres), f" parcel{where}.")
 
 
 def build_key_figures(derived: od.OverviewDerived) -> list:
@@ -304,7 +299,7 @@ def build_key_figures(derived: od.OverviewDerived) -> list:
         figures.append({"value": _mi(derived.transmission["nearest"]["distance_m"]),
                         "label": "to the nearest transmission line"})
     else:
-        figures.append({"value": "over 5 mi" if derived.transmission is not None else "not assessed",
+        figures.append({"value": f"over {SEARCH_RADIUS['value']}" if derived.transmission is not None else "not assessed",
                         "word": derived.transmission is None, "label": "to the nearest transmission line"})
     return figures
 
@@ -333,7 +328,7 @@ def build_facts_table(derived: od.OverviewDerived) -> dict:
     if transmission is not None:
         nearest, known = transmission["nearest"], transmission["nearest_known_voltage"]
         if nearest is None:
-            text = ["No mapped transmission line within ", {"value": "5 mi"}, "."]
+            text = ["No mapped transmission line within ", SEARCH_RADIUS, "."]
         else:
             text = [{"value": _mi(nearest["distance_m"])}, " to the nearest mapped line, "]
             if nearest["voltage_kv"] is not None:
@@ -356,18 +351,16 @@ def build_facts_table(derived: od.OverviewDerived) -> dict:
 
 def build_boundary_statement(derived: od.OverviewDerived) -> list:
     """The statement, and the centroid every point-based figure was read at."""
-    return [BOUNDARY_STATEMENT + " Its centre, where the point-based sources were read: ",
-            {"value": _lat_lon(derived.centroid)}, "."]
+    return rt.clause(BOUNDARY_STATEMENT + " Its centre, where the point-based sources were read: ", rt.text(_lat_lon(derived.centroid)), ".")
 
 
 def build_map_caption(derived: od.OverviewDerived, rendered: dict, inputs: od.OverviewInputs) -> list:
     if rendered is None:
         return []
-    cell = max(inputs.context_dem["resolution_meters"])
-    return ["About a mile around the parcel, from coarser data: contours every ",
-            {"value": f"{derived.context_contours['interval_ft']} ft"}, " from a ", {"value": f"{cell:.0f} m"},
-            " elevation grid, the ground tinted darker every ", {"value": f"{derived.context_contours['interval_ft'] * derived.context_contours['index_every']} ft"},
-            " higher. This map shows where the parcel sits, not its ground; the parcel's terrain is in Landform."]
+    contours = derived.context_contours
+    return rt.sentences(rt.clause("About a mile around the parcel, from coarser data: contours every ", rt.feet_of(contours["interval_ft"]),
+                                  ", the ground tinted darker every ", rt.feet_of(contours["interval_ft"] * contours["index_every"]), " higher."),
+                        ["It shows where the parcel sits, not its ground; the parcel's own terrain is in Landform."])
 
 
 def build_unavailable(derived: od.OverviewDerived) -> list:
@@ -449,13 +442,15 @@ def build_methods(inputs: od.OverviewInputs, derived: od.OverviewDerived) -> lis
                        f"within 0.5 (bench at or under {od.LANDSCAPE_BENCH_MAX_SLOPE_DEG:.0f} degrees of median slope), "
                        "valley floor below -0.5. Drainage from above: the ground outside the parcel whose D8 flow "
                        "paths enter it. Context contours: the smallest of 10, 20, 40 or 80 ft giving at most "
-                       f"{od.CONTEXT_CONTOUR_MAX_LINES} levels across the window, an index every {od.CONTEXT_INDEX_EVERY}."),
+                       f"{od.CONTEXT_CONTOUR_MAX_LINES} levels across the window, an index every {od.CONTEXT_INDEX_EVERY}, "
+                       f"from the context grid at {max(inputs.context_dem['resolution_meters']):.0f} m."),
             "notes": [],
         })
     methods.append({
         "source": "Site overview",
         "method": ("Buildings: FEMA USA Structures footprints intersecting the boundary; structures under 450 sq ft "
-                   "are not inventoried. Transmission: the nearest HIFLD line within five miles of the boundary, "
+                   "are not inventoried. Transmission: the nearest HIFLD line within "
+                   f"{transmission_lines.SEARCH_RADIUS_MILES} miles of the boundary, "
                    "measured in the parcel's UTM zone; the source's unknown voltages are reported as not recorded. "
                    "Province at the centroid, from the 1:7,000,000 map; its sections are not printed."),
         "notes": [],

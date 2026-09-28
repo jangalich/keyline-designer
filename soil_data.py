@@ -29,6 +29,10 @@ SDA_ENDPOINT = "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest"
 # Applies to every SSURGO feature this module returns — a property of the
 # survey itself, not of any single map unit, so it's the same note on every
 # feature rather than computed per-feature.
+# The scale SSURGO's map units are compiled at: the report's captions and
+# methods say it from here, never as typed text.
+SSURGO_COMPILATION_SCALE = 24_000
+
 SSURGO_CONFIDENCE_NOTES = (
     "SSURGO map unit polygon boundaries are digitized from soil surveys "
     "conducted at roughly 1:24,000 scale and generalized to that scale — "

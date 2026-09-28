@@ -136,9 +136,9 @@ assert "layer-streams-intermittent" not in svg, "the intermittent tributary lies
 # caption (branch 17: on the map the statement sat across the parcel's contours).
 assert SECTION["map"]["frame"][0] < report_map.FRAME_WIDTH_PT and SECTION["map"]["frame"] == LANDFORM["map"]["frame"]
 assert '<g id="map-note">' not in svg
-assert _text(SECTION["map_caption"]).startswith("No mapped stream, waterbody, wetland or 1%-annual-chance flood zone on the parcel. ")
+assert _text(SECTION["map_caption"]).startswith("No mapped stream, open water, wetland or 1%-annual-chance (100-year) flood zone on the parcel. ")
 note = ws.empty_parcel_note(DERIVED, INPUTS.boundary_polygon_utm)
-assert note["lines"] == ["No mapped stream, waterbody, wetland", "or 1%-annual-chance flood zone on the parcel."]
+assert note["lines"] == ["No mapped stream, open water, wetland", "or 1%-annual-chance (100-year) flood zone on the parcel."]
 assert INPUTS.boundary_polygon_utm.contains(note["point"])
 # A parcel with a stream on it gets no note; one where NWI and FEMA were not read names only what was checked.
 with_stream = copy.deepcopy(DERIVED.surface_water)
@@ -200,7 +200,10 @@ print(f"   m/unit {SECTION['map']['meters_per_unit']:.4f} on all three maps; hyd
 print("4. the tables: three states in the water table; every acreage table sums to the cover")
 COVER = round(INPUTS.parcel_acres, 1)
 surface = SECTION["surface_water_table"]
-assert surface["columns"] == ["Permanence", "Order", "On the parcel, ft", "Within 500 ft, ft", "Distance, ft"]
+# THE BUFFER SAID ONE WAY: the header, the captions and the key figures all read ADJACENCY_BUFFER_METERS, 492 ft.
+assert surface["columns"] == ["Permanence", "Order", "On the parcel, ft", "Within 492 ft, ft", "Distance, ft"]
+assert ws.WITHIN["value"] == "492 ft" and not any("500 ft" in _text(v) for k, v in SECTION.items()
+                                                  if isinstance(v, list) and ("caption" in k or k == "summary"))
 # Two rows: the reaches within 500 ft of the boundary. The tributary at 873 ft is not in a table headed "within 500 ft".
 assert [r["label"] for r in surface["rows"]] == ["Montour Run", "Montour Run"]
 assert surface["rows"][0]["cells"] == ["perennial", "2", ZERO_DASH, "785", "255"] and surface["rows"][1]["cells"][-1] == "490"
@@ -236,9 +239,11 @@ with patch.object(ws, "WATER_TABLE_TWELVE_MONTH_MAX_UNITS", 3):
     four_caption = _text(ws.build_water_table_caption(DERIVED))
 assert four["columns"] == ["January", "April", "July", "October"] and four["monthly"] is False and four["compact"] is True
 assert four["rows"][0]["cells"] == [guernsey[0], guernsey[3], guernsey[6], guernsey[9]]
-assert "Four representative months" in four_caption and "Four representative months" not in _text(SECTION["water_table_caption"])
+assert "Only January, April, July and October are shown" in four_caption and "are shown" not in _text(SECTION["water_table_caption"])
 caption = _text(SECTION["water_table_caption"])
-assert "is not a depth" in caption and "no data" in caption and "1:24,000" in caption
+# The bound the caption explains is one the table carries, not a typed example.
+assert "“>56” means none within the 56 in the survey describes" in caption and "no data" in caption
+assert "1:24,000" in SECTION["methods"][2]["method"]
 # The comparison, land cover and flood tables partition the parcel.
 comparison = SECTION["comparison_table"]
 assert [r["label"] for r in comparison["rows"]] == ["Terrain wetness only", "Hydric soil only", "Mapped wetland only",
@@ -255,8 +260,8 @@ assert land["rows"][0]["cells"] == ["45.9", "48.8", "5.3"] and land["rows"][2]["
 # A parcel wholly in one zone gets a sentence, not a two-row table saying the same thing twice.
 assert SECTION["flood_table"] is None
 flood_statement = _text(SECTION["flood_statement"])
-assert flood_statement == ("The whole parcel lies in FEMA Zone X, an area of minimal flood hazard, on FIRM panel 42003C0065H "
-                           "effective 26 September 2014.")
+assert flood_statement == ("The whole parcel lies in FEMA Zone X, an area of minimal flood hazard, on flood insurance rate map panel "
+                           "42003C0065H effective 26 September 2014.")
 # Two zones on the parcel -> the table, a partition summing to the cover.
 split = copy.deepcopy(DATA.fema_nfhl)
 sx0, sy0, sx1, sy1 = INPUTS.boundary_polygon_utm.bounds
@@ -276,16 +281,20 @@ assert figures[0]["value"] == "255 ft" and figures[2] == {"value": "None", "labe
 assert figures[5]["value"] == "532 ac" and figures[6]["value"] == "27.3 ac" and figures[8]["value"] == "Zone X" and figures[8]["word"]
 assert all(re.match(r"^[\d,.]+( ft| ac|%)$", f["value"]) for f in figures if not f.get("word")), "measurements in the data face only"
 summary = _text(SECTION["summary"])
-assert summary == ("No mapped stream crosses the parcel; Montour Run, perennial and order 2, runs 255 ft beyond the boundary. "
-                   "The soil survey maps 0.1 acres as hydric and terrain wetness marks 1.1 acres; the whole parcel lies in FEMA Zone X.")
-assert {"value": "255 ft"} in SECTION["summary"] and {"value": "0.1"} in SECTION["summary"]
+assert summary == ("No mapped stream crosses the parcel; Montour Run, perennial and of stream order 2 (counted up from the smallest "
+                   "headwaters), runs 255 ft beyond the boundary. The soil survey maps 0.1 acres as hydric — formed under saturation — "
+                   "and the lie of the land marks 1.1 acres as likely wet; the whole parcel lies in FEMA Zone X.")
+assert {"value": "255 ft"} in SECTION["summary"] and {"value": "0.1 acres"} in SECTION["summary"]
 assert _text(SECTION["map_caption"]).endswith(ws.NWI_CAVEAT) and "2023" in _text(SECTION["map_caption"])
-assert _text(SECTION["surface_water_caption"]).endswith(ws.NHD_CAVEAT) and "No spring or seep is mapped" in _text(SECTION["surface_water_caption"])
+assert _text(SECTION["surface_water_caption"]).endswith(_text(ws.NHD_CAVEAT)) and "No lake, open water, spring or seep" in _text(SECTION["surface_water_caption"])
 assert _text(SECTION["flood_caption"]).endswith(ws.FEMA_CAVEAT) and "Zone A" in _text(SECTION["flood_caption"])
-assert _text(SECTION["wetness_caption"]).endswith(ws.TWI_CAVEAT) and "7.2" in _text(SECTION["wetness_caption"])
+# The index's threshold and the percentile it is read at are in the methods note, not the caption.
+assert _text(SECTION["wetness_caption"]).endswith(ws.TWI_CAVEAT) and "7.2" not in _text(SECTION["wetness_caption"])
+assert "90th percentile of the window's raw TWI (7.2 here)" in SECTION["methods"][-1]["method"]
 land_caption = _text(SECTION["land_cover_caption"])
-assert "not a comparison of the parcel with its surroundings" in land_caption and "lower bound" in land_caption and "532" in land_caption
-assert "does not resolve ground this size" in _text(SECTION["comparison_caption"])
+assert "not the parcel against its surroundings" in land_caption and "at least this much" in land_caption and "532" in land_caption
+assert "77 here, so it is a lower bound" in SECTION["methods"][-1]["method"]
+assert "too small for the soil map to resolve" in _text(SECTION["comparison_caption"])
 assert len(SECTION["sources"]) == 7 and all(len(line) == 1 for line in SECTION["sources"])
 assert [m["source"] for m in SECTION["methods"]] == ["USGS NHD", "USGS NHDPlus HR", "USDA NRCS SSURGO", "USFWS NWI", "FEMA NFHL",
                                                      "USGS Annual NLCD", "USGS 3DEP"]
@@ -391,9 +400,9 @@ bound_cells = [cell for _, text, cell in monthly_cells if text.startswith(">")]
 assert all("num--bound" in (c.element.get("class") or "") for c in bound_cells)
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[6:9])
 squash = "".join(flat.split())
-for caption in (ws.NWI_CAVEAT, ws.NHD_CAVEAT, ws.TWI_CAVEAT, ws.FEMA_CAVEAT):
+for caption in (ws.NWI_CAVEAT, _text(ws.NHD_CAVEAT), ws.TWI_CAVEAT, ws.FEMA_CAVEAT):
     assert "".join(caption.split()) in squash, caption[:40]
-assert "".join("not a comparison of the parcel with its surroundings".split()) in squash
+assert "".join("not the parcel against its surroundings".split()) in squash
 assert "IV·WATER&HYDROLOGY,CONTINUED" in squash.upper().replace(" ", "")
 # Landform and Climate intact ahead of it: six pages before Water, the Landform maps at the same scale.
 assert 'class="section section--landform section--map"' in html and len(_numeric_cells(pages[2]._page_box)) == 108 + 6
@@ -413,9 +422,9 @@ assert round(sum(degraded_section["comparison_table"]["acres"]), 6) == COVER
 assert degraded_section["key_figures"][2] == {"value": "Unavailable", "label": "mapped wetland on the parcel", "word": True}
 assert degraded_section["key_figures"][8] == {"value": "Unavailable", "label": "FEMA flood zone", "word": True}
 assert "map-note" not in degraded_section["map"]["svg"]
-assert _text(degraded_section["map_caption"]).startswith("No mapped stream or waterbody on the parcel. The National Wetlands Inventory did not answer")
+assert _text(degraded_section["map_caption"]).startswith("No mapped stream or open water on the parcel. The National Wetlands Inventory did not answer")
 assert "wetland" not in ws.empty_parcel_note(degraded_section["derived"], INPUTS.boundary_polygon_utm)["lines"][0]
-assert _text(degraded_section["summary"]).endswith("terrain wetness marks 1.1 acres.")
+assert _text(degraded_section["summary"]).endswith("the lie of the land marks 1.1 acres as likely wet.")
 assert len(degraded_section["sources"]) == 5
 degraded_html = site_report.render_site_report_html(degraded_data, generated_on=GENERATED_ON, terrain=TERRAIN, water=degraded_inputs)
 degraded_document = HTML(string=degraded_html, base_url=site_report.TEMPLATES_DIRECTORY).render()

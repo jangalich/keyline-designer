@@ -68,12 +68,12 @@ from shapely.geometry import LineString, MultiLineString, Point, box
 from shapely.ops import unary_union
 
 import access_derivations as ad
+import report_text as rt
 import report_map
 import soil_road_ratings as srr
 import water_derivations as wd
 from landform_section import (
     ZERO_DASH,
-    _feet,
     _one_decimal,
     _one_decimal_or_dash,
     allocate_exactly,
@@ -119,8 +119,17 @@ FRONTAGE_ROWS_MAX = 4
 FEATURE_NAME_SHARE = 0.25
 FEATURE_NAME_MAX = 6
 
-ROADS_CAVEAT = "The source does not say whether a road is public, and shows no track it never surveyed."
-SOIL_SLOPE_CLAUSE = "its slope feature is the survey's slope phase, not the elevation model's grid above"
+ROADS_CAVEAT = "The source does not say whether a road is public, and shows only tracks it surveyed."
+SOIL_SLOPE_CLAUSE = "its slope is the survey's own, not the slopes measured above"
+# NRCS's worst class, glossed at first use on each page it is read on.
+VERY_LIMITED_GLOSS = "its worst class"
+# A boundary edge reads as steep when at least this share of it is undrivable and it is longer than this.
+STEEP_EDGE_SHARE = 0.75
+STEEP_EDGE_MIN_M = 20.0
+# Three or more steep sides read as a sweep: "the edges from east round to north".
+ROUND_SIDES = 3
+# A limiting feature that affects a map unit's whole ground.
+WHOLLY = 0.99
 
 
 # ======================================================================
@@ -128,30 +137,18 @@ SOIL_SLOPE_CLAUSE = "its slope feature is the survey's slope phase, not the elev
 # ======================================================================
 
 
-def _ft(meters: float) -> str:
-    return _feet(meters / METERS_PER_FOOT)
+_ft = rt.feet_text
 
 
-def _pct(value: float) -> str:
-    return f"{value:.0f}%"
+_pct = rt.percent_text
 
 
 def _ft_or_dash(meters: float) -> str:
     return ZERO_DASH if meters <= 0 else _ft(meters)
 
 
-def _lower(name: str) -> str:
-    """NRCS's feature name in running text: 'Depth to saturated zone' ->
-    'depth to saturated zone'; 'Shrink-swell' stays."""
-    return name[:1].lower() + name[1:] if name else name
-
-
-def _list(words: list) -> str:
-    if not words:
-        return ""
-    if len(words) == 1:
-        return words[0]
-    return ", ".join(words[:-1]) + " and " + words[-1]
+_lower = rt.lower_first
+_list = rt.series_text
 
 
 def _side(parcel, geometry) -> Optional[str]:
@@ -301,82 +298,101 @@ def empty_map_note(derived: ad.AccessDerived, parcel) -> Optional[dict]:
 # ======================================================================
 
 
-def build_summary(derived: ad.AccessDerived, parcel) -> list:
+def _frontage_sentence(derived: ad.AccessDerived, parcel) -> list:
     frontage = derived.frontage
-    boundary = derived.boundary
-    perimeter = boundary["perimeter_m"]
-    parts = []
     if frontage["roads"]:
         sides = []
         for road in frontage["roads"][:2]:
             side = _side(parcel, road["geometry"])
             name = "an unnamed road" if road["name"] == "Unnamed road" else road["name"]
             sides.append(f"{name} on the {side}" if side else name)
-        parts += ["Mapped roads front ", {"value": f"{_ft(frontage['total_m'])} ft"}, " of the ", {"value": f"{_ft(perimeter)} ft"},
-                  f" boundary, {_list(sides)}. "]
-    elif frontage["nearest"]:
+        return rt.clause("Mapped roads front ", rt.feet(frontage["total_m"]), " of the ", rt.feet(derived.boundary["perimeter_m"]),
+                         f" boundary, {_list(sides)}.")
+    if frontage["nearest"]:
         nearest = frontage["nearest"]
-        parts += ["No mapped road touches the boundary: the nearest, ", nearest["name"], ", lies ",
-                  {"value": f"{_ft(nearest['distance_m'])} ft"}, f" to the {nearest['sector']}. "]
-    else:
-        parts += ["No mapped public road lies within ", {"value": f"{_ft(wd.ADJACENCY_BUFFER_METERS)} ft"}, " of the boundary. "]
-    drivable = boundary["lengths_m"][ad.DRIVABLE]
-    parts += [{"value": f"{_ft(drivable)} ft"}, " of the boundary is under ", {"value": _pct(boundary["threshold_pct"])}, " slope"]
-    if frontage["roads"]:
-        on_frontage = boundary["frontage_lengths_m"][ad.DRIVABLE]
-        parts += [", ", {"value": f"{_ft(on_frontage)} ft"}, " of it on that frontage"]
-    steep_sides = [e for e in boundary["edges"] if e["undrivable_share"] is not None and e["undrivable_share"] >= 0.75 and e["length_m"] > 20]
-    if steep_sides:
-        names = []
-        for edge in steep_sides:
+        return rt.clause("No mapped road touches the boundary: the nearest, ", nearest["name"], ", lies ", rt.feet(nearest["distance_m"]),
+                         f" to the {nearest['sector']}.")
+    return rt.clause("No mapped public road lies within ", rt.feet(wd.ADJACENCY_BUFFER_METERS), " of the boundary.")
+
+
+def _steep_sides(boundary: dict) -> list:
+    names = []
+    for edge in boundary["edges"]:
+        if edge["undrivable_share"] is not None and edge["undrivable_share"] >= STEEP_EDGE_SHARE and edge["length_m"] > STEEP_EDGE_MIN_M:
             side = {"N": "north", "NE": "north-east", "E": "east", "SE": "south-east", "S": "south", "SW": "south-west", "W": "west",
                     "NW": "north-west"}[ad.compass_sector(edge["midpoint_bearing_deg"])]
             if side not in names:
                 names.append(side)
-        if len(names) >= 3:
-            parts += [f"; the edges from {names[0]} round to {names[-1]} are steeper. "]
-        else:
-            parts += [f"; the {_list(names)} {'edges are' if len(names) > 1 else 'edge is'} steeper. "]
+    return names
+
+
+def _drivable_sentence(derived: ad.AccessDerived) -> list:
+    boundary = derived.boundary
+    parts = [rt.feet(boundary["lengths_m"][ad.DRIVABLE]), " of the boundary is under ", rt.percent(boundary["threshold_pct"]), " slope"]
+    if derived.frontage["roads"]:
+        parts += [", ", rt.feet(boundary["frontage_lengths_m"][ad.DRIVABLE]), " of it on that frontage"]
+    names = _steep_sides(boundary)
+    if len(names) >= ROUND_SIDES:
+        parts.append(f"; the edges from {names[0]} round to {names[-1]} are steeper.")
+    elif names:
+        parts.append(f"; the {_list(names)} {rt.agree(len(names), 'edge is', 'edges are')} steeper.")
     else:
-        parts += [". "]
+        parts.append(".")
+    return rt.clause(*parts)
+
+
+def _soil_sentence(derived: ad.AccessDerived) -> list:
     soil = derived.soil
-    if soil["fetched"]:
-        cells = derived.cells
-        very = soil["counts"][srr.VERY_LIMITED] / cells["on_parcel_count"] * 100.0 if cells["on_parcel_count"] else 0.0
-        parts += ["Soil rated very limited for a local road covers ", {"value": f"{very:.0f}%"}, " of the parcel."]
-    return parts
+    if not soil["fetched"]:
+        return None
+    cells = derived.cells
+    very = soil["counts"][srr.VERY_LIMITED] / cells["on_parcel_count"] if cells["on_parcel_count"] else 0.0
+    # The class's own name is glossed beside its table overleaf; here, where there is no room for the gloss, the plain words.
+    return rt.clause("Soil the survey rates worst for a local road covers ", rt.share(very), " of the parcel.")
+
+
+def build_summary(derived: ad.AccessDerived, parcel) -> list:
+    return rt.sentences(_frontage_sentence(derived, parcel), _drivable_sentence(derived), _soil_sentence(derived))
+
+
+def _lane_clause(derived: ad.AccessDerived) -> list:
+    tracks = derived.tracks["tracks"]
+    if not tracks:
+        return ["No mapped lane lies on the parcel; "]
+    track = tracks[0]
+    profile = track["profile"]
+    entries = [x for x in track["entry_slopes_pct"] if x is not None]
+    parts = ["The mapped lane climbs " if len(tracks) == 1 else "The longest mapped lane climbs ", rt.percent(profile["end_to_end_grade_pct"]),
+             " over ", rt.feet(track["length_m"]), ", ", rt.percent(profile["max_grade_pct"]), " at its steepest"]
+    if entries:
+        low, high = min(entries), max(entries)
+        parts += [", entering on ", rt.percent(low) if round(low) == round(high) else rt.percent_range(low, high), " ground"]
+    return rt.clause(*parts, "; ")
+
+
+def _stream_clause(derived: ad.AccessDerived) -> list:
+    crossings = derived.crossings
+    if not crossings["streams_on_parcel"]:
+        return ["no stream crosses the parcel."]
+    if crossings["crossings_needed"] == 0:
+        return ["a stream crosses the parcel, but every part of it touches the frontage side."]
+    return rt.clause(rt.acres_of_m2(crossings["beyond_crossing_m2"]), " lie across a mapped stream from every frontage.")
+
+
+def _spill_clause(derived: ad.AccessDerived) -> list:
+    roads = derived.frontage["roads"]
+    if len(roads) <= FRONTAGE_ROWS_MAX:
+        return None
+    return rt.clause("Frontage on ", rt.count(len(roads), "road"), ": the frontage table is on the next page.")
 
 
 def build_map_caption(derived: ad.AccessDerived) -> list:
+    """What the steep marks mean, then the lane and the streams. How the
+    marks are sampled and drawn is in the methods note."""
     boundary = derived.boundary
-    parts = ["Steep boundary: slope ", {"value": f"{_ft(boundary['inset_m'])} ft"}, " inside the line of ",
-             {"value": _pct(boundary["threshold_pct"])}, " or more; runs under two samples are merged for drawing only. "]
-    tracks = derived.tracks["tracks"]
-    if tracks:
-        track = tracks[0]
-        profile = track["profile"]
-        entries = [s for s in track["entry_slopes_pct"] if s is not None]
-        parts += ["The mapped lane climbs " if len(tracks) == 1 else "The longest mapped lane climbs ",
-                  {"value": _pct(profile["end_to_end_grade_pct"])}, " over ", {"value": f"{_ft(track['length_m'])} ft"},
-                  ", ", {"value": _pct(profile["max_grade_pct"])}, " at the steepest step"]
-        if entries:
-            low, high = min(entries), max(entries)
-            parts += [", entering on ", {"value": _pct(low) if round(low) == round(high) else f"{low:.0f}–{high:.0f}%"}, " ground"]
-        parts += ["; "]
-    else:
-        parts += ["No mapped lane lies on the parcel; "]
-    crossings = derived.crossings
-    if not crossings["streams_on_parcel"]:
-        parts += ["no stream crosses the parcel."]
-    elif crossings["crossings_needed"] == 0:
-        parts += ["a stream crosses the parcel, but every part of it touches the frontage side."]
-    else:
-        acres = crossings["beyond_crossing_m2"] / wd.SQUARE_METERS_PER_ACRE
-        parts += [{"value": _one_decimal(acres)}, " acres lie across a mapped stream from every frontage."]
-    frontage = derived.frontage
-    if len(frontage["roads"]) > FRONTAGE_ROWS_MAX:
-        parts += [f" Frontage on {len(frontage['roads'])} roads: the frontage table is on the next page."]
-    return parts
+    steep = rt.clause("Marked steep where the slope ", rt.feet(boundary["inset_m"]), " inside the boundary is ",
+                      rt.percent(boundary["threshold_pct"]), " or more; short runs are merged for drawing.")
+    return rt.sentences(steep, rt.clause(_lane_clause(derived), _stream_clause(derived)), _spill_clause(derived))
 
 
 # ======================================================================
@@ -415,22 +431,22 @@ def build_frontage_caption(derived: ad.AccessDerived, table: Optional[dict]) -> 
     parts = []
     if table is None:
         if frontage["nearest"]:
-            parts += ["No mapped road runs within ", {"value": f"{_ft(frontage['tolerance_m'])} ft"}, " of the boundary. "]
+            parts += rt.clause("No mapped road runs within ", rt.feet(frontage["tolerance_m"]), " of the boundary. ")
         else:
-            parts += ["No mapped road lies within ", {"value": f"{_ft(wd.ADJACENCY_BUFFER_METERS)} ft"}, " of the boundary. "]
+            parts += rt.clause("No mapped road lies within ", rt.feet(wd.ADJACENCY_BUFFER_METERS), " of the boundary. ")
     else:
-        parts += ["Frontage is the boundary within ", {"value": f"{_ft(frontage['tolerance_m'])} ft"},
-                  " of a mapped road; the second column is its length under ", {"value": _pct(derived.boundary["threshold_pct"])}, ". "]
+        parts += rt.clause("Frontage is the boundary within ", rt.feet(frontage["tolerance_m"]),
+                           " of a mapped road; the second column is its length under ", rt.percent(derived.boundary["threshold_pct"]), ". ")
         if table["spill"]:
-            parts += [f"Frontage on more than {FRONTAGE_ROWS_MAX} roads, so the table is on this page rather than under the map. "]
+            parts += rt.clause("Frontage on more than ", rt.count(FRONTAGE_ROWS_MAX, "road"), ", so the table is on this page rather than under the map. ")
     tracks = derived.tracks["tracks"]
     unnamed = [r for r in frontage["roads"] if r["name"] == "Unnamed road"]
     if unnamed and any(t["name"] == "Unnamed road" for t in tracks):
         parts.append("The unnamed road is both frontage and track and may be a private lane: ")
     elif unnamed:
         parts.append("The unnamed road may be a private lane: ")
-    parts.append(ROADS_CAVEAT if not unnamed else ROADS_CAVEAT[:1].lower() + ROADS_CAVEAT[1:])
-    return parts
+    parts.append(ROADS_CAVEAT if not unnamed else rt.lower_first(ROADS_CAVEAT))
+    return rt.sentences(parts)
 
 
 def named_features(features: dict, class_cells: int, share: float = FEATURE_NAME_SHARE, limit: int = FEATURE_NAME_MAX) -> list:
@@ -471,34 +487,46 @@ def build_soil_table(derived: ad.AccessDerived) -> Optional[dict]:
             "text_columns": ["Limiting features"], "acres": acres, "shares": shares, "classes": names}
 
 
-def build_soil_caption(derived: ad.AccessDerived) -> list:
-    soil = derived.soil
-    parts = ["NRCS's rating by dominant components; " + SOIL_SLOPE_CLAUSE + ". "]
-    cells = derived.cells
-    wet = [u for u in soil["map_units"].values() if u["paved"] and u["paved"]["class"] == srr.VERY_LIMITED
-           and u["features"].get("Depth to saturated zone", 0.0) >= 0.99]
-    if wet:
-        from water_section import map_unit_short_name
+def _wet_units_clause(derived: ad.AccessDerived) -> Optional[str]:
+    wet = [u for u in derived.soil["map_units"].values() if u["paved"] and u["paved"]["class"] == srr.VERY_LIMITED
+           and u["features"].get("Depth to saturated zone", 0.0) >= WHOLLY]
+    if not wet:
+        return None
+    from water_section import map_unit_short_name
 
-        names = _list(sorted({map_unit_short_name(u["muname"]) for u in wet}))
-        parts += [f"{names} {'is' if len(wet) == 1 else 'are'} very limited partly for a shallow water table, as the Water "
-                  "section shows; "]
-    fill = soil["roadfill_counts"]
-    total = cells["on_parcel_count"]
+    names = _list(sorted({map_unit_short_name(u["muname"]) for u in wet}))
+    return f"{names} {rt.agree(len(wet), 'is', 'are')} very limited partly for a shallow water table, as the Water section shows"
+
+
+def _roadfill_clause(derived: ad.AccessDerived, lead: bool) -> list:
+    fill = derived.soil["roadfill_counts"]
+    total = derived.cells["on_parcel_count"]
+    word = "roadfill — soil dug to raise a roadbed —" if lead else "Roadfill — soil dug to raise a roadbed —"
     if total and fill.get("Poor", 0) == total:
-        parts.append(("roadfill" if wet else "Roadfill") + " is poor on every map unit.")
-    elif total and fill.get("Poor", 0):
-        parts += [("roadfill" if wet else "Roadfill") + " is poor on ", {"value": _one_decimal(fill["Poor"] * cells["cell_acres"])}, " acres."]
-    if soil["unpaved_differs"]:
-        parts.append(f" The unpaved-road rating differs on {len(soil['unpaved_differs'])} map unit(s).")
-    return parts
+        return [f"{word} is poor on every soil on the parcel."]
+    if total and fill.get("Poor", 0):
+        return rt.clause(f"{word} is poor on ", rt.acres(fill["Poor"] * derived.cells["cell_acres"]), ".")
+    return None
+
+
+def build_soil_caption(derived: ad.AccessDerived) -> list:
+    """What the classes mean and why the slope differs from the map's; then
+    the wet units and the roadfill. How a map unit's class is decided --
+    NRCS's dominant condition -- is in the methods note."""
+    wet = _wet_units_clause(derived)
+    fill = _roadfill_clause(derived, lead=wet is not None)
+    tail = rt.clause(wet + "; ", fill) if wet and fill else ([wet + "."] if wet else fill)
+    differs = derived.soil["unpaved_differs"]
+    unpaved = rt.clause("The unpaved-road rating differs on ", rt.count(len(differs), "map unit"), ".") if differs else None
+    return rt.sentences([f"The soil survey's ratings for a local road; very limited is {VERY_LIMITED_GLOSS}, and "
+                         f"{SOIL_SLOPE_CLAUSE}."], tail, unpaved)
 
 
 def build_soil_unavailable(inputs: ad.AccessInputs) -> list:
     reason = inputs.unavailable.get("soil_road_ratings", {}).get("reason")
     if reason == "no_data_for_parcel":
         return ["SSURGO carries no road-construction rating for this parcel's map units."]
-    return ["SSURGO's road-construction ratings did not answer when this report was generated; the soil table is not reported. "
+    return ["The soil survey's road ratings did not answer when this report was generated, so the soil table is not reported. "
             "Look the map units up in Web Soil Survey, Local Roads and Streets."]
 
 
@@ -548,8 +576,9 @@ def build_methods(inputs: ad.AccessInputs, derived: ad.AccessDerived) -> list:
                      "served by the National Map transportation map service.",
          "terms": "U.S. federal work; USGS states its data are in the public domain.",
          "method": f"Frontage is the boundary ring within {tolerance:.0f} m of a road centreline, merged by road name. THE TOLERANCE IS A "
-                   f"JUDGMENT: TIGER states a positional accuracy of about 7.6 m and a township road's right-of-way is 33 to 60 ft, "
-                   f"so 15 m sits just above the source's error and below a half right-of-way plus that error; a road the tolerance "
+                   f"JUDGMENT: TIGER states a positional accuracy of about {ad.TIGER_POSITIONAL_ACCURACY_M:g} m and a township road's "
+                   f"right-of-way is {ad.TOWNSHIP_RIGHT_OF_WAY_FT[0]} to {ad.TOWNSHIP_RIGHT_OF_WAY_FT[1]} ft, so {tolerance:.0f} m sits "
+                   f"just above the source's error and below a half right-of-way plus that error; a road the tolerance "
                    f"decides is reported as such. Public status and surface are not attributes of the source. A track is the part of "
                    f"a mapped segment on the parcel; its grade is the DEM sampled every {ad.TRACK_SAMPLE_STEP_M:.0f} m along it, a "
                    f"final step shorter than a station folded into the one before.",

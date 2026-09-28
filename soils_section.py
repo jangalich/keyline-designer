@@ -105,7 +105,9 @@ from typing import Optional
 
 import bedrock_geology as bg
 import report_map
+import report_text as rt
 import soil_survey as ss
+from soil_data import SSURGO_COMPILATION_SCALE
 import soils_derivations as sd
 from landform_section import (
     ZERO_DASH,
@@ -163,6 +165,8 @@ PH_CLASSES = (
 # Below this share of the parcel a map unit's texture is an exception the
 # caption names rather than a class the summary line lists.
 TEXTURE_MINOR_SHARE = 0.05
+# A pH range narrower than this is one figure.
+PH_SAME = 0.05
 
 
 
@@ -175,27 +179,16 @@ def _inches(centimeters: float) -> str:
     return f"{round(centimeters / CM_PER_INCH):,.0f}"
 
 
-def _pct(value: float) -> str:
-    return f"{value:.0f}%"
-
-
-def _lower(name: Optional[str]) -> str:
+def _normalised(name: Optional[str]) -> str:
+    """A survey name folded to lower case, to compare two of them or set one
+    mid-sentence ('Silt loam' -> 'silt loam')."""
     return (name or "").strip().lower()
 
 
-def _list(words: list) -> str:
-    words = [w for w in words if w]
-    if not words:
-        return ""
-    if len(words) == 1:
-        return words[0]
-    return ", ".join(words[:-1]) + " and " + words[-1]
-
-
-def _word(text: str) -> dict:
-    """A word standing in a numeric column: the macro sets it in the prose
-    face so it cannot be read as a measurement."""
-    return {"value": text, "kind": "word"}
+_word = rt.word
+# The map unit glossed at first use on each page it is read on.
+MAP_UNIT_GLOSS = rt.MAP_UNITS
+MAIN_SOIL = "each unit's main soil"
 
 
 def ph_class(ph: float) -> str:
@@ -356,53 +349,54 @@ def ph_range(derived: sd.SoilsDerived) -> Optional[tuple]:
     return (min(values), max(values)) if values else None
 
 
-def build_summary(derived: sd.SoilsDerived) -> list:
-    """The section's two sentences: how many units over how much ground,
-    then the two figures worth featuring -- the texture class the parcel
-    is, and the reaction it is at. Both are sentences rather than columns
-    (see the module docstring)."""
+def _count_sentence(derived: sd.SoilsDerived) -> list:
     count = len(derived.order)
-    parts = ["The survey maps ", {"value": f"{count}"}, f" soil map unit{'s' if count != 1 else ''} here. "]
+    return rt.clause("The survey maps ", rt.count(count, "soil map unit"), f" here, {MAP_UNIT_GLOSS}.")
 
+
+def _texture_and_reaction(derived: sd.SoilsDerived) -> list:
     textures = texture_classes(derived)
     major = [t for t in textures if t["share"] >= TEXTURE_MINOR_SHARE]
+    parts = []
     if len(textures) == 1:
-        parts += ["Every one is a ", {"value": _lower(textures[0]["texture"])}, " at the surface"]
+        parts += ["Every one is a ", rt.text(_normalised(textures[0]["texture"])), " at the surface"]
     elif major:
-        names = [_lower(t["texture"]) for t in major]
-        share = sum(t["share"] for t in major)
-        parts += ["Their surfaces are ", _list(names), ", together ", {"value": _pct(share * 100)},
-                  " of the parcel"]
+        parts += ["Their surfaces are ", rt.series_text([_normalised(t["texture"]) for t in major]), ", together ",
+                  rt.share(sum(t["share"] for t in major)), " of the parcel"]
     ph = ph_range(derived)
     if ph:
         low, high = ph
         parts.append(", at " if textures else "The surface horizon reads ")
-        if abs(high - low) < 0.05:
-            parts += ["pH ", {"value": f"{low:.1f}"}]
-        else:
-            parts += ["pH ", {"value": f"{low:.1f}"}, "–", {"value": f"{high:.1f}"}]
-        parts.append(f" — {ph_class_span(low, high)} across the parcel.")
+        parts += ["pH ", rt.number(low, 1)] if abs(high - low) < PH_SAME else ["pH ", rt.number(low, 1), "–", rt.number(high, 1)]
+        parts.append(f" — {ph_class_span(low, high)}.")
     elif textures:
         parts.append(".")
-    return parts
+    return rt.clause(*parts)
+
+
+def build_summary(derived: sd.SoilsDerived) -> list:
+    """The section's two sentences: how many units, then the texture class
+    the parcel is and the reaction it is at (see the module docstring)."""
+    return rt.sentences(_count_sentence(derived), _texture_and_reaction(derived))
+
+
+def _unlabelled_clause(derived: sd.SoilsDerived, missed: list) -> list:
+    if not missed:
+        return None
+    symbols = [derived.map_units[m]["musym"] for m in missed]
+    acres = allocate_exactly([derived.map_units[m]["cells"] for m in derived.order],
+                             derived.cells["on_parcel_count"] * derived.cells["cell_acres"], 1)
+    missed_acres = sum(a for m, a in zip(derived.order, acres) if m in missed)
+    return rt.clause(rt.series_text(symbols), " — ", rt.acres(missed_acres), " — ", rt.agree(len(missed), "is", "are"),
+                     " too small to label; the table overleaf names every symbol.")
 
 
 def build_map_caption(derived: sd.SoilsDerived, missed: list) -> list:
-    """The one caveat at the point of use: what the tint is not, which
-    symbols the map could not carry, and where the table that names them
-    is."""
-    parts = ["Boundaries are the survey's own at 1:24,000; the tint separates neighbouring units and carries no "
-             "value. "]
-    if missed:
-        symbols = [derived.map_units[m]["musym"] for m in missed]
-        acres = allocate_exactly([derived.map_units[m]["cells"] for m in derived.order],
-                                 derived.cells["on_parcel_count"] * derived.cells["cell_acres"], 1)
-        missed_acres = sum(a for m, a in zip(derived.order, acres) if m in missed)
-        parts += [_list(symbols), f" — {_one_decimal_or_dash(missed_acres)} acres — ",
-                  "are" if len(missed) != 1 else "is", " too small to hold ",
-                  "their symbols" if len(missed) != 1 else "its symbol", " and go unlabelled. "]
-    parts.append("The map unit table overleaf names every symbol.")
-    return parts
+    """The one caveat at the point of use: the lines are approximate and
+    the shades carry no value; then the symbols the map could not carry."""
+    return rt.sentences(rt.clause("Lines are the survey's own, drawn at ", rt.scale(SSURGO_COMPILATION_SCALE),
+                                  " and approximate; shades only tell neighbours apart."),
+                        _unlabelled_clause(derived, missed) or ["The table overleaf names every symbol."])
 
 
 def build_map_unit_table(derived: sd.SoilsDerived, with_drainage: bool = False) -> dict:
@@ -452,11 +446,13 @@ def build_map_unit_table(derived: sd.SoilsDerived, with_drainage: bool = False) 
 
 
 def build_map_unit_caption(derived: sd.SoilsDerived) -> list:
-    return ["Acres are the map unit polygons on the elevation model's cell grid, allocated exactly to the parcel's "
-            "area; the hydrologic group, saturated conductivity and capability class are the dominant component's, "
-            "and the conductivity is the surface horizon's, in micrometres per second. Group is the NRCS hydrologic "
-            "soil group — the runoff class it assigns from the same drainage and permeability a drainage class "
-            "describes, in a letter — and Class is the land capability class and subclass."]
+    """The column headers stay the survey's; the caption says what they
+    mean. Whose values they are and how acres are counted are in the
+    methods note."""
+    return [f"Each row is a map unit, {rt.MAP_UNIT}, and its figures are its main soil's. Group is the "
+            "hydrologic soil group, how readily the soil takes in rain, from A (freely) to D (hardly); conductivity is how "
+            "fast water moves through the top layer, in micrometres per second; Class is land capability, the survey's "
+            "grade of the soil's limits, higher meaning more limited, with the main limit named."]
 
 
 # ======================================================================
@@ -479,6 +475,12 @@ def bedrock_cell(block: dict, note: Optional[list]) -> dict:
     return cell
 
 
+def _root_note(note: dict) -> list:
+    """'fragipan at 28 in stops roots above the rock': set in the cell it corrects."""
+    return rt.clause(f"{_normalised(note['kind'])} at ", rt.inches_of(note["depth_cm"] / CM_PER_INCH, places=0),
+                     " stops roots above the rock")
+
+
 def build_properties_table(derived: sd.SoilsDerived) -> Optional[dict]:
     """The dominant major component's surface horizon by map unit: the
     horizon's own depth, the particle-size split, water capacity, organic
@@ -498,10 +500,7 @@ def build_properties_table(derived: sd.SoilsDerived) -> Optional[dict]:
             rows.append({"label": label, "cells": [_word("no horizon described")] + [ZERO_DASH] * 7})
             continue
         note = notes.get(mukey)
-        note_parts = None
-        if note:
-            note_parts = [f"{_lower(note['kind'])} at ", {"value": f"{_inches(note['depth_cm'])} in"},
-                          " stops roots above the rock"]
+        note_parts = _root_note(note) if note else None
         rows.append({"label": label, "cells": [
             f"{_inches(block['top_cm'])}–{_inches(block['bottom_cm'])}",
             f"{block['sand_pct']:.0f}" if block["sand_pct"] is not None else ZERO_DASH,
@@ -520,27 +519,25 @@ def build_properties_table(derived: sd.SoilsDerived) -> Optional[dict]:
 def build_properties_caption(derived: sd.SoilsDerived) -> list:
     """Two facts at the point of use: whose values these are, and the
     texture exception the summary line's sentence does not cover."""
-    parts = ["Each row is the map unit's dominant major component — the soil the unit is named for — at the "
-             "shallowest horizon below any surface litter, whose depth is stated per row because it is not the same "
-             "under every unit. "]
+    parts = ["Each row is a unit's main soil at its top layer below any leaf litter; that layer starts deeper under some units "
+             "than others, so its depth is given. "]
     variants = []
     for mukey in derived.order:
         block = derived.properties.get(mukey)
         if not block or not block["texture"] or not block["texture_class"]:
             continue
-        if _lower(block["texture"]) != _lower(block["texture_class"]):
+        if _normalised(block["texture"]) != _normalised(block["texture_class"]):
             variants.append((derived.map_units[mukey]["musym"], block["texture"], derived.map_units[mukey]["cells"]))
     if variants:
         parcel_acres = derived.cells["on_parcel_count"] * derived.cells["cell_acres"]
         acres = allocate_exactly([derived.map_units[m]["cells"] for m in derived.order], parcel_acres, 1)
         by_mukey = dict(zip([derived.map_units[m]["musym"] for m in derived.order], acres))
-        named = [f"{symbol} is a {_lower(texture)}" for symbol, texture, _ in variants]
+        named = [f"{symbol} is a {_normalised(texture)}" for symbol, texture, _ in variants]
         total = sum(by_mukey.get(symbol, 0.0) for symbol, _, _ in variants)
-        parts += ["The survey's own phrase differs on ", {"value": f"{len(variants)}"},
-                  f" unit{'s' if len(variants) != 1 else ''} — ", _list(named), ", the rock fragments in it named — ",
-                  "on ", {"value": _one_decimal_or_dash(total)}, " acres. "]
-    parts.append("Sand, silt and clay are representative percentages and need not total 100.")
-    return parts
+        parts += rt.clause("The survey's own name differs on ", rt.count(len(variants), "unit"), " — ", rt.series_text(named),
+                           ", for the stones in it — on ", rt.acres(total), ". ")
+    parts.append("Sand, silt and clay are typical percentages, so they need not add up exactly.")
+    return rt.sentences(parts)
 
 
 def build_soil_test_statement(derived: sd.SoilsDerived) -> list:
@@ -568,11 +565,12 @@ def build_profile_water(derived: sd.SoilsDerived) -> Optional[list]:
     total = sum(counts) or 1
     weighted = sum(v * c for v, c in zip(values, counts)) / total
     low, high = min(values), max(values)
-    return ["Over the full profile the survey credits the parcel with ", {"value": f"{weighted / CM_PER_INCH:.1f} in"},
-            " of available water to a depth of ", {"value": "150 cm"}, " (about ", {"value": "59 in"}, "), ranging ",
-            {"value": f"{low / CM_PER_INCH:.1f}"}, " to ", {"value": f"{high / CM_PER_INCH:.1f} in"},
-            " between units — a different depth basis from the surface horizon's figures above, which is why it is "
-            "stated apart from them."]
+    depth = ss.AWS_DEPTH_CM
+    return rt.clause("Down through the whole soil, to ", rt.centimeters(depth), " (about ",
+                     rt.inches_of(depth / CM_PER_INCH, places=0), "), the survey credits the parcel with ",
+                     rt.inches_of(weighted / CM_PER_INCH), " of available water — what roots can draw — from ",
+                     rt.number(low / CM_PER_INCH, 1), " to ", rt.inches_of(high / CM_PER_INCH), " by unit: a deeper measure "
+                     "than the top-layer figures above, so it stands apart from them.")
 
 
 # ======================================================================
@@ -598,7 +596,7 @@ def build_capability_table(derived: sd.SoilsDerived) -> Optional[dict]:
 def build_capability_caption(derived: sd.SoilsDerived) -> list:
     # The absence of an irrigated class is not a caveat on this figure; it
     # is a fact about the survey area, and it is stated in the methods.
-    return ["NRCS land capability for non-irrigated use, the dominant component's, by the ground each unit covers."]
+    return [f"Land capability without irrigation, the survey's grade of the soil's limits, higher classes more limited, of {MAIN_SOIL}."]
 
 
 def build_farmland_table(derived: sd.SoilsDerived) -> Optional[dict]:
@@ -618,8 +616,7 @@ def build_farmland_table(derived: sd.SoilsDerived) -> Optional[dict]:
 def build_farmland_caption(derived: sd.SoilsDerived) -> list:
     # "By the ground each unit covers" is the caption above this one, two
     # inches away; what this figure needs said is the conditional grade.
-    return ["The survey's own wording: \"if drained\" or \"if irrigated\" makes the grade conditional on a practice "
-            "the survey does not state."]
+    return ["“If drained” or “if irrigated” is the survey's own: the class holds only once that work is done."]
 
 
 def build_erosion_table(derived: sd.SoilsDerived) -> Optional[dict]:
@@ -637,9 +634,8 @@ def build_erosion_table(derived: sd.SoilsDerived) -> Optional[dict]:
 
 
 def build_erosion_caption(derived: sd.SoilsDerived) -> list:
-    return ["K is the whole soil's erodibility at the surface horizon, higher meaning more erodible; T is the annual "
-            "soil loss the survey treats as tolerable for that soil. Both are the dominant component's, and both are "
-            "properties of the soil rather than of this parcel's slopes."]
+    return ["K is how easily the top layer washes away, higher meaning more easily; T is the soil the survey allows to be "
+            "lost each year without harming what it can grow. Both describe the soil itself, not how steep this parcel is."]
 
 
 def build_geology(derived: sd.SoilsDerived) -> Optional[list]:
@@ -649,37 +645,31 @@ def build_geology(derived: sd.SoilsDerived) -> Optional[list]:
         return None
     units = geology["units"]
     lead = units[0]
-    parts = ["The rock beneath is the ", {"value": lead["name"]}]
+    parts = ["The rock beneath is the ", rt.text(lead["name"])]
     if lead["age"]:
         parts.append(f" of {lead['age']} age")
     if lead["age_max_ma"] and lead["age_min_ma"]:
-        parts += [" (", {"value": f"{lead['age_max_ma']:.0f}"}, " to ", {"value": f"{lead['age_min_ma']:.0f}"},
-                  " million years)"]
+        parts += [" (", rt.number(lead["age_max_ma"]), " to ", rt.number(lead["age_min_ma"]), " million years)"]
     if lead["description"]:
         # The compilation's own words for the rock. They already name the
         # lithologies, so the record's separate lithology list -- whose
         # top-level terms are "clastic" and "sedimentary" -- would only
         # repeat them less precisely.
         parts.append(f": {lead['description'][0].lower()}{lead['description'][1:]}")
-    parts.append(". ")
+    also = None
     if geology["straddles"]:
-        others = [u for u in units[1:]]
-        names = [u["name"] for u in others]
-        parts += ["The compilation also maps the ", _list(names), " across the parcel's extent"]
-        if lead["at_centroid"]:
-            parts.append(f", with the {lead['name']} under its centre")
-        parts.append(". ")
+        under = f", with the {lead['name']} under its centre" if lead["at_centroid"] else ""
+        also = [f"The national map also shows the {rt.series_text([u['name'] for u in units[1:]])} across the parcel{under}."]
+    province = None
     if lead["province"]:
-        parts.append(f"Both sit in the {lead['province']} province. " if geology["straddles"]
-                     else f"It sits in the {lead['province']} province. ")
-    return parts
+        province = [f"Both sit in the {lead['province']} province." if geology["straddles"] else f"It sits in the {lead['province']} province."]
+    return rt.sentences(rt.clause(*parts, "."), also, province)
 
 
 def build_geology_caption(derived: sd.SoilsDerived) -> list:
-    return ["The national compilation is drawn for use at about ",
-            {"value": f"1:{bg.SGMC_INTENDED_SCALE:,}"},
-            "; at that scale a contact is not placed to parcel precision, so this names the rock, not where one unit "
-            "gives way to the next."]
+    return rt.clause("The national geologic map is drawn for use at about ", rt.scale(bg.SGMC_INTENDED_SCALE),
+                     ", too coarse to place a rock boundary within a parcel: it names the rock, not where one gives way "
+                     "to the next.")
 
 
 def build_cross_reference(inputs: sd.SoilsInputs) -> list:
@@ -776,7 +766,9 @@ def build_methods(inputs: sd.SoilsInputs, derived: sd.SoilsDerived) -> list:
                   "depth the survey described to, set as a bound. A restriction that is not bedrock is reported "
                   "against the depth it qualifies. Land capability is the non-irrigated class and subclass; no "
                   "irrigated class is assigned in this survey area. Values are representative of a map unit across "
-                  "the survey area, not measured on this property.",
+                  "the survey area, not measured on this property. Group is the NRCS hydrologic soil group, the runoff class "
+                  "assigned from drainage and permeability; conductivity is saturated hydraulic conductivity; K is the "
+                  "whole-soil erodibility factor Kw and T the tolerable annual soil loss.",
     }]
     if inputs.bedrock_geology is not None:
         methods.append({

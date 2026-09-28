@@ -81,6 +81,10 @@ from raster_grid import SQUARE_METERS_PER_ACRE
 
 # The frontage tolerance: a judgment, stated on the page (see the module docstring).
 FRONTAGE_TOLERANCE_METERS = 15.0
+# What the tolerance is judged against: TIGER's stated positional accuracy,
+# and the width of a township road's right-of-way, in feet.
+TIGER_POSITIONAL_ACCURACY_M = 7.6
+TOWNSHIP_RIGHT_OF_WAY_FT = (33, 60)
 # Landform's class D lower bound, reused rather than restated.
 UNDRIVABLE_SLOPE_PCT = next(low for name, low, _ in SLOPE_CLASSES if name == "D")
 BOUNDARY_SAMPLE_STEP_M = 5.0

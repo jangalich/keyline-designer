@@ -306,8 +306,10 @@ assert table["rows"][0]["cells"][3] == "1,138" and table["rows"][0]["cells"][4:]
 caption = _text(SECTION["valley_table_caption"])
 assert "Valley 1's keypoint lies 79 ft outside the boundary." in caption
 profile_caption = _text(SECTION["profile"]["caption"])
-assert profile_caption.startswith("Valley 1, the full stem from its head") and "vertical exaggeration 3×" in profile_caption
-assert "79 ft outside the boundary" in profile_caption
+assert profile_caption.startswith("Valley 1's floor from its head") and "drawn 3× steeper than life" in profile_caption
+# The distance is the structure caption's, on the same page: the profile says it in words rather than read it twice.
+assert "Its keypoint is just outside the boundary." in profile_caption and "79 ft" not in profile_caption
+assert "79 ft of it" in _text(SECTION["structure_caption"])
 # The table with a valley lacking a keypoint reads dashes.
 dashed = ls.build_valley_table(none)
 assert all(r["cells"][3:] == [ZERO_DASH] * 3 for r in dashed["rows"])
@@ -368,7 +370,7 @@ on_group = structure.split('<g id="layer-keypoints">', 1)[1].split("</g>", 1)[0]
 assert on_group.count("<circle") == 4 and f'fill="{TOKENS["ink"]}"' in on_group and on_group.count(f'fill="{TOKENS["page"]}"') == 2
 assert {"1,177", "1,123"} == set(re.findall(r">([\d,]+)</text>", on_group)) and "<text" not in outside_group
 caption_text = _text(SECTION["structure_caption"])
-assert caption_text.startswith("A keyline is the contour through its keypoint") and caption_text.endswith(statement)
+assert caption_text.startswith("A keypoint is where a valley's floor eases from steep to gentle") and caption_text.endswith(statement)
 # The sources line and the methods entry the Site overview will render.
 assert SECTION["sources"] == [["USGS 3DEP elevation, 1/3 arc-second, resampled to 5 m, retrieved " + ls.format_retrieved_on(TERRAIN.retrieved_on) + "."]]
 methods = SECTION["methods"]
@@ -434,7 +436,7 @@ assert {"report-map", "report-chart", "caption"} <= _classes(pages[4]) and "data
 assert {"key-figures", "data-table", "source-footer"} <= _classes(pages[5]) and "report-map" not in _classes(pages[5])
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in pages[3:])
 squash = "".join(flat.split())
-for expected in ("3keypoints:2onthepropertyand1justoutsidetheboundary", "verticalexaggeration3×", "Valley1'skeypointlies79ftoutside",
+for expected in ("3keypoints:2onthepropertyand1justoutsidetheboundary", "drawn3×steeperthanlife", "Valley1'skeypointlies79ftoutside",
                  "III·LANDFORM,CONTINUED", "Keylines,elevationinft"):
     assert expected in squash, expected
 assert squash.count("III·LANDFORM,CONTINUED") == 2

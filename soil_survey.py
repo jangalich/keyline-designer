@@ -120,6 +120,8 @@ SURFACE_HORIZON_PREDICATE = (
 # a restriction that is NOT rock. One predicate, used twice with opposite
 # senses, so the two can never overlap or leave a kind uncounted.
 BEDROCK_PREDICATE = "cr.reskind LIKE '%bedrock'"
+# muaggatt.aws0150wta: the depth SSURGO totals a profile's available water to.
+AWS_DEPTH_CM = 150
 
 CAPABILITY_SUBCLASS_LABELS = {
     "e": "erosion",

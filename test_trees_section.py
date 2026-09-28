@@ -178,35 +178,27 @@ print(f"   m/unit {m['meters_per_unit']:.4f} = Landform's; frame {m['frame'][0]:
 print("3. the summary, the tables, the captions, the sources; the degraded cases; the year parsed defensively")
 COVER = round(INPUTS.parcel_acres, 1)
 summary = _text(SECTION["summary"])
-assert summary == ("Lidar of 2019 measures 1.6 ac of canopy at 15 ft and over, 12% of the parcel, 38% closed at a 30 m grain; the tallest "
-                   "cell is 86 ft. The forest type model calls 0.6 ac of it forest, oak/hickory. The soil survey rates windthrow hazard "
-                   "moderate on 10.0 ac."), summary
-assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["1.6 ac", "12%", "38%", "86 ft", "0.6 ac", "10.0 ac"]
+assert summary == ("Lidar, a laser survey flown in 2019, finds trees 15 ft or taller on 1.6 acres, 12% of the parcel; the tallest reach 86 ft. A national forest map calls 0.6 acres of it woodland, oak/hickory. The soil survey rates windthrow hazard — how likely trees are to blow over — moderate on 10.0 acres."), summary
+assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["2019", "15 ft", "1.6 acres", "12%", "86 ft", "0.6 acres", "10.0 acres"]
 map_caption = _text(SECTION["map_caption"])
-assert map_caption == ("Lidar first-return height above ground, 2 m, acquired 2019, resampled to the 5 m grid; canopy is a cell at or above "
-                       "the design's 15 ft threshold, so a roof reads as canopy too. Contours at Landform's interval."), map_caption
+assert map_caption == ("Shaded wherever the lidar finds something 15 ft or taller, darker as it gets taller. A roof or a barn counts too, so check buildings against the aerial photograph. Contours as on the Landform map."), map_caption
 extent = SECTION["extent_table"]
 assert extent["columns"] == ["Acres", "% of parcel"] and extent["compact"]
 assert [(r["label"], r["cells"]) for r in extent["rows"]] == [("Canopy, 15 ft and over", ["1.6", "12.0"]), ("Open, under 15 ft", ["11.5", "87.4"]),
                                                              ("No value", ["0.1", "0.6"]), ("Total", ["13.2", "100.0"])]
 assert round(sum(extent["acres"]), 6) == COVER and round(sum(extent["shares"]), 6) == 100.0
 extent_caption = _text(SECTION["extent_caption"])
-assert extent_caption == ("Within the 30 m blocks that hold canopy, 38% of the ground is canopy: closure at a 30 m grain, derived from the "
-                          "height threshold, not the fallback product's percent cover; 6 of 27 blocks are over three-quarters closed. "
-                          "The 13 cells with no value are the edge of the resampling, not a gap in coverage."), extent_caption
+assert extent_caption == ("Where there are trees, they cover 38% of the ground — scattered trees rather than closed woodland — and 6 of the 27 wooded patches are nearly solid canopy. The row with no value is a thin strip along the boundary where the survey stops, not a gap in the trees."), extent_caption
 heights = SECTION["height_table"]
 assert [(r["label"], r["cells"]) for r in heights["rows"]] == [("Under 15 ft, not canopy", ["11.5", "87.4"]), ("15–30 ft", ["0.3", "2.5"]),
                                                               ("30–50 ft", ["0.6", "4.1"]), ("50 ft and over", ["0.7", "5.4"]),
                                                               ("No value", ["0.1", "0.6"]), ("Total", ["13.2", "100.0"])]
 assert round(sum(heights["acres"]), 6) == COVER and round(sum(heights["shares"]), 6) == 100.0
-assert _text(SECTION["height_caption"]) == ("Classed at the design's 15 ft threshold and at 30 and 50 ft, the height of a cell's tallest "
-                                            "return; the tallest cell is 86 ft, the canopy's median 47 ft.")
+assert _text(SECTION["height_caption"]) == ("Trees by height, from 15 ft up; half the canopy stands taller than 47 ft, and the tallest reaches 86 ft.")
 assert SECTION["cover_table"] is None
-assert _text(SECTION["forest_type"]) == "The forest type model calls 0.6 ac of the parcel forest, 5%, all oak/hickory."
+assert _text(SECTION["forest_type"]) == "A national forest map, FIA BIGMAP, calls 0.6 acres of the parcel woodland, 5%, all oak/hickory."
 forest_caption = _text(SECTION["forest_type_caption"])
-assert forest_caption == ("FIA BIGMAP, plots of 2014–2018, a model imputing inventory plots to 30 m pixels, the type of forest occupying "
-                          "an area, not what stands on any acre. The lidar sees 1.6 ac of canopy where the model calls 0.6 ac forest: "
-                          "height returns at 5 m against a classification of stands at 30 m."), forest_caption
+assert forest_caption == ("The map spreads the Forest Service's field plots of 2014–2018 across the country, so it names the kind of forest in the area, not what stands on any one acre. It counts 0.6 acres as woodland where the lidar laser survey finds 1.6 acres of trees: trees in groups too small for it to call a stand."), forest_caption
 species = SECTION["species_table"]
 assert species["columns"] == ["Acres rated", "Site index, ft", "Growth, cu ft/ac/yr"] and len(species["rows"]) == 6 == tsn.SPECIES_ROWS_MAX
 assert [r["label"] for r in species["rows"]] == ["northern red oak", "yellow-poplar", "sugar maple", "white ash", "Virginia pine", "eastern white pine"]
@@ -215,9 +207,7 @@ assert species["rows"][5]["cells"] == ["2.2", "90", "143"] and species["species"
 acres_rated = [float(r["cells"][0]) for r in species["rows"]]
 assert acres_rated == sorted(acres_rated, reverse=True) and min(acres_rated) >= tsn.SPECIES_MIN_SHARE * COVER
 species_caption = _text(SECTION["species_caption"])
-assert species_caption == ("The survey's list for these map units, the 6 species rated on the most ground of 15, not a recommendation; site "
-                           "index is height in feet at the base age of the survey's curve. Guernsey, 55% of the Guernsey-Vandergrift unit "
-                           "(4.5 ac), carries no rows, so that unit rests on Vandergrift. "), species_caption
+assert species_caption == ("The soil survey's 6 trees rated on the most ground, of the 15 it lists for these soils: the survey's ratings, not a recommendation. Site index is the height in feet a tree reaches by a set age on this soil. The survey rates no trees for Guernsey, 55% of the Guernsey-Vandergrift soil (4.5 acres), so those acres are rated on Vandergrift alone."), species_caption
 limits = SECTION["limitations_table"]
 assert limits["columns"] == ["Acres", "% of parcel", "Limiting features"] and limits["text_columns"] == ["Limiting features"]
 rows = [(r["label"], [_cell(c) for c in r["cells"]]) for r in limits["rows"]]
@@ -229,9 +219,7 @@ for group in limits["groups"]:
     assert round(sum(group["acres"]), 6) == COVER and round(sum(group["shares"]), 6) == 100.0, group["interpretation"]
 assert [g["interpretation"] for g in limits["groups"]] == list(sw.INTERPRETATIONS)
 limits_caption = _text(SECTION["limitations_caption"])
-assert limits_caption == ("NRCS's rating by dominant components, each interpretation partitioning the parcel: the soil's capacity, the same "
-                          "under a field as under a stand. Windthrow hazard is moderate on 10.0 ac, water table depth the feature on 9.9 ac "
-                          "of them, the shallow seasonal water table the Water section maps; Climate's winter wind prevails from the west."), limits_caption
+assert limits_caption == ("These ratings describe the soil, so they hold whether the ground is in trees or in field. Windthrow hazard — how likely trees are to blow over — is moderate on 10.0 acres, on 9.9 acres of it because the water table rises near the surface in wet seasons, as the Water section maps; winter wind here comes mostly from the west."), limits_caption
 sources = [_text(line) for line in SECTION["sources"]]
 # THE RETRIEVAL DATE IS THE SESSION'S, NOT A CONSTANT. It is the date the
 # Design Document was created -- the day the layers were fetched -- which
@@ -257,7 +245,7 @@ assert tsn.hag_acquisition_year("PA_WesternPA_2_2019-hag-2m-5-4") == 2019 and ts
 assert tsn.hag_acquisition_year("hag-2m-5-4") is None and tsn.hag_acquisition_year(None) is None and tsn.hag_acquisition_year("x_1850_y") is None
 assert tsn.hag_acquisition_year("tile_12019") is None, "five digits are not a year"
 odd = tsn.build_trees_section(td.TreesInputs(**{**INPUTS.__dict__, "canopy": dict(INPUTS.canopy, source_item_id="hag-tile-7")}), TOKENS)
-assert _text(odd["summary"]).startswith("Lidar measures 1.6 ac") and "acquisition year not stated by the source record" in _text(odd["map_caption"])
+assert _text(odd["summary"]).startswith("Lidar, a laser survey from the air") and "its year not stated by the source record" in _text(odd["summary"])
 assert "acquisition year not stated" in _text(odd["sources"][0])
 # The degraded layers: the statements, the canopy untouched.
 degraded_data = fixture.report_data(forest_type_group=None, soil_woodland_rows=None, unavailable={
@@ -265,16 +253,16 @@ degraded_data = fixture.report_data(forest_type_group=None, soil_woodland_rows=N
     "soil_woodland": {"label": "soil woodland ratings", "reason": "source_unavailable", "error": "down"}})
 DEGRADED_INPUTS = td.trees_inputs_from_context(CONTEXT, DOCUMENT, degraded_data)
 degraded = tsn.build_trees_section(DEGRADED_INPUTS, TOKENS)
-assert degraded["forest_type"] is None and _text(degraded["forest_type_unavailable"]).startswith("The forest type group service did not answer")
+assert degraded["forest_type"] is None and _text(degraded["forest_type_unavailable"]).startswith("The national forest map did not answer")
 assert degraded["species_table"] is None and degraded["limitations_table"] is None
 assert _text(degraded["species_unavailable"]).startswith("SSURGO's woodland ratings did not answer") and len(degraded["sources"]) == 2
-assert _text(degraded["summary"]).endswith("the tallest cell is 86 ft. ") and degraded["extent_table"]["rows"] == extent["rows"]
+assert _text(degraded["summary"]).endswith("the tallest reach 86 ft.") and degraded["extent_table"]["rows"] == extent["rows"]
 no_pixel = fixture.report_data(forest_type_group=None, unavailable={"forest_type_group": {"label": "x", "reason": "no_data_for_parcel", "error": ""}})
 assert _text(tsn.build_trees_section(td.trees_inputs_from_context(CONTEXT, DOCUMENT, no_pixel), TOKENS)["forest_type_unavailable"]) == \
-    "The forest type group model carries no pixel for this parcel."
+    "The national forest map has nothing for this parcel."
 # Without Climate's wind the windthrow line stops at the water table.
 no_wind = tsn.build_trees_section(td.TreesInputs(**{**INPUTS.__dict__, "wind": None}), TOKENS)
-assert _text(no_wind["limitations_caption"]).endswith("the shallow seasonal water table the Water section maps.")
+assert _text(no_wind["limitations_caption"]).endswith("in wet seasons, as the Water section maps.")
 print(f"   summary {len(summary.split())} words; extent {extent['acres']}; heights {heights['acres']}; {len(species['rows'])} species; "
       f"{len(rows)} limitation rows in {len(limits['groups'])} partitions")
 
@@ -375,9 +363,9 @@ assert len(_tables(numbers)) == 3
 advance = _check_alignment((page, numbers), (2, 2, 3, 2))
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in (page, numbers))
 squash = "".join(flat.split())
-for needle in ("a roof reads as canopy too", "the edge of the resampling, not a gap in coverage", "not the fallback product's percent cover",
-               "not what stands on any acre", "not a recommendation", "carries no rows", "Climate's winter wind prevails from the west",
-               "the tallest cell is 86 ft"):
+for needle in ("A roof or a barn counts too", "where the survey stops, not a gap in the trees", "scattered trees rather than closed woodland",
+               "not what stands on any one acre", "not a recommendation", "rates no trees for Guernsey", "winter wind here comes mostly from the west",
+               "the tallest reaches 86 ft"):
     assert "".join(needle.split()) in squash, needle
 assert "VI·TREES&FORESTRY" in squash.upper() and "VI·TREES&FORESTRY,CONTINUED" in squash.upper()
 # Access and the maps ahead of it intact.
@@ -391,19 +379,20 @@ with fixture.Harness(canopy="tcc"):
     TCC_INPUTS = td.trees_inputs_from_context(TCC_CONTEXT, TCC_DOCUMENT, DATA)
 tcc = tsn.build_trees_section(TCC_INPUTS, TOKENS)
 assert tcc["derived"].canopy["source"] == CANOPY_SOURCE_NLCD_TCC and tcc["height_table"] is None and tcc["cover_table"] is not None
-assert _text(tcc["summary"]) == ("NLCD Tree Canopy Cover of 2025 marks 1.2 ac of canopy, 9% of the parcel, 29% mean cover within it; no lidar "
-                                 "height is available here. The forest type model calls 0.6 ac of it forest, oak/hickory. The soil survey rates "
-                                 "windthrow hazard moderate on 10.0 ac.")
-assert _text(tcc["map_caption"]).startswith("NLCD Tree Canopy Cover 2025, percent cover per 30 m pixel") and "one tint" in _text(tcc["map_caption"])
-assert _text(tcc["height_unavailable"]) == ("No canopy height is reported: this parcel's canopy is NLCD Tree Canopy Cover 2025, percent cover "
-                                            "per 30 m pixel; no lidar height product covers it, so height classes are not available.")
+assert _text(tcc["summary"]) == ("NLCD Tree Canopy Cover, a national satellite map of 2025, puts trees on 1.2 acres, 9% of the parcel; "
+                                 "no height survey covers this parcel. A national forest map calls 0.6 acres of it woodland, oak/hickory. The soil survey rates windthrow hazard — how "
+                                 "likely trees are to blow over — moderate on 10.0 acres.")
+assert _text(tcc["map_caption"]).startswith("Shaded wherever the satellite map finds any tree cover. It works in squares about 30 m") \
+    and "all trees share one shade" in _text(tcc["map_caption"])
+assert _text(tcc["height_unavailable"]) == ("No tree heights here: the only tree map that covers this parcel is NLCD Tree Canopy Cover of 2025, "
+                                            "a satellite estimate of cover in squares about 30 m across, which does not measure height.")
 assert [(r["label"], r["cells"]) for r in tcc["cover_table"]["rows"]] == [("1–25% cover", ["0.6", "52.9"]), ("26–50% cover", ["0.3", "23.8"]),
                                                                           ("51–75% cover", ["0.1", "9.8"]), ("76–100% cover", ["0.2", "13.5"]),
                                                                           ("All canopy", ["1.2", "100.0"])]
 assert [(r["label"], r["cells"]) for r in tcc["extent_table"]["rows"]] == [("Canopy", ["1.2", "9.0"]), ("Open, no canopy", ["12.0", "91.0"]),
                                                                            ("Total", ["13.2", "100.0"])]
-assert _text(tcc["extent_caption"]) == "Mean cover within the canopy pixels is 29%, the product's own percent cover. "
-assert "The cover product sees 1.2 ac of canopy where the model calls 0.6 ac forest" in _text(tcc["forest_type_caption"])
+assert _text(tcc["extent_caption"]) == "Where there are trees, the satellite map puts their cover at 29% — scattered trees rather than closed woodland."
+assert "It counts 0.6 acres as woodland where the satellite map finds 1.2 acres of trees" in _text(tcc["forest_type_caption"])
 assert [_text(e["parts"]) for e in tcc["map"]["legend"]] == ["Canopy, NLCD cover 2025", "Contours, 10 ft"]
 tcc_layers = tsn.build_map_layers(TCC_INPUTS, tcc["derived"], report_map.parcel_contours(TCC_INPUTS.dem, parcel))
 assert [l["id"] for l in tcc_layers][:1] == ["canopy"] and tcc_layers[0]["screen_dot_pt"] == tsn.SCREEN_DOT_SINGLE_PT == 1.3
@@ -418,7 +407,7 @@ tcc_numbers = tcc_document.pages[12]
 assert "unavailable" in _classes_on(tcc_numbers) and len(_tables(tcc_numbers)) == 3
 _check_alignment((tcc_document.pages[11], tcc_numbers), (2, 2, 3, 2))
 tcc_squash = "".join("".join(b.text for b in _walk(tcc_numbers._page_box) if type(b).__name__ == "TextBox").split())
-assert "Nocanopyheightisreported" in tcc_squash and "Canopyheight" not in tcc_squash
+assert "Notreeheightshere" in tcc_squash and "Canopyheight" not in tcc_squash
 # The degraded renders: the statements where the tables would be, still thirteen pages.
 for degraded_inputs in (DEGRADED_INPUTS, td.trees_inputs_from_context(CONTEXT, DOCUMENT, no_pixel)):
     _, degraded_document = _render(degraded_inputs)

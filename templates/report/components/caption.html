@@ -1,6 +1,8 @@
 {#- 9. CAPTION -- one line under a figure or table: the ONE caveat that
     could change a decision, at the point of use. `parts` takes the
-    summary line's shape: strings are prose, {value} mappings are data.
+    summary line's shape: strings are prose, {value} mappings are data,
+    and a mapping of kind "word" -- a year, a name set as prose
+    (report_text.year) -- is set in the prose face.
     An empty list renders nothing. `variant` adds caption--<name>, for a
     statement set in the caption's place that is not a caveat -- the Site
     overview's boundary statement.
@@ -9,12 +11,29 @@
     figure's place when its source did not answer or does not cover the
     point -- the same part list, set as a short paragraph rather than a
     caption so it cannot be mistaken for a note under a figure that is
-    there. -#}
+    there.
+
+    `captioned` BINDS A CAPTION TO THE BLOCK IT DESCRIBES: called as
+    {% call c9.captioned(parts) %}...the block...{% endcall %}, it sets
+    the block and its caption in one .captioned wrapper that does not
+    break inside, so the pair moves to the next page together rather than
+    the page break falling between them. A bare caption after its block is
+    a sibling that the break can separate; a live run left a frontage
+    caption alone on a page. Every caption that follows a figure, table,
+    map, chart or key-figures panel is set this way. `block` adds
+    captioned--<name> for spacing a section tunes on its own. The two
+    blocks that are MEANT to split -- the vintage table and a Design
+    step's cards -- bind only the edge, in the stylesheet, and do not use
+    this. An empty `parts` still wraps the block, so a template need not
+    branch on whether the caption has anything to say. -#}
+{% macro captioned(parts, variant=None, block=None) -%}
+<div class="captioned{% if block %} captioned--{{ block }}{% endif %}">{{ caller() }}{{ caption(parts, variant) }}</div>
+{%- endmacro %}
 {% macro caption(parts, variant=None) -%}
 {%- if parts %}
 <p class="caption{% if variant %} caption--{{ variant }}{% endif %}">
 {%- for part in parts -%}
-{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- if part is mapping and part.kind == "word" -%}{{ part.value }}{%- elif part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
 {%- endfor -%}
 </p>
 {%- endif %}
@@ -22,7 +41,7 @@
 {% macro unavailable(parts) -%}
 <p class="unavailable">
 {%- for part in parts -%}
-{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- if part is mapping and part.kind == "word" -%}{{ part.value }}{%- elif part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
 {%- endfor -%}
 </p>
 {%- endmacro %}

@@ -8,7 +8,7 @@
 {% macro summary(parts) -%}
 <p class="summary">
 {%- for part in parts -%}
-{%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
+{%- if part is mapping and part.kind == "word" -%}{{ part.value }}{%- elif part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
 {%- endfor -%}
 </p>
 {%- endmacro %}

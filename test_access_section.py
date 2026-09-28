@@ -52,6 +52,7 @@ offline_harness.install()
 import access_derivations as ad  # noqa: E402
 import access_reference_fixture as fixture  # noqa: E402
 import access_section as acs  # noqa: E402
+import report_text as rt  # noqa: E402
 import landform_derivations  # noqa: E402
 import landform_section  # noqa: E402
 import report_chart  # noqa: E402
@@ -178,7 +179,7 @@ COVER = round(INPUTS.parcel_acres, 1)
 summary = _text(SECTION["summary"])
 assert summary == ("Mapped roads front 1,521 ft of the 3,265 ft boundary, N Montour Rd on the west and an unnamed road on the north. "
                    "1,296 ft of the boundary is under 15% slope, 583 ft of it on that frontage; the edges from east round to north are "
-                   "steeper. Soil rated very limited for a local road covers 65% of the parcel."), summary
+                   "steeper. Soil the survey rates worst for a local road covers 65% of the parcel."), summary
 assert [p["value"] for p in SECTION["summary"] if isinstance(p, dict)] == ["1,521 ft", "3,265 ft", "1,296 ft", "15%", "583 ft", "65%"]
 assert DERIVED.frontage["total_m"] < DERIVED.frontage["perimeter_m"] and round(DERIVED.frontage["total_m"] / DERIVED.frontage["perimeter_m"], 3) == 0.466
 frontage = SECTION["frontage_table"]
@@ -195,15 +196,17 @@ assert [_cell(c) for c in soil["rows"][1]["cells"]] == ["4.7", "35.2", "slope, f
 assert [_cell(c) for c in soil["rows"][2]["cells"]] == ["8.5", "64.8", "frost action, slope, depth to saturated zone, low strength and shrink-swell"]
 assert soil["rows"][2]["cells"][2]["kind"] == "text" and [_cell(c) for c in soil["rows"][3]["cells"]] == ["13.2", "100.0", ""]
 map_caption = _text(SECTION["map_caption"])
-assert map_caption == ("Steep boundary: slope 16 ft inside the line of 15% or more; runs under two samples are merged for drawing only. "
-                       "The mapped lane climbs 14% over 126 ft, 19% at the steepest step, entering on 25–27% ground; no stream crosses the parcel."), map_caption
+assert map_caption == ("Marked steep where the slope 16 ft inside the boundary is 15% or more; short runs are merged for drawing. "
+                       "The mapped lane climbs 14% over 126 ft, 19% at its steepest, entering on 25–27% ground; no stream crosses the parcel."), map_caption
+# "Runs under two samples" was a typed DRAWN_RUN_MIN_STATIONS; the number is the methods note's, from the constant.
+assert f"runs shorter than {acs.DRAWN_RUN_MIN_STATIONS} stations" in " ".join(SECTION["methods"][0]["notes"])
 frontage_caption = _text(SECTION["frontage_caption"])
 assert frontage_caption.startswith("Frontage is the boundary within 49 ft of a mapped road; the second column is its length under 15%. ")
-assert "both frontage and track and may be a private lane" in frontage_caption and frontage_caption.endswith(acs.ROADS_CAVEAT[:1].lower() + acs.ROADS_CAVEAT[1:])
+assert "both frontage and track and may be a private lane" in frontage_caption and frontage_caption.endswith(rt.lower_first(acs.ROADS_CAVEAT))
 soil_caption = _text(SECTION["soil_caption"])
-assert soil_caption == ("NRCS's rating by dominant components; its slope feature is the survey's slope phase, not the elevation model's grid "
-                        "above. Atkins is very limited partly for a shallow water table, as the Water section shows; roadfill is poor on "
-                        "every map unit."), soil_caption
+assert soil_caption == ("The soil survey's ratings for a local road; very limited is its worst class, and its slope is the survey's "
+                        "own, not the slopes measured above. Atkins is very limited partly for a shallow water table, as the Water "
+                        "section shows; roadfill — soil dug to raise a roadbed — is poor on every soil on the parcel."), soil_caption
 sources = [_text(line) for line in SECTION["sources"]]
 assert len(sources) == 3 and sources[0].startswith("USGS National Map transportation") and "2016" in sources[0]
 assert sources[1] == "USDA NRCS SSURGO, soil survey PA003, version of 9/5/2025: cointerp, local roads and streets, roadfill."
@@ -215,8 +218,8 @@ degraded_data = fixture.report_data(soil_road_ratings_rows=None, unavailable={
     "soil_road_ratings": {"label": "soil road-construction ratings", "reason": "source_unavailable", "error": "down"}})
 degraded_inputs = ad.access_inputs_from_context(CONTEXT, DOCUMENT, degraded_data)
 degraded = acs.build_access_section(degraded_inputs, TOKENS)
-assert degraded["soil_table"] is None and _text(degraded["soil_unavailable"]).startswith("SSURGO's road-construction ratings did not answer")
-assert _text(degraded["summary"]).endswith("the edges from east round to north are steeper. ") and len(degraded["sources"]) == 2
+assert degraded["soil_table"] is None and _text(degraded["soil_unavailable"]).startswith("The soil survey's road ratings did not answer")
+assert _text(degraded["summary"]).endswith("the edges from east round to north are steeper.") and len(degraded["sources"]) == 2
 assert degraded["frontage_table"]["rows"] == frontage["rows"]
 # A landlocked parcel: one road 40 m east, no frontage, the nearest road's distance and bearing in the summary.
 xs, ys = warp_transform(INPUTS.dem["crs"], "EPSG:4326", [maxx + 40.0, maxx + 40.0], [miny, maxy])
@@ -226,7 +229,7 @@ far = acs.build_access_section(ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads
 assert _text(far["summary"]).startswith("No mapped road touches the boundary: the nearest, Far Rd, lies 131 ft to the E. ")
 assert far["frontage_table"] is None and _text(far["frontage_caption"]).startswith("No mapped road runs within 49 ft of the boundary.")
 assert "layer-frontage" not in far["map"]["svg"] and "map-note" not in far["map"]["svg"], "the road is in the frame, the parcel has no frontage"
-assert _text(far["map_caption"]).startswith("Steep boundary") and "No mapped lane lies on the parcel" in _text(far["map_caption"])
+assert _text(far["map_caption"]).startswith("Marked steep") and "No mapped lane lies on the parcel" in _text(far["map_caption"])
 print(f"   summary {len(summary.split())} words; soil acres {soil['acres']} -> {sum(soil['acres'])}; landlocked: 131 ft to the E")
 
 # ======================================================================
@@ -307,7 +310,7 @@ for table_box, columns in zip(_tables(page) + _tables(numbers), (2, 2)):
 assert len(advances) == 1, sorted(advances)
 flat = "".join("".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox") for p in (page, numbers))
 squash = "".join(flat.split())
-for needle in ("merged for drawing only", "shallow water table", "may be a private lane", "not the elevation model's grid above"):
+for needle in ("short runs are merged for drawing", "shallow water table", "may be a private lane", "not the slopes measured above"):
     assert "".join(needle.split()) in squash, needle
 assert "V·ACCESS" in squash.upper() and "V·ACCESS,CONTINUED" in squash.upper()
 # The landform maps and Water intact ahead of it.
@@ -358,6 +361,37 @@ degraded_html, degraded_document = _render(degraded_inputs)
 assert len(degraded_document.pages) == 11 and report_layout.overflowing_boxes(degraded_document) == []
 assert "unavailable" in _classes_on(degraded_document.pages[10]) and len(_tables(degraded_document.pages[10])) == 0
 print(f"   11 pages, both tables aligned at one advance {advances.pop()} pt; 4 roads under the map, 5 and 9 spill; degraded 11")
+
+# A CAPTION NEVER LEAVES ITS TABLE (branch 21). The spill rule counts rows, not height: a live run with three
+# roads -- under the limit -- and a summary a line longer than the reference parcel's ran the map page over by
+# exactly the frontage caption, which then sat alone on a page. The rule cannot see the summary's length; the
+# binding (components/caption.html's .captioned) makes the outcome safe whatever it is. Four roads, no spill,
+# and a summary long enough to push the page over: the frontage table and its caption move TOGETHER, and no
+# page carries a caption without the block it describes.
+print("\nA CAPTION BREAKS WITH ITS TABLE")
+four = acs.build_access_section(ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads": _roads_around(4)}), TOKENS)
+assert four["spill"] is False
+# ONE LINE longer, as the live run's was: enough to push the caption over and leave the table room. Two lines
+# push the table over too, and the old sibling caption went with it -- the case that proves nothing.
+long_summary = list(four["summary"]) + [" One line longer than the reference parcel's, as the live run's was."]
+crowded = HTML(string=site_report.jinja_environment().get_template("base.html").render(
+    stylesheet=site_report.render_stylesheet(),
+    cover={"title": "x", "eyebrow": "x", "label": "x", "acres": None, "generated_on": "x", "meta": "x"},
+    sections=[dict(four, summary=long_summary)]), base_url=site_report.TEMPLATES_DIRECTORY).render()
+assert report_layout.overflowing_boxes(crowded) == []
+frontage_start = _text(four["frontage_caption"])[:40]
+holding = [p for p in crowded.pages
+           if frontage_start in "".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox")]
+assert len(holding) == 1, "the frontage caption is on one page"
+assert len(_tables(holding[0])) == 1, "and its table is on that page with it"
+assert "report-map" not in _classes_on(holding[0]), "the map page could not hold the pair, so the pair moved"
+for number, page in enumerate(crowded.pages, start=1):
+    for block in (b for b in _walk(page._page_box)
+                  if getattr(b, "element", None) is not None and "captioned" in (b.element.get("class") or "").split()):
+        classes = [(c.element.get("class") or "") for c in block.children if getattr(c, "element", None) is not None]
+        assert any("caption" not in c.split() for c in classes), (number, "a caption on a page without its block")
+print(f"   four roads and a longer summary: the frontage table and its caption on page "
+      f"{crowded.pages.index(holding[0]) + 1} of {len(crowded.pages)}, together")
 
 print("\ntest_access_section.py: all sections passed")
 print(offline_harness.summary())
