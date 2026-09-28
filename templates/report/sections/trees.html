@@ -23,38 +23,31 @@
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
-    {{ c7.map(section.map) }}
-    {{ c9.caption(section.map_caption) }}
-    {{ c5.data_table(section.extent_table) }}
-    {{ c9.caption(section.extent_caption) }}
+    {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
+    {% call c9.captioned(section.extent_caption) %}{{ c5.data_table(section.extent_table) }}{% endcall %}
   </div>
   <div class="section__detail">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
 {%- if section.height_table %}
-    {{ c5.data_table(section.height_table) }}
-    {{ c9.caption(section.height_caption) }}
+    {% call c9.captioned(section.height_caption) %}{{ c5.data_table(section.height_table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.height_unavailable) }}
 {%- if section.cover_table %}
-    {{ c5.data_table(section.cover_table) }}
-    {{ c9.caption(section.cover_caption) }}
+    {% call c9.captioned(section.cover_caption) %}{{ c5.data_table(section.cover_table) }}{% endcall %}
 {%- endif %}
 {%- endif %}
 {%- if section.forest_type %}
-    {{ c3.summary(section.forest_type) }}
-    {{ c9.caption(section.forest_type_caption) }}
+    {% call c9.captioned(section.forest_type_caption) %}{{ c3.summary(section.forest_type) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.forest_type_unavailable) }}
 {%- endif %}
 {%- if section.species_table %}
-    {{ c5.data_table(section.species_table) }}
-    {{ c9.caption(section.species_caption) }}
+    {% call c9.captioned(section.species_caption) %}{{ c5.data_table(section.species_table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.species_unavailable) }}
 {%- endif %}
 {%- if section.limitations_table %}
-    {{ c5.data_table(section.limitations_table) }}
-    {{ c9.caption(section.limitations_caption) }}
+    {% call c9.captioned(section.limitations_caption) %}{{ c5.data_table(section.limitations_table) }}{% endcall %}
 {%- endif %}
     {{ c6.source_footer({"lines": section.sources}) }}
   </div>

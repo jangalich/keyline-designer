@@ -583,17 +583,13 @@ th.num {
 .section--soils .section__figures .summary {
   margin-bottom: var(--space-1);
 }
-/* A TABLE AND ITS CAPTION BREAK TOGETHER. The caption is the one caveat
-   that could change how the figure above it is read; stranded at the top
-   of the next page without that figure it is worse than useless. */
-.table-block {
-  break-inside: avoid;
-}
-.table-block .caption:last-child {
+/* The two classification blocks under the soil map space themselves
+   apart; the last block on the page has nothing under it to be separated
+   from. */
+.captioned--table .caption:last-child {
   margin-bottom: var(--space-3);
 }
-/* The last block on a page has nothing under it to be separated from. */
-.table-block:last-child .caption:last-child {
+.captioned--table:last-child .caption:last-child {
   margin-bottom: 0;
 }
 .section--soils .section__detail .eyebrow--continued,
@@ -925,6 +921,26 @@ th.num {
 .caption .data {
   font-style: normal;
   font-size: 7.5pt;
+}
+/* A CAPTION BREAKS WITH ITS BLOCK, IN EVERY SECTION. The caption is the
+   one caveat that could change how the figure above it is read; stranded
+   at the top of the next page without that figure it is worse than
+   useless (a live run left the Access frontage caption alone on a page).
+   The template sets the block and its caption in one .captioned wrapper
+   (components/caption.html), and the pair moves whole. Not a <caption>
+   element: WeasyPrint 70 breaks a bottom-side table caption away from its
+   table like any sibling. Not break-before: avoid alone: that keeps the
+   first line against the block but lets the caption's own lines split. */
+.captioned {
+  break-inside: avoid;
+}
+/* THE TWO BLOCKS MEANT TO SPLIT -- the vintage table across its pages, a
+   Design step between rows of cards -- cannot be wrapped without being
+   made whole. Their captions are one line, so binding the edge is enough:
+   no break between the last row and the caption under it. */
+.back-matter__vintage .caption,
+.record-step .caption {
+  break-before: avoid;
 }
 /* The statement that stands in a missing figure's place: the page's own
    size and colour, so it reads as content, not as a note. */

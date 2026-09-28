@@ -30,11 +30,9 @@
   </div>
   <div class="section__structure">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
-    {{ c7.map(section.structure_map) }}
-    {{ c9.caption(section.structure_caption) }}
+    {% call c9.captioned(section.structure_caption) %}{{ c7.map(section.structure_map) }}{% endcall %}
 {%- if section.profile.chart %}
-    {{ c8.chart(section.profile.chart, "valley-profile") }}
-    {{ c9.caption(section.profile.caption) }}
+    {% call c9.captioned(section.profile.caption) %}{{ c8.chart(section.profile.chart, "valley-profile") }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.profile.unavailable) }}
 {%- endif %}
@@ -44,8 +42,7 @@
     {{ c4.key_figures(section.key_figures) }}
     {{ c5.data_table(section.aspect_table) }}
 {%- if section.valley_table %}
-    {{ c5.data_table(section.valley_table) }}
-    {{ c9.caption(section.valley_table_caption) }}
+    {% call c9.captioned(section.valley_table_caption) %}{{ c5.data_table(section.valley_table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.valley_table_unavailable) }}
 {%- endif %}

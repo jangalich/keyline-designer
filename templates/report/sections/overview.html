@@ -22,19 +22,17 @@
   {{ c3.summary(section.summary) }}
   {#- The map and the figures side by side: the map near-square, so it
       shows as much ground north and south as east and west. -#}
+  {% call c9.captioned(section.map_caption if section.map else []) %}
   <div class="overview__top">
 {%- if section.map %}
     <div class="overview__map">{{ c7.map(section.map) }}</div>
 {%- endif %}
     <div class="overview__figures">{{ c4.key_figures(section.key_figures) }}</div>
   </div>
-{%- if section.map %}
-  {{ c9.caption(section.map_caption) }}
-{%- endif %}
+  {%- endcall %}
 {%- for statement in section.unavailable %}
   {{ c9.unavailable(statement) }}
 {%- endfor %}
-  {{ c5.data_table(section.facts) }}
-  {{ c9.caption(section.boundary_statement, variant="boundary") }}
+  {% call c9.captioned(section.boundary_statement, variant="boundary") %}{{ c5.data_table(section.facts) }}{% endcall %}
   {{ c6.source_footer({"lines": section.sources}) }}
 </section>

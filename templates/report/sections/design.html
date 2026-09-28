@@ -20,10 +20,10 @@
   <div class="section__figures">
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
-    {{ c7.map(section.map) }}
 {%- if section.imagery_available %}
-    {{ c9.caption(section.imagery_line) }}
+    {% call c9.captioned(section.imagery_line) %}{{ c7.map(section.map) }}{% endcall %}
 {%- else %}
+    {{ c7.map(section.map) }}
     {{ c9.unavailable(section.imagery_line) }}
 {%- endif %}
   </div>

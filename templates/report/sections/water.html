@@ -26,20 +26,16 @@
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
-    {{ c7.map(section.map) }}
-    {{ c9.caption(section.map_caption) }}
-{%- if section.surface_water_table %}
-    {{ c5.data_table(section.surface_water_table) }}
-{%- endif %}
-    {{ c9.caption(section.surface_water_caption) }}
+    {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
+    {% call c9.captioned(section.surface_water_caption) %}
+{%- if section.surface_water_table %}{{ c5.data_table(section.surface_water_table) }}{% endif %}
+{%- endcall %}
   </div>
   <div class="section__structure">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
-    {{ c7.map(section.wetness_map) }}
-    {{ c9.caption(section.wetness_caption) }}
+    {% call c9.captioned(section.wetness_caption) %}{{ c7.map(section.wetness_map) }}{% endcall %}
 {%- if section.water_table %}
-    {{ c5.data_table(section.water_table) }}
-    {{ c9.caption(section.water_table_caption) }}
+    {% call c9.captioned(section.water_table_caption) %}{{ c5.data_table(section.water_table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.water_table_unavailable) }}
 {%- endif %}
@@ -47,20 +43,16 @@
   <div class="section__detail">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
     {{ c4.key_figures(section.key_figures) }}
-    {{ c5.data_table(section.comparison_table) }}
-    {{ c9.caption(section.comparison_caption) }}
+    {% call c9.captioned(section.comparison_caption) %}{{ c5.data_table(section.comparison_table) }}{% endcall %}
 {%- if section.land_cover_table %}
-    {{ c5.data_table(section.land_cover_table) }}
-    {{ c9.caption(section.land_cover_caption) }}
+    {% call c9.captioned(section.land_cover_caption) %}{{ c5.data_table(section.land_cover_table) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.land_cover_unavailable) }}
 {%- endif %}
 {%- if section.flood_table %}
-    {{ c5.data_table(section.flood_table) }}
-    {{ c9.caption(section.flood_caption) }}
+    {% call c9.captioned(section.flood_caption) %}{{ c5.data_table(section.flood_table) }}{% endcall %}
 {%- elif section.flood_statement %}
-    {{ c9.unavailable(section.flood_statement) }}
-    {{ c9.caption(section.flood_caption) }}
+    {% call c9.captioned(section.flood_caption) %}{{ c9.unavailable(section.flood_statement) }}{% endcall %}
 {%- else %}
     {{ c9.unavailable(section.flood_unavailable) }}
 {%- endif %}

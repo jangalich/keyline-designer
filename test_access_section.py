@@ -359,5 +359,36 @@ assert len(degraded_document.pages) == 11 and report_layout.overflowing_boxes(de
 assert "unavailable" in _classes_on(degraded_document.pages[10]) and len(_tables(degraded_document.pages[10])) == 0
 print(f"   11 pages, both tables aligned at one advance {advances.pop()} pt; 4 roads under the map, 5 and 9 spill; degraded 11")
 
+# A CAPTION NEVER LEAVES ITS TABLE (branch 21). The spill rule counts rows, not height: a live run with three
+# roads -- under the limit -- and a summary a line longer than the reference parcel's ran the map page over by
+# exactly the frontage caption, which then sat alone on a page. The rule cannot see the summary's length; the
+# binding (components/caption.html's .captioned) makes the outcome safe whatever it is. Four roads, no spill,
+# and a summary long enough to push the page over: the frontage table and its caption move TOGETHER, and no
+# page carries a caption without the block it describes.
+print("\nA CAPTION BREAKS WITH ITS TABLE")
+four = acs.build_access_section(ad.AccessInputs(**{**INPUTS.__dict__, "farm_roads": _roads_around(4)}), TOKENS)
+assert four["spill"] is False
+# ONE LINE longer, as the live run's was: enough to push the caption over and leave the table room. Two lines
+# push the table over too, and the old sibling caption went with it -- the case that proves nothing.
+long_summary = list(four["summary"]) + [" One line longer than the reference parcel's, as the live run's was."]
+crowded = HTML(string=site_report.jinja_environment().get_template("base.html").render(
+    stylesheet=site_report.render_stylesheet(),
+    cover={"title": "x", "eyebrow": "x", "label": "x", "acres": None, "generated_on": "x", "meta": "x"},
+    sections=[dict(four, summary=long_summary)]), base_url=site_report.TEMPLATES_DIRECTORY).render()
+assert report_layout.overflowing_boxes(crowded) == []
+frontage_start = _text(four["frontage_caption"])[:40]
+holding = [p for p in crowded.pages
+           if frontage_start in "".join(b.text for b in _walk(p._page_box) if type(b).__name__ == "TextBox")]
+assert len(holding) == 1, "the frontage caption is on one page"
+assert len(_tables(holding[0])) == 1, "and its table is on that page with it"
+assert "report-map" not in _classes_on(holding[0]), "the map page could not hold the pair, so the pair moved"
+for number, page in enumerate(crowded.pages, start=1):
+    for block in (b for b in _walk(page._page_box)
+                  if getattr(b, "element", None) is not None and "captioned" in (b.element.get("class") or "").split()):
+        classes = [(c.element.get("class") or "") for c in block.children if getattr(c, "element", None) is not None]
+        assert any("caption" not in c.split() for c in classes), (number, "a caption on a page without its block")
+print(f"   four roads and a longer summary: the frontage table and its caption on page "
+      f"{crowded.pages.index(holding[0]) + 1} of {len(crowded.pages)}, together")
+
 print("\ntest_access_section.py: all sections passed")
 print(offline_harness.summary())

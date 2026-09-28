@@ -286,7 +286,7 @@ def _numeric_cells(table_box):
 
 
 MAP_PAGE, TABLES_PAGE, CLASS_PAGE = pages[13], pages[14], pages[15]
-assert {"report-map", "summary", "heading", "eyebrow", "caption", "table-block"} <= _classes_on(MAP_PAGE)
+assert {"report-map", "summary", "heading", "eyebrow", "caption", "captioned"} <= _classes_on(MAP_PAGE)
 assert "source-footer" not in _classes_on(MAP_PAGE)
 # THE COMPOSITION: the map page carries the map and the two CLASSIFICATION tables -- seven map units are
 # 261 pt of table against the room a 453 pt map leaves, so the map unit table opens the next page beside the
@@ -300,14 +300,14 @@ assert "report-map" not in _classes_on(TABLES_PAGE) and "source-footer" in _clas
 assert "source-footer" not in _classes_on(TABLES_PAGE)
 # A TABLE AND ITS CAPTION BREAK TOGETHER: neither classification caption is stranded from its table.
 blocks = [b for b in _walk(MAP_PAGE._page_box)
-          if getattr(b, "element", None) is not None and "table-block" in (b.element.get("class") or "")]
+          if getattr(b, "element", None) is not None and "captioned--table" in (b.element.get("class") or "")]
 assert len(blocks) == 2, len(blocks)
 for block in blocks:
     assert any(type(c).__name__ == "TableBox" for c in _walk(block)), "a block on the page carries its table"
     assert any((getattr(c, "element", None) is not None and "caption" in (c.element.get("class") or ""))
                for c in _walk(block)), "and its caption"
 # THE MAP PAGE IS FULL, and a longer summary moves the FARMLAND BLOCK WHOLE rather than stranding its
-# caption -- the .table-block guarantee, on the case that actually exercises it.
+# caption -- the .captioned guarantee, on the case that actually exercises it.
 ENV = site_report.jinja_environment()
 long_summary = list(SECTION["summary"]) + [
     "A longer summary than this parcel's, to push the page past what it holds and prove what gives way."]
@@ -319,7 +319,7 @@ assert report_layout.overflowing_boxes(crowded) == []
 crowded_map, crowded_next = crowded.pages[1], crowded.pages[2]
 assert len(_tables(crowded_map)) == 1, "only capability fits when the summary runs longer"
 moved = [b for b in _walk(crowded_next._page_box)
-         if getattr(b, "element", None) is not None and "table-block" in (b.element.get("class") or "")]
+         if getattr(b, "element", None) is not None and "captioned--table" in (b.element.get("class") or "")]
 assert len(moved) == 1 and any(type(c).__name__ == "TableBox" for c in _walk(moved[0])), \
     "the farmland table moves WITH its caption, not without it"
 

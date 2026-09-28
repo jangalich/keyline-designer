@@ -9,7 +9,24 @@
     figure's place when its source did not answer or does not cover the
     point -- the same part list, set as a short paragraph rather than a
     caption so it cannot be mistaken for a note under a figure that is
-    there. -#}
+    there.
+
+    `captioned` BINDS A CAPTION TO THE BLOCK IT DESCRIBES: called as
+    {% call c9.captioned(parts) %}...the block...{% endcall %}, it sets
+    the block and its caption in one .captioned wrapper that does not
+    break inside, so the pair moves to the next page together rather than
+    the page break falling between them. A bare caption after its block is
+    a sibling that the break can separate; a live run left a frontage
+    caption alone on a page. Every caption that follows a figure, table,
+    map, chart or key-figures panel is set this way. `block` adds
+    captioned--<name> for spacing a section tunes on its own. The two
+    blocks that are MEANT to split -- the vintage table and a Design
+    step's cards -- bind only the edge, in the stylesheet, and do not use
+    this. An empty `parts` still wraps the block, so a template need not
+    branch on whether the caption has anything to say. -#}
+{% macro captioned(parts, variant=None, block=None) -%}
+<div class="captioned{% if block %} captioned--{{ block }}{% endif %}">{{ caller() }}{{ caption(parts, variant) }}</div>
+{%- endmacro %}
 {% macro caption(parts, variant=None) -%}
 {%- if parts %}
 <p class="caption{% if variant %} caption--{{ variant }}{% endif %}">
