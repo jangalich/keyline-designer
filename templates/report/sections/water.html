@@ -21,18 +21,29 @@
 {% import "components/source_footer.html" as c6 %}
 {% import "components/map.html" as c7 %}
 {% import "components/caption.html" as c9 %}
+{#- The surface-water table: under the hydrology map, or -- refitted,
+    when the map page cannot hold it -- heading the wetness page
+    (site_report.lay_out). -#}
+{% macro surface_water() -%}
+    {% call c9.captioned(section.surface_water_caption, refit="water.surface_water") %}
+{%- if section.surface_water_table %}{{ c5.data_table(section.surface_water_table) }}{% endif %}
+{%- endcall %}
+{%- endmacro %}
 <section class="section section--water section--map">
   <div class="section__figures">
     {{ c1.eyebrow(section.number, section.name) }}
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
     {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
-    {% call c9.captioned(section.surface_water_caption) %}
-{%- if section.surface_water_table %}{{ c5.data_table(section.surface_water_table) }}{% endif %}
-{%- endcall %}
+{%- if "surface_water" not in (section.refit or []) %}
+    {{ surface_water() }}
+{%- endif %}
   </div>
   <div class="section__structure">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if "surface_water" in (section.refit or []) %}
+    {{ surface_water() }}
+{%- endif %}
     {% call c9.captioned(section.wetness_caption) %}{{ c7.map(section.wetness_map) }}{% endcall %}
 {%- if section.water_table %}
     {% call c9.captioned(section.water_table_caption) %}{{ c5.data_table(section.water_table) }}{% endcall %}

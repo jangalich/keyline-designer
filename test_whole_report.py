@@ -26,7 +26,10 @@ exist together (whole_report_fixture):
      branch 21's orphaned caption and the pages a live 10-map-unit parcel
      lost after it, and neither was visible from reading the PDF;
   8. every caption with its block: on one page, the page its block ends
-     on (report_layout.captions_apart) -- what branch 21 fixed.
+     on (report_layout.captions_apart) -- what branch 21 fixed; and no
+     block pushed onto a page of its own, so the reference parcel is laid
+     out once, unrefitted (site_report.lay_out; test_report_refit.py
+     pushes each one).
 
 Offline (offline_harness). Set WHOLE_REPORT_OUT to a directory to write
 the PDF there as well.
@@ -228,7 +231,8 @@ print(f"   none under {SPARSE_PAGE_CHARS}; exempt: " + "; ".join(f"p{n} {name} (
 print("8. every caption with its block")
 apart = report_layout.captions_apart(DOCUMENT)
 assert apart == [], apart
-print("   every bound caption on one page, the page its block ends on")
+assert site_report.pushed_blocks(DOCUMENT) == [], site_report.pushed_blocks(DOCUMENT)
+print("   every bound caption on one page, the page its block ends on; no block pushed, nothing refitted")
 
 print("\ntest_whole_report.py: all sections passed")
 print(offline_harness.summary())

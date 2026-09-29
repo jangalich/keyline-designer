@@ -27,6 +27,8 @@ bound caption that is not with its block (report_layout.captions_apart).
                MAX_UNITS) and to both Soils unit tables: a larger parcel's
                shape, from content that is to hand.
   --pdf PATH   writes the PDF.
+  --no-refit   lays the report out once, as before branch 24's refit
+               (site_report.lay_out): the before to its after.
 
 Changes nothing. Offline unless --live.
 """
@@ -126,7 +128,7 @@ def _walk(box):
         yield from _walk(child)
 
 
-def measure(inputs: dict, templates: str, pdf_path=None) -> dict:
+def measure(inputs: dict, templates: str, pdf_path=None, refit: bool = True) -> dict:
     import pymupdf
     from weasyprint import HTML
 
@@ -136,9 +138,12 @@ def measure(inputs: dict, templates: str, pdf_path=None) -> dict:
     kw = dict(inputs)
     data, generated_on = kw.pop("data"), kw.pop("generated_on", date.today())
     env = site_report.jinja_environment(templates)
-    html = site_report.render_site_report_html(data, property_label="5614 N Montour Rd", generated_on=generated_on,
-                                               env=env, complete=True, **kw)
-    document = HTML(string=html, base_url=templates).render()
+    if refit:
+        # The job's own layout: a pushed block refitted (site_report.lay_out).
+        _, document = site_report.render_site_report(data, generated_on=generated_on, env=env, complete=True, **kw)
+    else:
+        html = site_report.render_site_report_html(data, generated_on=generated_on, env=env, complete=True, **kw)
+        document = HTML(string=html, base_url=templates).render()
     pdf = document.write_pdf()
     if pdf_path:
         with open(pdf_path, "wb") as handle:
@@ -160,7 +165,8 @@ def measure(inputs: dict, templates: str, pdf_path=None) -> dict:
                      default=top)
         pages.append({"page": number, "chars": len(text), "fill": round(100 * (bottom - top) / box.height),
                       "section": current or "Cover", "first": " / ".join(lines[:3])[:80]})
-    return {"pages": pages, "sections": sections, "captions_apart": report_layout.captions_apart(document)}
+    return {"pages": pages, "sections": sections, "captions_apart": report_layout.captions_apart(document),
+            "pushed": site_report.pushed_blocks(document)}
 
 
 def main() -> int:
@@ -171,6 +177,7 @@ def main() -> int:
     parser.add_argument("--templates", default=os.path.join(HERE, "templates", "report"))
     parser.add_argument("--grow", type=int, default=0)
     parser.add_argument("--pdf")
+    parser.add_argument("--no-refit", action="store_true", help="one layout pass, no block refitted")
     args = parser.parse_args()
 
     if args.live is None:
@@ -198,13 +205,14 @@ def main() -> int:
     if args.grow:
         site_report.build_sections = grow_sections(site_report.build_sections, args.grow)
 
-    result = measure(inputs, args.templates, args.pdf)
-    print(f"{len(result['pages'])} pages  ({args.templates}, grow {args.grow})")
+    result = measure(inputs, args.templates, args.pdf, refit=not args.no_refit)
+    print(f"{len(result['pages'])} pages  ({args.templates}, grow {args.grow}, {'one pass' if args.no_refit else 'refitted'})")
     for p in result["pages"]:
         flag = "SPARSE" if p["chars"] < SPARSE_PAGE_CHARS else ""
         print(f"  p{p['page']:>2} {p['chars']:>5} chars {p['fill']:>3}% {flag:<6} {p['first']}")
     print("sections: " + "; ".join(f"{name} {count}" for name, count in result["sections"].items()))
     print(f"captions apart from their block: {result['captions_apart'] or 'none'}")
+    print(f"blocks still pushed onto a page of their own: {result['pushed'] or 'none'}")
     return 0
 
 

@@ -875,6 +875,14 @@ th.num {
   line-height: 13pt;
   color: var(--ink);
 }
+/* THE STRIP GIVES WAY WHEN A PAGE IS SHORT (branch 24): a one-row
+   legend in a two-row strip leaves 13 pt empty, and a map page whose
+   table falls short of fitting by less than that takes the strip at its
+   rows rather than lose the table to a page of its own. Only on that
+   page -- site_report.lay_out() sets it where a block was pushed. */
+.report-map--fitted-legend .report-map__legend {
+  min-height: 0;
+}
 .report-map__entry {
   display: inline-block;
   margin: 0 var(--space-4) 0 0;

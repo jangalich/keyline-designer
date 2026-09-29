@@ -25,9 +25,15 @@
     blocks that are MEANT to split -- the vintage table and a Design
     step's cards -- bind only the edge, in the stylesheet, and do not use
     this. An empty `parts` still wraps the block, so a template need not
-    branch on whether the caption has anything to say. -#}
-{% macro captioned(parts, variant=None, block=None) -%}
-<div class="captioned{% if block %} captioned--{{ block }}{% endif %}">{{ caller() }}{{ caption(parts, variant) }}</div>
+    branch on whether the caption has anything to say.
+
+    `refit` MARKS A BLOCK THAT CAN BE FITTED BACK (branch 24):
+    "<section>.<remedy>", set as data-refit. When the block does not fit
+    under the one before it and lands on a page of its own,
+    site_report.lay_out() applies the remedy and lays the report out
+    again. -#}
+{% macro captioned(parts, variant=None, block=None, refit=None) -%}
+<div class="captioned{% if block %} captioned--{{ block }}{% endif %}"{% if refit %} data-refit="{{ refit }}"{% endif %}>{{ caller() }}{{ caption(parts, variant) }}</div>
 {%- endmacro %}
 {% macro caption(parts, variant=None) -%}
 {%- if parts %}

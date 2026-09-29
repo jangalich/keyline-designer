@@ -24,7 +24,7 @@
     {{ c2.heading(section.heading) }}
     {{ c3.summary(section.summary) }}
     {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
-    {% call c9.captioned(section.extent_caption) %}{{ c5.data_table(section.extent_table) }}{% endcall %}
+    {% call c9.captioned(section.extent_caption, refit="trees.legend") %}{{ c5.data_table(section.extent_table) }}{% endcall %}
   </div>
   <div class="section__detail">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}

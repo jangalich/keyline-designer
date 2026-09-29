@@ -5,6 +5,8 @@ THE SITE DATA REPORT, RENDERED: the cover and every section, from a
 ReportData, through Jinja2 and WeasyPrint to a PDF.
 
     render_site_report_html(report_data, ...)      -> the HTML document
+    render_site_report(report_data, ...)           -> (HTML, weasyprint Document),
+                                                      laid out and refitted
     generate_site_report_pdf(report_data, path, ...) -> the PDF on disk
     generate_session_site_report_pdf(session_id, store, path, ...)
                                                     -> the PDF for a session
@@ -50,6 +52,24 @@ generation date, and THE CONTENTS: the outline's eight sections and the
 back matter with page numbers, resolved by WeasyPrint's target-counter()
 in the one render pass (verified at branch 17 step 0: no second pass).
 Each section is wrapped in an anchor the contents link to.
+
+A BLOCK PUSHED ONTO A PAGE OF ITS OWN IS REFITTED (branch 24). Every
+section's page blocks start on a forced page break, so a block that does
+not fit under the one before it takes a page to itself and leaves that
+page nearly empty -- whatever the break rules, measured: splitting the
+block leaves its tail alone instead, and the pages before branch 21 left
+the caption alone. A few blocks are marked in their templates with the
+one remedy that fits them back (data-refit, components/caption.html's
+`captioned`): the legend strip sized to its rows rather than reserved at
+two (a one-row legend gives back 13 pt), or the block moved to head the
+section's next page, where there is room. render_site_report() lays the
+document out once, finds the marked blocks that did not start on their
+page block's first page (pushed_blocks), applies their remedies to the
+SAME built sections -- no map is drawn twice -- and lays it out again,
+keeping the second layout only if it has fewer pages, or as many and
+fewer near-empty ones (a moved block can push a longer one in its place:
+the reference parcel's wetness page is 96% full). A report whose blocks
+all fit is laid out once and is exactly what it was.
 
 THE BACK MATTER (branch 17, back_matter.py): the vintage table and the
 methods note, built after every section from the footers and methods
@@ -312,13 +332,151 @@ def render_site_report_html(
     `terrain`. `complete` is the whole report the job produces: the
     contents on the cover and the back matter after the last section --
     off for a render of some sections, which neither describes."""
+    return _built_report(report_data, property_label, generated_on, env, fonts_directory, terrain, water, access, trees,
+                         soils, design, overview, complete)[1]
+
+
+def _built_report(report_data, property_label, generated_on, env, fonts_directory, terrain, water, access, trees, soils,
+                  design, overview, complete) -> tuple:
+    """(sections, the HTML, a function that renders the HTML again from the
+    same sections) -- the sections built once."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
     with report_progress.stage(STAGE_TERRAIN):
         sections = build_sections(report_data, terrain, water, access, trees, soils, design, overview)
+
+    def html_for() -> str:
+        return _render_document(env, fonts_directory, report_data, property_label, generated_on, terrain, sections,
+                                complete)
+
     with report_progress.stage(STAGE_PAGES), report_progress.unit(STAGE_PAGES, "html"):
-        return _render_document(env, fonts_directory, report_data, property_label, generated_on, terrain,
-                                sections, complete)
+        return sections, html_for(), html_for
+
+
+# The page blocks a section's template splits on: each starts a page.
+PAGE_BLOCKS = ("section__figures", "section__structure", "section__detail", "section__classification")
+
+
+def _boxes(box):
+    yield box
+    for child in getattr(box, "children", []) or []:
+        yield from _boxes(child)
+
+
+def pushed_blocks(document) -> list:
+    """Every data-refit block that did not start on its page block's first
+    page, as its data-refit value ("<section>.<remedy>"), in document order:
+    the page before it ran out, and it was carried to a page of its own."""
+    first_page = {}
+    for number, page in enumerate(document.pages, start=1):
+        for box in _boxes(page._page_box):
+            element = getattr(box, "element", None)
+            if element is not None and element not in first_page:
+                first_page[element] = number
+    root = next((e for e in first_page if e.tag == "html"), None)
+    if root is None:
+        return []
+    pushed = []
+
+    def visit(element, block):
+        classes = (element.get("class") or "").split()
+        if any(name in classes for name in PAGE_BLOCKS):
+            block = element
+        refit = element.get("data-refit")
+        if refit and block is not None and element in first_page and block in first_page \
+                and first_page[element] > first_page[block]:
+            pushed.append(refit)
+        for child in element:
+            visit(child, block)
+
+    visit(root, None)
+    return pushed
+
+
+def refit_sections(sections: list, pushed: list) -> list:
+    """Apply each pushed block's remedy to its section, in place: a remedy
+    is a word in section["refit"] the template reads, and "legend" also
+    marks the section's map so its legend strip takes only its own rows.
+    Returns the remedies applied."""
+    applied = []
+    for refit in pushed:
+        name, _, remedy = refit.partition(".")
+        section = next((s for s in sections if s.get("template", "").split(".")[0] == name), None)
+        if section is None or remedy in section.get("refit", ()):
+            continue
+        section["refit"] = list(section.get("refit", ())) + [remedy]
+        if remedy == "legend" and section.get("map"):
+            section["map"] = dict(section["map"], fitted_legend=True)
+        applied.append(refit)
+    return applied
+
+
+def lay_out(html: str, sections: list, html_for):
+    """(HTML, Document): laid out once, and again with the pushed blocks'
+    remedies applied if any block was pushed -- the second layout kept only
+    if it costs less (_page_cost)."""
+    from weasyprint import HTML
+
+    document = HTML(string=html, base_url=TEMPLATES_DIRECTORY).render()
+    before = [(section, dict(section)) for section in sections]
+    if not refit_sections(sections, pushed_blocks(document)):
+        return html, document
+    refitted_html = html_for()
+    refitted = HTML(string=refitted_html, base_url=TEMPLATES_DIRECTORY).render()
+    if _page_cost(refitted) < _page_cost(document):
+        return refitted_html, refitted
+    # Not kept: the sections go back to what the first layout rendered.
+    for section, fields in before:
+        section.clear()
+        section.update(fields)
+    return html, document
+
+
+# A page with less text than this is a block alone on it
+# (test_whole_report's standing check holds the report to the same figure).
+SPARSE_PAGE_CHARS = 600
+
+
+def page_characters(document) -> list:
+    """The characters each laid-out page sets -- its text boxes, not its
+    running footer."""
+    counts = []
+    for page in document.pages:
+        body = [c for c in page._page_box.children if type(c).__name__ != "MarginBox"]
+        counts.append(sum(len(getattr(b, "text", "") or "") for c in body for b in _boxes(c)
+                          if type(b).__name__ == "TextBox"))
+    return counts
+
+
+def _page_cost(document) -> tuple:
+    """Fewer pages first, then fewer sparse ones: a refit that moves a
+    block and pushes a longer one in its place keeps the count and trades
+    a near-empty page for a fuller one."""
+    return len(document.pages), sum(1 for c in page_characters(document) if c < SPARSE_PAGE_CHARS)
+
+
+def render_site_report(
+    report_data,
+    property_label: Optional[str] = None,
+    generated_on: Optional[date] = None,
+    env: Optional[Environment] = None,
+    fonts_directory: str = FONTS_DIRECTORY,
+    terrain=None,
+    water=None,
+    access=None,
+    trees=None,
+    soils=None,
+    design=None,
+    overview=None,
+    complete: bool = False,
+) -> tuple:
+    """(HTML, weasyprint Document): the document laid out, with any block
+    pushed onto a page of its own refitted (lay_out). The layout is the
+    pages stage's "layout" unit, both passes of it."""
+    sections, html, html_for = _built_report(report_data, property_label, generated_on, env, fonts_directory, terrain,
+                                             water, access, trees, soils, design, overview, complete)
+    with report_progress.stage(STAGE_PAGES), report_progress.unit(STAGE_PAGES, "layout"):
+        return lay_out(html, sections, html_for)
 
 
 def _render_document(env, fonts_directory, report_data, property_label, generated_on, terrain, sections,
@@ -362,20 +520,15 @@ def generate_site_report_pdf(
 ) -> str:
     """HTML -> PDF on disk. Returns output_path. No network: the fonts are
     local files and the data is already in hand."""
-    from weasyprint import HTML
-
-    html = render_site_report_html(
+    # HTML.write_pdf() is render() then Document.write_pdf() (weasyprint
+    # 70); called as its halves so layout and the write are each a
+    # progress unit -- the layout one pass, or two when a block is refitted.
+    _, document = render_site_report(
         report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water,
         access=access, trees=trees, soils=soils, design=design, overview=overview, complete=complete,
     )
-    # HTML.write_pdf() is render() then Document.write_pdf() (weasyprint
-    # 70); called as its two halves so layout and the write are each a
-    # progress unit. The same calls, in the same order.
-    with report_progress.stage(STAGE_PAGES):
-        with report_progress.unit(STAGE_PAGES, "layout"):
-            document = HTML(string=html, base_url=TEMPLATES_DIRECTORY).render()
-        with report_progress.unit(STAGE_PAGES, "write"):
-            document.write_pdf(output_path)
+    with report_progress.stage(STAGE_PAGES), report_progress.unit(STAGE_PAGES, "write"):
+        document.write_pdf(output_path)
     return output_path
 
 

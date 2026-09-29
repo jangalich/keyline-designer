@@ -111,6 +111,9 @@ FULL_ONLY = (
     # The report's words: builds every section of the whole-report fixture
     # and reads each prose builder's source. Measured at 9.2 s.
     "test_report_text.py",
+    # Branch 24: bisects a spacer over four refittable blocks, each step a
+    # WeasyPrint layout of one section. Measured at 59.5 s.
+    "test_report_refit.py",
 )
 
 TAIL_LINES = 40

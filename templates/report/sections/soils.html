@@ -45,6 +45,12 @@
 {% import "components/source_footer.html" as c6 %}
 {% import "components/map.html" as c7 %}
 {% import "components/caption.html" as c9 %}
+{#- The soil-test sentence and the profile's water: under the properties
+    table, or -- refitted, when the properties page cannot hold them --
+    heading the last page, which has room (site_report.lay_out). -#}
+{% macro soil_test() -%}
+    {% call c9.captioned(section.profile_water or [], refit="soils.soil_test") %}{{ c3.summary(section.soil_test) }}{% endcall %}
+{%- endmacro %}
 <section class="section section--soils section--map">
   <div class="section__figures">
     {{ c1.eyebrow(section.number, section.name) }}
@@ -52,10 +58,10 @@
     {{ c3.summary(section.summary) }}
     {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
 {%- if section.capability_table %}
-    {% call c9.captioned(section.capability_caption, block="table") %}{{ c5.data_table(section.capability_table) }}{% endcall %}
+    {% call c9.captioned(section.capability_caption, block="table", refit="soils.legend") %}{{ c5.data_table(section.capability_table) }}{% endcall %}
 {%- endif %}
 {%- if section.farmland_table %}
-    {% call c9.captioned(section.farmland_caption, block="table") %}{{ c5.data_table(section.farmland_table) }}{% endcall %}
+    {% call c9.captioned(section.farmland_caption, block="table", refit="soils.legend") %}{{ c5.data_table(section.farmland_table) }}{% endcall %}
 {%- endif %}
   </div>
   <div class="section__detail">
@@ -63,13 +69,18 @@
     {% call c9.captioned(section.map_unit_caption) %}{{ c5.data_table(section.map_unit_table) }}{% endcall %}
 {%- if section.properties_table %}
     {% call c9.captioned(section.properties_caption) %}{{ c5.data_table(section.properties_table) }}{% endcall %}
-    {% call c9.captioned(section.profile_water or []) %}{{ c3.summary(section.soil_test) }}{% endcall %}
+{%- if "soil_test" not in (section.refit or []) %}
+    {{ soil_test() }}
+{%- endif %}
 {%- else %}
     {{ c9.unavailable(section.survey_unavailable) }}
 {%- endif %}
   </div>
   <div class="section__classification">
     {{ c1.eyebrow(section.number, section.name, continued=True) }}
+{%- if section.properties_table and "soil_test" in (section.refit or []) %}
+    {{ soil_test() }}
+{%- endif %}
 {%- if section.erosion_table %}
     {% call c9.captioned(section.erosion_caption) %}{{ c5.data_table(section.erosion_table) }}{% endcall %}
 {%- endif %}
