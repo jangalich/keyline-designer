@@ -5,12 +5,15 @@ A BLOCK PUSHED ONTO A PAGE OF ITS OWN IS FITTED BACK -- branch 24
 (site_report.lay_out). A live 33.3-acre, ten-map-unit parcel lost five
 pages this way: the stream table, the canopy extent table, the farmland
 table and the soil-test sentence each fell short of fitting by 1 to
-30 pt and took a page to itself. The reference parcel fits, so the
-test makes the shortfall itself: a spacer of an exact height set ahead
-of each refittable block, found by bisection as the least that pushes
-it -- the tightest miss a parcel can produce -- and larger ones past it.
+30 pt and took a page to itself. The canopy and farmland tables fit now
+that every legend strip is as tall as its rows (report.css); the stream
+table and the soil-test sentence are the two blocks with a remedy. The
+reference parcel fits, so the test makes the shortfall itself: a spacer
+of an exact height set ahead of each refittable block, found by
+bisection as the least that pushes it -- the tightest miss a parcel can
+produce -- and larger ones past it.
 
-For each of the four refittable blocks, offline, one section rendered at
+For each of the two refittable blocks, offline, one section rendered at
 a time from sections built once (whole_report_fixture):
 
   1. with no spacer, nothing is pushed and nothing is refitted: the
@@ -57,8 +60,6 @@ BY_NAME = {s["template"].split(".")[0]: s for s in SECTIONS}
 # the text the spacer goes after -- the element above the block on its page)
 CASES = [
     ("water.surface_water", "water", '<div class="section__figures">'),
-    ("trees.legend", "trees", '<div class="section__figures">'),
-    ("soils.legend", "soils", '<div class="section__figures">'),
     ("soils.soil_test", "soils", '<div class="section__detail">'),
 ]
 

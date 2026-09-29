@@ -60,9 +60,9 @@ page nearly empty -- whatever the break rules, measured: splitting the
 block leaves its tail alone instead, and the pages before branch 21 left
 the caption alone. A few blocks are marked in their templates with the
 one remedy that fits them back (data-refit, components/caption.html's
-`captioned`): the legend strip sized to its rows rather than reserved at
-two (a one-row legend gives back 13 pt), or the block moved to head the
-section's next page, where there is room. render_site_report() lays the
+`captioned`): the block moved to head the section's next page, where
+there is room -- the stream table onto the wetness page, the soil-test
+sentence onto the last Soils page. render_site_report() lays the
 document out once, finds the marked blocks that did not start on their
 page block's first page (pushed_blocks), applies their remedies to the
 SAME built sections -- no map is drawn twice -- and lays it out again,
@@ -395,9 +395,8 @@ def pushed_blocks(document) -> list:
 
 def refit_sections(sections: list, pushed: list) -> list:
     """Apply each pushed block's remedy to its section, in place: a remedy
-    is a word in section["refit"] the template reads, and "legend" also
-    marks the section's map so its legend strip takes only its own rows.
-    Returns the remedies applied."""
+    is a word in section["refit"] the template reads. Returns the remedies
+    applied."""
     applied = []
     for refit in pushed:
         name, _, remedy = refit.partition(".")
@@ -405,8 +404,6 @@ def refit_sections(sections: list, pushed: list) -> list:
         if section is None or remedy in section.get("refit", ()):
             continue
         section["refit"] = list(section.get("refit", ())) + [remedy]
-        if remedy == "legend" and section.get("map"):
-            section["map"] = dict(section["map"], fitted_legend=True)
         applied.append(refit)
     return applied
 

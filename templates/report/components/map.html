@@ -1,16 +1,12 @@
 {#- 7. MAP -- report_map.render_map()'s result: the SVG frame, then the
-    legend in a FIXED strip below it, the same on every section's map.
+    legend below it, as tall as the rows its entries fill.
 
     `map` is render_map()'s dict. The SVG carries its own fonts and colours
     as attributes; the legend is set here in the report's type, so a label
     obeys the data rule the way any other text does: strings are prose,
-    {value} mappings are measurements. An empty legend still reserves the
-    strip, so the frame sits at the same height on every page -- unless
-    `fitted_legend` is set (site_report.refit_sections, "legend"): then
-    the strip takes only the rows its entries fill, for a page whose
-    table below would otherwise be pushed to a page of its own. -#}
+    {value} mappings are measurements. -#}
 {% macro map(map) -%}
-<figure class="report-map{% if map.fitted_legend %} report-map--fitted-legend{% endif %}">
+<figure class="report-map">
   <div class="report-map__frame">{{ map.svg | safe }}</div>
   <ul class="report-map__legend">
 {%- for entry in map.legend %}

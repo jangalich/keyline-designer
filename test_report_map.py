@@ -386,7 +386,7 @@ assert TOKENS["terrain"] == "#7a5c3a"
 macro_path = os.path.join(site_report.TEMPLATES_DIRECTORY, "components", "map.html")
 with open(macro_path, encoding="utf-8") as handle:
     macro = handle.read()
-assert "map.svg | safe" in macro and '<figure class="report-map' in macro
+assert "map.svg | safe" in macro and 'class="report-map"' in macro
 assert not HEX.findall(macro)
 env = site_report.jinja_environment()
 rendered = env.from_string('{% import "components/map.html" as m %}{{ m.map(map) }}').render(map=full)
@@ -394,14 +394,16 @@ assert rendered.startswith('<figure class="report-map">') and rendered.rstrip().
 assert '<div class="report-map__frame"><svg' in rendered
 assert rendered.count('<li class="report-map__entry">') == 3
 assert '<span class="data">5 ft</span>' not in rendered  # this legend was given as strings
-# Branch 24: a refitted map page's legend strip takes only its rows (site_report.refit_sections).
-fitted = env.from_string('{% import "components/map.html" as m %}{{ m.map(map) }}').render(map=dict(full, fitted_legend=True))
-assert fitted.startswith('<figure class="report-map report-map--fitted-legend">')
 parts_map = dict(full, legend=report_map.legend_entries([parts_layer], TOKENS))
 parts_rendered = env.from_string('{% import "components/map.html" as m %}{{ m.map(map) }}').render(map=parts_map)
 assert 'Contours, <span class="data">5 ft</span>' in parts_rendered
 css = site_report.render_stylesheet()
 assert ".report-map__frame svg" in css and ".report-map__legend" in css and "--terrain: #7a5c3a;" in css
+# Branch 24: the legend is as tall as its rows on every map -- no strip reserved, so no map page carries
+# empty rows under a one-row legend, and every map page's caption sits under its own legend alike.
+import re as _re  # noqa: E402
+legend_rules = _re.findall(r"\.report-map__legend\s*\{([^}]*)\}", css)
+assert legend_rules and not any("min-height" in rule for rule in legend_rules), legend_rules
 print("   macro renders the SVG inline with the legend strip below; stylesheet declares --terrain")
 
 print("\ntest_report_map.py: all sections passed")

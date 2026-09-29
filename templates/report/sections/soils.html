@@ -58,10 +58,10 @@
     {{ c3.summary(section.summary) }}
     {% call c9.captioned(section.map_caption) %}{{ c7.map(section.map) }}{% endcall %}
 {%- if section.capability_table %}
-    {% call c9.captioned(section.capability_caption, block="table", refit="soils.legend") %}{{ c5.data_table(section.capability_table) }}{% endcall %}
+    {% call c9.captioned(section.capability_caption, block="table") %}{{ c5.data_table(section.capability_table) }}{% endcall %}
 {%- endif %}
 {%- if section.farmland_table %}
-    {% call c9.captioned(section.farmland_caption, block="table", refit="soils.legend") %}{{ c5.data_table(section.farmland_table) }}{% endcall %}
+    {% call c9.captioned(section.farmland_caption, block="table") %}{{ c5.data_table(section.farmland_table) }}{% endcall %}
 {%- endif %}
   </div>
   <div class="section__detail">

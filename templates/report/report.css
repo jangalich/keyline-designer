@@ -847,10 +847,12 @@ th.num {
 }
 
 /* 7. Map -- report_map.render_map()'s SVG at full content width, then
-   THE LEGEND IN A FIXED STRIP BELOW THE FRAME: two rows tall whether it
-   holds nine entries or none, so the frame and whatever follows it sit at
-   the same height on every section's page. The SVG carries its own fonts
-   and colours as attributes (WeasyPrint applies no document CSS to SVG
+   THE LEGEND BELOW THE FRAME, AS TALL AS ITS ROWS. It was a fixed
+   two-row strip, so the frame and whatever followed sat at one height on
+   every section's page; a one-row legend left 13 pt empty on every map
+   page that had one, and on a live parcel that was the margin two tables
+   missed their page by (branch 24). The SVG carries its own fonts and
+   colours as attributes (WeasyPrint applies no document CSS to SVG
    text); the legend is HTML and takes the page's type. */
 .report-map {
   display: block;
@@ -870,18 +872,9 @@ th.num {
   list-style: none;
   margin: var(--space-2) 0 0 0;
   padding: 0;
-  min-height: 26pt;
   font-size: var(--text-eyebrow);
   line-height: 13pt;
   color: var(--ink);
-}
-/* THE STRIP GIVES WAY WHEN A PAGE IS SHORT (branch 24): a one-row
-   legend in a two-row strip leaves 13 pt empty, and a map page whose
-   table falls short of fitting by less than that takes the strip at its
-   rows rather than lose the table to a page of its own. Only on that
-   page -- site_report.lay_out() sets it where a block was pushed. */
-.report-map--fitted-legend .report-map__legend {
-  min-height: 0;
 }
 .report-map__entry {
   display: inline-block;
@@ -1066,9 +1059,6 @@ th.num {
 .overview__map {
   flex: none;
   width: 318pt;
-}
-.overview__map .report-map__legend {
-  min-height: 0;
 }
 .overview__map .report-map__entry {
   margin-right: var(--space-3);
