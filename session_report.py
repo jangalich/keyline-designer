@@ -128,6 +128,7 @@ from typing import Optional
 import design_document
 import job_runner
 import report_data
+import report_progress
 import session_design
 
 # The download route this module's result points at. ONE SPELLING, imported
@@ -356,6 +357,7 @@ def run_report_job(
     reports: Optional[ReportStore] = None,
     property_label: Optional[str] = None,
     report_fetch_cache=None,
+    progress: Optional[report_progress.ReportProgress] = None,
 ) -> dict:
     """
     THE REPORT JOB'S `done` RESULT:
@@ -387,6 +389,13 @@ def run_report_job(
     job_runner.submit() turns whatever comes out of it into the job's
     `failed` state through error_payload() below -- which is where the two
     kinds of failure are told apart.
+
+    `progress` is this job's report_progress.ReportProgress, bound for the
+    run so the pipeline's hooks find it. The plan is made inside site_report
+    before the first fetch. On success it is finished (every unit done,
+    100) BEFORE the result is returned, so a `done` job never reads less;
+    on a raise it is FAILED -- frozen where the run stopped -- before the
+    raise continues, so a `failed` job never reads as complete.
     """
     import site_report
 
@@ -394,15 +403,23 @@ def run_report_job(
         reports = DEFAULT_REPORT_STORE
 
     report_id, pdf_path = reports.new_path()
-    site_report.generate_session_site_report_pdf(
-        session_id,
-        store,
-        pdf_path,
-        property_label=property_label,
-        report_fetch_cache=report_fetch_cache,
-        fetch_cache=fetch_cache,
-        cache=cache,
-    )
+    with report_progress.active(progress):
+        try:
+            site_report.generate_session_site_report_pdf(
+                session_id,
+                store,
+                pdf_path,
+                property_label=property_label,
+                report_fetch_cache=report_fetch_cache,
+                fetch_cache=fetch_cache,
+                cache=cache,
+            )
+        except BaseException:
+            if progress is not None:
+                progress.fail()
+            raise
+    if progress is not None:
+        progress.finish()
     return {
         "report_id": report_id,
         "download_url": reports.register(report_id, pdf_path),
@@ -524,6 +541,10 @@ def submit_report(
     if runner is None:
         runner = job_runner.DEFAULT_JOB_RUNNER
 
+    # UNPLANNED until the job starts: the plan reads the caches, and it must
+    # read them when the work begins, not when it was queued. The first poll
+    # still has a progress to read -- zero of nothing, no stage.
+    progress = report_progress.ReportProgress()
     return runner.submit(
         lambda: run_report_job(
             session_id,
@@ -533,6 +554,8 @@ def submit_report(
             reports=reports,
             property_label=property_label,
             report_fetch_cache=report_fetch_cache,
+            progress=progress,
         ),
         on_error=error_payload,
+        progress=progress,
     )

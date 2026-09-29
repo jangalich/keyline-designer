@@ -78,8 +78,12 @@ import design_section
 import landform_section
 import overview_derivations
 import overview_section
+import parcel_data
 import report_data as report_data_module
+import report_progress
+from report_progress import STAGE_PAGES, STAGE_REBUILD, STAGE_RECORDS, STAGE_TERRAIN
 from report_outline import SECTION_OUTLINE
+import session_cache
 import session_manager
 import soils_derivations
 import soils_section
@@ -237,23 +241,30 @@ def build_sections(report_data, terrain=None, water=None, access=None, trees=Non
     (overview_derivations.OverviewInputs) -- first, being I. Each section
     carries its own numeral from report_outline, so adding one renumbers
     nothing, and an anchor the cover's contents link to."""
+    # Each builder is one progress unit (report_progress.plan_session_
+    # report's "section.<name>"); a no-op outside a report job.
+    def built(name, build, *args, **kwargs):
+        with report_progress.unit(STAGE_TERRAIN, f"section.{name}"):
+            section = build(*args, **kwargs)
+        sections.append(section)
+        return section
+
     sections = []
     if overview is not None:
-        sections.append(overview_section.build_overview_section(overview, TOKENS))
-    sections.append(climate_section.build_climate_section(report_data))
+        built("overview", overview_section.build_overview_section, overview, TOKENS)
+    built("climate", climate_section.build_climate_section, report_data)
     if terrain is not None:
-        landform = landform_section.build_landform_section(terrain, TOKENS)
-        sections.append(landform)
+        landform = built("landform", landform_section.build_landform_section, terrain, TOKENS)
         if water is not None:
-            sections.append(water_section.build_water_section(water, TOKENS, flow=landform["derived"]))
+            built("water", water_section.build_water_section, water, TOKENS, flow=landform["derived"])
         if access is not None:
-            sections.append(access_section.build_access_section(access, TOKENS))
+            built("access", access_section.build_access_section, access, TOKENS)
         if trees is not None:
-            sections.append(trees_section.build_trees_section(trees, TOKENS))
+            built("trees", trees_section.build_trees_section, trees, TOKENS)
         if soils is not None:
-            sections.append(soils_section.build_soils_section(soils, TOKENS))
+            built("soils", soils_section.build_soils_section, soils, TOKENS)
         if design is not None:
-            sections.append(design_section.build_design_section(design, TOKENS))
+            built("design", design_section.build_design_section, design, TOKENS)
     for section in sections:
         section["anchor"] = section_anchor(section["number"])
     return sections
@@ -303,7 +314,17 @@ def render_site_report_html(
     off for a render of some sections, which neither describes."""
     env = env or jinja_environment()
     generated_on = generated_on or date.today()
-    sections = build_sections(report_data, terrain, water, access, trees, soils, design, overview)
+    with report_progress.stage(STAGE_TERRAIN):
+        sections = build_sections(report_data, terrain, water, access, trees, soils, design, overview)
+    with report_progress.stage(STAGE_PAGES), report_progress.unit(STAGE_PAGES, "html"):
+        return _render_document(env, fonts_directory, report_data, property_label, generated_on, terrain,
+                                sections, complete)
+
+
+def _render_document(env, fonts_directory, report_data, property_label, generated_on, terrain, sections,
+                     complete) -> str:
+    """The cover, the back matter and the template, around sections
+    already built -- the "html" unit of the pages stage."""
     # The back matter needs a Layer 1 retrieval date, which only a session has.
     back = (back_matter.build_back_matter(sections, report_data, terrain.retrieved_on)
             if complete and terrain is not None else None)
@@ -347,7 +368,14 @@ def generate_site_report_pdf(
         report_data, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water,
         access=access, trees=trees, soils=soils, design=design, overview=overview, complete=complete,
     )
-    HTML(string=html, base_url=TEMPLATES_DIRECTORY).write_pdf(output_path)
+    # HTML.write_pdf() is render() then Document.write_pdf() (weasyprint
+    # 70); called as its two halves so layout and the write are each a
+    # progress unit. The same calls, in the same order.
+    with report_progress.stage(STAGE_PAGES):
+        with report_progress.unit(STAGE_PAGES, "layout"):
+            document = HTML(string=html, base_url=TEMPLATES_DIRECTORY).render()
+        with report_progress.unit(STAGE_PAGES, "write"):
+            document.write_pdf(output_path)
     return output_path
 
 
@@ -380,21 +408,64 @@ def generate_session_site_report_pdf(
     document = store.get(session_id)
     if report_fetch_cache is None:
         report_fetch_cache = report_data_module.default_report_fetch_cache()
-    data = report_fetch_cache.get_or_fetch(document["boundary"])
-    context = session_manager.get_session_context(session_id, store, fetch_cache=fetch_cache, cache=cache)
-    terrain = landform_section.terrain_inputs_from_context(context, document)
-    water = water_derivations.water_inputs_from_context(context, document, data)
-    access = access_derivations.access_inputs_from_context(context, document, data)
-    trees = trees_derivations.trees_inputs_from_context(context, document, data)
-    soils = soils_derivations.soils_inputs_from_context(context, document, data)
-    overview = overview_derivations.overview_inputs_from_context(context, document, data)
+    # The same defaults session_manager.get_session_context() resolves, so
+    # the plan below asks the caches that call will actually read.
+    if fetch_cache is None:
+        fetch_cache = session_cache.DEFAULT_FETCH_CACHE
+    if cache is None:
+        cache = session_cache.DEFAULT_SESSION_CACHE
     # DESIGN ONLY FOR A FINISHED DESIGN. The report is offered once every
     # step is committed (the job's precondition, session_report); called
     # before that, this still renders the inventory and leaves the design
     # out, rather than a record with an unfinished step in it.
     finished = all(document["steps"][step]["status"] == "committed" for step in document["steps"])
-    design = design_section.design_inputs_from_context(context, document, data) if finished else None
+    boundary = document["boundary"]
+    context_cached = session_id in cache
+
+    # THE PLAN, FIXED BEFORE THE FIRST FETCH (report_progress's docstring):
+    # what the three caches hold now decides whether the report fetches and
+    # a rebuild are in the total at all.
+    progress = report_progress.current()
+    if progress is not None and not progress.planned:
+        progress.set_plan(report_progress.plan_session_report(
+            report_data_module.REPORT_FETCH_LAYERS,
+            parcel_data.FETCH_LAYERS,
+            report_cached=_holds(report_fetch_cache, boundary),
+            context_cached=context_cached,
+            layer1_cached=_holds(fetch_cache, boundary),
+            design=finished,
+        ))
+
+    with report_progress.stage(STAGE_RECORDS):
+        data = report_fetch_cache.get_or_fetch(boundary)
+    report_progress.settle(STAGE_RECORDS)
+    with report_progress.stage(STAGE_TERRAIN if context_cached else STAGE_REBUILD):
+        context = session_manager.get_session_context(session_id, store, fetch_cache=fetch_cache, cache=cache)
+    report_progress.settle(STAGE_REBUILD)
+
+    def derived(name, derive, *args):
+        with report_progress.unit(STAGE_TERRAIN, f"inputs.{name}"):
+            return derive(*args)
+
+    with report_progress.stage(STAGE_TERRAIN):
+        terrain = derived("terrain", landform_section.terrain_inputs_from_context, context, document)
+        water = derived("water", water_derivations.water_inputs_from_context, context, document, data)
+        access = derived("access", access_derivations.access_inputs_from_context, context, document, data)
+        trees = derived("trees", trees_derivations.trees_inputs_from_context, context, document, data)
+        soils = derived("soils", soils_derivations.soils_inputs_from_context, context, document, data)
+        overview = derived("overview", overview_derivations.overview_inputs_from_context, context, document, data)
+        design = (derived("design", design_section.design_inputs_from_context, context, document, data)
+                  if finished else None)
     return generate_site_report_pdf(
         data, output_path, property_label=property_label, generated_on=generated_on, terrain=terrain, water=water, access=access,
         trees=trees, soils=soils, design=design, overview=overview, complete=True,
     )
+
+
+def _holds(cache, boundary) -> bool:
+    """Does this fetch cache already hold `boundary`? A cache without a
+    contains() (a test's stand-in) is asked nothing and planned as a miss:
+    a planned fetch that never ticks is settled when the stage returns,
+    so the bar is late rather than wrong."""
+    contains = getattr(cache, "contains", None)
+    return bool(contains(boundary)) if callable(contains) else False

@@ -193,6 +193,7 @@ that diff clean outside the header. That means:
     full.
 """
 
+import contextlib
 import datetime
 import json
 import os
@@ -202,6 +203,8 @@ import sys
 import tempfile
 import threading
 import time
+
+import report_progress
 
 # THE ENABLING VARIABLE and the directory variable, named for the two
 # separate questions they answer: whether to record at all, and where.
@@ -2109,9 +2112,33 @@ def time_layer(layer, function=None):
     session.
     """
     probe = getattr(_LOCAL, "fetch_probe", None)
-    if probe is None:
-        return _NO_LAYER
-    return _LayerTimer(probe, layer, function)
+    timer = _NO_LAYER if probe is None else _LayerTimer(probe, layer, function)
+    # THE REPORT'S PROGRESS BAR RIDES THE SAME SEAM. Every layer of both
+    # fetches a report can run -- the report layer and a rebuild's Layer 1
+    # -- is already inside one of these blocks, so this is where a layer's
+    # completion is counted (report_progress.layer). A null context unless
+    # a report job is running, and it changes nothing about what runs.
+    progress = report_progress.layer(layer)
+    if isinstance(progress, contextlib.nullcontext):
+        return timer
+    return _Both(timer, progress)
+
+
+class _Both:
+    """The diagnostic timer and the progress unit, entered together. The
+    timer is outermost so a layer's recorded time is the fetch's alone."""
+
+    def __init__(self, outer, inner):
+        self._outer, self._inner = outer, inner
+
+    def __enter__(self):
+        self._outer.__enter__()
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._inner.__exit__(exc_type, exc, tb)
+        return self._outer.__exit__(exc_type, exc, tb)
 
 
 def record_fetch(probe, parcel=None, error=None) -> None:
