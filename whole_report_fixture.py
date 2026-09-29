@@ -7,7 +7,7 @@ parcel, from the fixture chain, and the render.
     inputs()          -> {'data', 'terrain', 'water', 'access', 'trees',
                           'soils', 'design', 'overview', 'context', 'document'}
     render_html(**kw) -> the document's HTML
-    render(**kw)      -> (html, weasyprint Document, pdf bytes)
+    render(**kw)      -> (html, weasyprint Document, pdf bytes), refitted as the job lays it out
 
 Branch 17 is the first time all eight sections and the back matter exist
 at once; this is the one place that assembles them, so the whole-report
@@ -81,8 +81,12 @@ def render_html(bundle: dict = None, property_label: str = PROPERTY_LABEL) -> st
 
 
 def render(bundle: dict = None, property_label: str = PROPERTY_LABEL) -> tuple:
-    from weasyprint import HTML
-
-    html = render_html(bundle, property_label)
-    document = HTML(string=html, base_url=site_report.TEMPLATES_DIRECTORY).render()
+    """Laid out the way the report job lays it out: site_report.render_site_report,
+    a pushed block refitted."""
+    bundle = bundle or inputs()
+    html, document = site_report.render_site_report(
+        bundle["data"], property_label=property_label, generated_on=GENERATED_ON, terrain=bundle["terrain"],
+        water=bundle["water"], access=bundle["access"], trees=bundle["trees"], soils=bundle["soils"],
+        design=bundle["design"], overview=bundle["overview"], complete=True,
+    )
     return html, document, document.write_pdf()

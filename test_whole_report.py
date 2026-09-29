@@ -18,7 +18,18 @@ exist together (whole_report_fixture):
      than Landform's, with no imagery, and its caption says it is not the
      parcel's terrain; the boundary statement is on the page;
   5. Site overview is one page; the back matter follows Design;
-  6. no box past the content width, on any page.
+  6. no box past the content width, on any page;
+  7. NO SPARSE PAGE: every page carries at least SPARSE_PAGE_CHARS of
+     text, except the two pages that are a map by design -- Landform's
+     terrain page and Design's layout page, named below. A page that
+     falls under it is a block pushed onto a page of its own; it caught
+     branch 21's orphaned caption and the pages a live 10-map-unit parcel
+     lost after it, and neither was visible from reading the PDF;
+  8. every caption with its block: on one page, the page its block ends
+     on (report_layout.captions_apart) -- what branch 21 fixed; and no
+     block pushed onto a page of its own, so the reference parcel is laid
+     out once, unrefitted (site_report.lay_out; test_report_refit.py
+     pushes each one).
 
 Offline (offline_harness). Set WHOLE_REPORT_OUT to a directory to write
 the PDF there as well.
@@ -202,6 +213,26 @@ print("6. no box past the content width")
 overruns = report_layout.overflowing_boxes(DOCUMENT)
 assert overruns == [], overruns[:5]
 print(f"   {len(DOCUMENT.pages)} pages, none")
+
+# ======================================================================
+print("7. no sparse page, except the two map pages")
+SPARSE_PAGE_CHARS = 600
+# Mostly picture by design: a full-measure map with its legend and a short text block.
+MAP_PAGES = {"III · LANDFORM": "the Landform terrain map", "VIII · DESIGN": "the Design layout map"}
+exempt = {first_page_of(eyebrow): name for eyebrow, name in MAP_PAGES.items()}
+counts = [len(text) for text in PAGE_TEXT]
+sparse = [(number, count) for number, count in enumerate(counts, start=1)
+          if count < SPARSE_PAGE_CHARS and number not in exempt]
+assert sparse == [], f"pages under {SPARSE_PAGE_CHARS} characters: {sparse}"
+print("   " + " ".join(f"p{n}={c}" for n, c in enumerate(counts, start=1)))
+print(f"   none under {SPARSE_PAGE_CHARS}; exempt: " + "; ".join(f"p{n} {name} ({counts[n - 1]})" for n, name in sorted(exempt.items())))
+
+# ======================================================================
+print("8. every caption with its block")
+apart = report_layout.captions_apart(DOCUMENT)
+assert apart == [], apart
+assert site_report.pushed_blocks(DOCUMENT) == [], site_report.pushed_blocks(DOCUMENT)
+print("   every bound caption on one page, the page its block ends on; no block pushed, nothing refitted")
 
 print("\ntest_whole_report.py: all sections passed")
 print(offline_harness.summary())

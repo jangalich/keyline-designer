@@ -399,6 +399,11 @@ parts_rendered = env.from_string('{% import "components/map.html" as m %}{{ m.ma
 assert 'Contours, <span class="data">5 ft</span>' in parts_rendered
 css = site_report.render_stylesheet()
 assert ".report-map__frame svg" in css and ".report-map__legend" in css and "--terrain: #7a5c3a;" in css
+# Branch 24: the legend is as tall as its rows on every map -- no strip reserved, so no map page carries
+# empty rows under a one-row legend, and every map page's caption sits under its own legend alike.
+import re as _re  # noqa: E402
+legend_rules = _re.findall(r"\.report-map__legend\s*\{([^}]*)\}", css)
+assert legend_rules and not any("min-height" in rule for rule in legend_rules), legend_rules
 print("   macro renders the SVG inline with the legend strip below; stylesheet declares --terrain")
 
 print("\ntest_report_map.py: all sections passed")
