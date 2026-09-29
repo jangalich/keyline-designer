@@ -96,13 +96,20 @@ class Job:
     exception: Optional[BaseException] = None
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
+    # OPTIONAL PROGRESS: any object with a snapshot() -> dict, supplied by
+    # a caller whose work can count its own completion (session_report's
+    # report_progress.ReportProgress). This module does not know what it
+    # measures; it carries it. None for a job that reports none -- a
+    # generate -- and then the snapshot carries no "progress" key at all.
+    progress: Any = None
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def snapshot(self) -> dict:
         """
         THE WIRE SHAPE: {status, result | error}, per section 3.1's
-        `GET /api/jobs/{job_id}`.
+        `GET /api/jobs/{job_id}` -- plus {progress} for a job submitted
+        with one, in every state.
 
         The absent half is OMITTED rather than sent as null. A running job
         has no result yet and a failed one has no result at all; shipping
@@ -117,7 +124,14 @@ class Job:
                 snap["result"] = self.result
             elif self.status == STATUS_FAILED:
                 snap["error"] = self.error
-            return snap
+        # IN EVERY STATE, FAILED INCLUDED. A failed job's progress is where
+        # the run stopped, and a client that drew a bar keeps it there
+        # beside the failure rather than resetting or completing it. Read
+        # OUTSIDE the job's lock: the progress object has its own, and a
+        # poll must not hold both.
+        if self.progress is not None:
+            snap["progress"] = self.progress.snapshot()
+        return snap
 
     def wait(self, timeout: Optional[float] = None) -> "Job":
         """
@@ -174,6 +188,7 @@ class JobRunner:
         self,
         work: Callable[[], Any],
         on_error: Optional[Callable[[BaseException], dict]] = None,
+        progress: Any = None,
     ) -> Job:
         """
         Run `work()` on the pool and return its Job, already `running`.
@@ -185,8 +200,12 @@ class JobRunner:
         on_error that is itself broken must not lose the original failure, so
         its own exception is caught and the job still fails, with a generic
         payload.
+
+        `progress`, when given, is carried on the Job from the moment it is
+        submitted, so the very first poll reads it. The work reaches it
+        through its own closure; this module only reads snapshot().
         """
-        job = Job(id=secrets.token_urlsafe(12))
+        job = Job(id=secrets.token_urlsafe(12), progress=progress)
         self._register(job)
 
         def run():

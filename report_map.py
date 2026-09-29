@@ -127,6 +127,7 @@ from shapely.ops import unary_union
 
 from contour_lines import compute_contour_lines
 from raster_grid import elevation_range_in_polygon
+import report_progress  # the report's progress label: see report_progress.drawing
 
 METERS_PER_FOOT = 0.3048
 
@@ -1449,6 +1450,7 @@ def _graded_edge(boundary_polygon_utm, edge: dict, projection, tokens: dict) -> 
     return "".join(pieces) + "</g>"
 
 
+@report_progress.drawing
 def render_map(boundary_polygon_utm, layers: list, tokens: dict, frame: tuple = FRAME, note: Optional[dict] = None,
                *, fit: bool = True, underlay: Optional[dict] = None, wash: Optional[dict] = None,
                halo: bool = False, labels_on_top: bool = False, boundary_style: Optional[dict] = None,

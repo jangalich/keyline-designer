@@ -181,6 +181,27 @@ mapped wetland) is a success, taken once and never retried. There is
 deliberately no second, layer-level retry around those loops: it would
 multiply the worst case for no failure the inner loop does not cover.
 
+LOGGED FOR THE PARALLEL-FETCH BRANCH, NOT FIXED (branch 23, the progress
+bar). Two things the bar makes more visible, both belonging with the move
+to concurrent report fetches:
+
+  THE NHD POINT LAYER COULD MOVE TO LAYER 1. nhd_points (springs and
+  seeps) is one more query on the NHD service Layer 1's water_features
+  already calls at the same bbox. Moving it takes a report-time fetch off
+  the flakiest host in this table.
+
+  THE RETRY BUDGET FOR DEGRADABLE LAYERS. 30/60/90 s across two layers on
+  the same NHD host turned one flaky service into ~4.5 minutes of report.
+  With a progress bar the user now watches that happen -- the bar holds,
+  truthfully, naming "springs and streams" for minutes -- which makes the
+  budget question more pressing, not less. A degradable layer's worst case
+  should be decided deliberately, and per host rather than per layer.
+
+PROGRESS. report_progress.py counts each layer's completion through the
+time_layer() block below (run_diagnostics hands it on), and _degrade()
+completes a degraded layer -- a degraded layer is finished work. A
+REQUIRED failure raises before that tick, so the bar stays where it was.
+
 RETRIEVED ON. ReportData.retrieved_on is the date this fetch ran -- the
 retrieval date of every report-layer source, which the back matter's
 vintage table prints as data. The Layer 1 sources' date is the Design
@@ -237,6 +258,7 @@ from shapely.geometry import Polygon
 
 import precipitation_normals
 import run_diagnostics
+import report_progress
 import spc_reports
 import forest_type_data
 import hydrology_data
@@ -498,6 +520,11 @@ def fetch_report_data(boundary) -> ReportData:
         if REPORT_FETCH_LAYERS[field_name] == REQUIRED:
             raise error from exc
         unavailable[field_name] = {"label": wire_pair[1], "reason": error.reason, "error": str(exc)}
+        # A DEGRADED LAYER IS FINISHED WORK: the report will render its
+        # "unavailable" statement, and nothing more will be asked of the
+        # source. Its progress unit completes here, AFTER the REQUIRED
+        # raise above -- a required failure leaves the bar where it was.
+        report_progress.tick(report_progress.STAGE_RECORDS, field_name)
 
     daymet_daily = None
     try:

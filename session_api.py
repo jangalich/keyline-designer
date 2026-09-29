@@ -15,7 +15,7 @@ THE HTTP SURFACE over the session orchestrator
     POST   /api/sessions/<sid>/steps/<step>/score    -> 200 {feature}
     POST   /api/sessions/<sid>/report                -> 202 {job_id, status}
     GET    /api/reports/<rid>                        -> 200 application/pdf
-    GET    /api/jobs/<jid>                           -> 200 {status, result|error}
+    GET    /api/jobs/<jid>                           -> 200 {status, result|error, progress?}
 
 WIRING, AND NOTHING BUT. Every behaviour these routes expose already exists
 in session_manager.py, step_orchestrator.py, commit_validation.py,
@@ -1002,7 +1002,9 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
     def get_job_endpoint(job_id):
         """
         {"job_id", "status", "result" | "error"} -- job_runner.Job.snapshot()
-        verbatim.
+        verbatim. A REPORT job's snapshot also carries "progress" in every
+        state (report_progress.py): completed work over total work, and the
+        stage and kind of data being worked on. A generate's does not.
 
         200 FOR A FAILED JOB. The question this endpoint answers is "what is
         the state of this job", and "it failed, here is the step's

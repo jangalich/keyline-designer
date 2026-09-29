@@ -64,6 +64,7 @@ can hold the geometry to account without parsing SVG.
 import math
 from typing import Optional
 
+import report_progress  # the report's progress label: see report_progress.drawing
 from report_map import FONT_DATA, FONT_PROSE, _colour, _fmt, _text, layer, legend_entries
 
 # The frame width is the page's content width, as the map's is.
@@ -184,6 +185,7 @@ def balance_bands(precipitation, evaporation) -> list:
     return bands
 
 
+@report_progress.drawing
 def render_water_balance(
     month_labels, precipitation, evaporation, unit: str, tokens: dict, frame: tuple = BALANCE_FRAME
 ) -> dict:
@@ -281,6 +283,7 @@ def profile_exaggeration(plot_width: float, plot_height: float, run: float, reli
     return max(1, min(PROFILE_MAX_EXAGGERATION, fits))
 
 
+@report_progress.drawing
 def render_valley_profile(profile: dict, tokens: dict, frame: tuple = PROFILE_FRAME) -> dict:
     """
     The profile and its measurements:
@@ -410,6 +413,7 @@ def _wedge(cx, cy, radius, centre_deg, half_width_deg) -> str:
     return f"M{_fmt(cx)} {_fmt(cy)} L{_fmt(x_a)} {_fmt(y_a)} A{_fmt(radius)} {_fmt(radius)} 0 0 1 {_fmt(x_b)} {_fmt(y_b)} Z"
 
 
+@report_progress.drawing
 def render_wind_roses(seasons: list, tokens: dict, frame: tuple = ROSES_FRAME) -> dict:
     """
     Two (or more) roses side by side and their measurements:

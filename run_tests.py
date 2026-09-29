@@ -54,6 +54,10 @@ FULL_ONLY = (
     # steps, then four WeasyPrint renders of the twenty-three-page site
     # data report through the route. Measured at 41.4 s.
     "test_session_report_route.py",
+    # Branch 23: six whole reports through the route, each polled from
+    # start to done -- warm, cold, a 2.5 s stall, two failures. Measured
+    # at 29.1 s.
+    "test_report_progress.py",
     # The report-layer retry replay, ending in three whole
     # fetch_report_data() runs. Measured at 10.0 s.
     "test_report_layer_retry.py",
