@@ -152,7 +152,7 @@ FENCE_TYPE_WATER_ZONE = "water_zone_exclusion"
 FENCE_TYPE_TREE_ZONE = "tree_zone_exclusion"
 CANDIDATE_FENCE_TYPES = (FENCE_TYPE_BOUNDARY, FENCE_TYPE_WATER_ZONE, FENCE_TYPE_TREE_ZONE)
 FENCE_TYPE_LABELS = {
-    FENCE_TYPE_BOUNDARY: "Boundary fencing",
+    FENCE_TYPE_BOUNDARY: "Perimeter fencing",
     # "WATER AREA", NOT "WATER ZONE", and the fence is the one surface that
     # says it. The water step's own candidates are survey AREAS -- ground to
     # survey for a pond or an embankment -- and "zone" is this module's
@@ -560,10 +560,10 @@ def boundary_fencing_to_geojson(rings_wgs84: list) -> dict:
         extra_properties = {
             "fence_type": "boundary",
         }
-        label = "Boundary fencing"
+        label = FENCE_TYPE_LABELS[FENCE_TYPE_BOUNDARY]
         if segment_count > 1:
             extra_properties["segment_index"] = i
-            label = f"Boundary fencing {i}"
+            label = f"{FENCE_TYPE_LABELS[FENCE_TYPE_BOUNDARY]} {i}"
 
         features.append(
             make_feature(
