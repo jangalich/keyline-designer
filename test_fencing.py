@@ -521,7 +521,7 @@ validate_feature_collection(split_geojson)
 split_features = split_geojson["features"]
 assert len(split_features) == 2
 assert [f["properties"]["segment_index"] for f in split_features] == [1, 2]
-assert [f["properties"]["label"] for f in split_features] == ["Boundary fencing 1", "Boundary fencing 2"]
+assert [f["properties"]["label"] for f in split_features] == ["Perimeter fencing 1", "Perimeter fencing 2"]
 for f in split_features:
     assert f"{2} separate fence loops" in f["properties"]["confidence_notes"], (
         "a multi-segment result's confidence_notes must explicitly call out the split and how many "
