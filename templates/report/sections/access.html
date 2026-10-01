@@ -48,6 +48,6 @@
 {%- else %}
     {{ c9.unavailable(section.soil_unavailable) }}
 {%- endif %}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="access.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

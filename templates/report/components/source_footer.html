@@ -7,9 +7,25 @@
     `footer` is {caveat?: parts, citation?: parts, lines?: [parts, ...]}.
     A section with one source sets caveat and citation (Landform); a
     section whose caveats sit in captions under each figure sets `lines`,
-    one per source, in the order the section used them (Climate). -#}
-{% macro source_footer(footer) -%}
-<div class="source-footer">
+    one per source, in the order the section used them (Climate).
+
+    THE LINES ARE ONE BLOCK (branch 28): every source line in a single
+    paragraph, each starting on a <br>-forced line, so the stylesheet's
+    orphans and widows rules count the whole run's lines -- a page break
+    may split the run only with three or more lines on each side, never
+    stranding a line or two on a page of its own. Separate <p>s per line
+    put every entry boundary outside those rules, and a live render left
+    the Site overview's last two source lines alone on a page.
+
+    `refit` MARKS THE FOOTER FOR THE REFIT MACHINERY (branch 24, 28):
+    "<section>.sources", set as data-refit. When a page holds nothing but
+    this footer's lines -- its tail after a legitimate split, or the whole
+    block forced over -- site_report.lay_out() applies the remedy and lays
+    the report out again. `moved` is that remedy applied: the footer moves
+    whole (and, bound by the stylesheet's break-before rule, takes the
+    block above it along) instead of splitting at the end of a page. -#}
+{% macro source_footer(footer, refit=None, moved=False) -%}
+<div class="source-footer{% if moved %} source-footer--whole{% endif %}"{% if refit %} data-refit="{{ refit }}"{% endif %}>
 {%- if footer.caveat %}
   <p class="source-footer__caveat">
 {%- for part in footer.caveat -%}
@@ -24,12 +40,15 @@
 {%- endfor -%}
   </p>
 {%- endif %}
-{%- for line in footer.lines or [] %}
-  <p class="source-footer__citation source-footer__line">
+{%- if footer.lines %}
+  <p class="source-footer__citation source-footer__lines">
+{%- for line in footer.lines -%}
+{%- if not loop.first %}<br>{% endif -%}
 {%- for part in line -%}
 {%- if part is mapping -%}<span class="data">{{ part.value }}</span>{%- else -%}{{ part }}{%- endif -%}
 {%- endfor -%}
+{%- endfor -%}
   </p>
-{%- endfor %}
+{%- endif %}
 </div>
 {%- endmacro %}
