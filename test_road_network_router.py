@@ -236,9 +236,16 @@ print(
 
 
 # --- 5. Demand block reachable only across a cost band: cheap band ->
-# --- branch built; expensive band -> the cheapest route detours around
-# --- it, its real length pushes meters-per-acre over the threshold, and
-# --- branches == [] with stop_reason "cost_per_acre_exceeded". ---
+# --- branch built. Expensive band -> the first candidate's own
+# --- meters-per-acre is over the ceiling, which under the old
+# --- stop-at-first-violation rule returned branches == [] -- the
+# --- "reachable demand, zero road" outcome the ceiling-exempt trunk
+# --- exists to end (see route_road_network()'s GUARANTEED TRUNK
+# --- paragraph). Now: the trunk is built ANYWAY (it is the one branch
+# --- the ceiling never gates), and every branch accepted AFTER it must
+# --- individually satisfy the fixture's own 100 m/acre ceiling --
+# --- the STOP rule is a per-candidate filter, not a loop terminator,
+# --- so one over-ceiling candidate can no longer zero out the network. ---
 
 shape5 = (60, 100)
 dem5 = _dem(shape5)
@@ -261,16 +268,30 @@ assert len(result5_cheap["branches"]) == 1, (
 assert result5_cheap["stop_reason"] != "cost_per_acre_exceeded"
 
 result5_expensive = _route(dem5, _cost_raster5(1000.0), anchor5, demand5)
-assert result5_expensive["branches"] == [], (
-    f"expected no branches once the band forces a too-long detour, got {result5_expensive['branches']}"
+assert result5_expensive["branches"], (
+    "expected the ceiling-exempt trunk to be built even though the first candidate's own "
+    f"meters-per-acre exceeds the ceiling, got {result5_expensive['branches']}"
 )
-assert result5_expensive["stop_reason"] == "cost_per_acre_exceeded", (
-    f"expected stop_reason 'cost_per_acre_exceeded', got {result5_expensive['stop_reason']}"
+trunk5 = result5_expensive["branches"][0]
+assert trunk5["branch_role"] == "trunk"
+assert trunk5["length_meters"] / trunk5["newly_served_acres"] > FIXTURE_MAX_METERS_PER_SERVED_ACRE, (
+    "this fixture exists to exercise the exemption: the trunk itself must be OVER the ceiling "
+    f"(got {trunk5['length_meters'] / trunk5['newly_served_acres']:.1f} m/acre) -- if it is under, "
+    "the band no longer forces the failure mode this section regresses"
 )
+for branch5 in result5_expensive["branches"][1:]:
+    ratio5 = branch5["length_meters"] / branch5["newly_served_acres"]
+    assert ratio5 <= FIXTURE_MAX_METERS_PER_SERVED_ACRE + 1e-9, (
+        f"every branch AFTER the exempt trunk must individually satisfy the ceiling, got {ratio5:.1f} "
+        f"m/acre on {branch5}"
+    )
+assert result5_expensive["total_served_acres"] > 0.0
 print(
     "5. Expensive band: band_cost=2.0 builds a branch "
-    f"(length={result5_cheap['branches'][0]['length_meters']:.1f}m); band_cost=1000.0 forces a detour whose "
-    "real length exceeds the meters-per-acre threshold -> branches=[], stop_reason='cost_per_acre_exceeded'."
+    f"(length={result5_cheap['branches'][0]['length_meters']:.1f}m); band_cost=1000.0 still builds a network "
+    f"({len(result5_expensive['branches'])} branches, {result5_expensive['total_length_meters']:.0f} m): the "
+    f"trunk is ceiling-exempt at {trunk5['length_meters'] / trunk5['newly_served_acres']:.1f} m/acre, every "
+    "later branch individually satisfies the 100 m/acre fixture ceiling."
 )
 
 

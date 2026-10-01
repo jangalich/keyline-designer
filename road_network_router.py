@@ -53,17 +53,37 @@ own docstring for the full contract):
   double-count overlapping service discs -- both are exactly what this
   reversible-counter technique avoids.
 
-  Among every node with newly_served_acres > 0, the node minimizing
+  The same tree walk also records new_length(t) -- the real meters of
+  NEW construction a route to t would build (existing accepted-branch
+  cells contribute 0, the same rule _new_length_meters() applies to a
+  backtraced path). Candidacy is then decided by BOTH figures at once:
+  a node qualifies when newly_served_acres > 0 AND its
+  new_length(t) / newly_served_acres(t) -- a plain, terrain-blind
+  meters-per-acre figure a person can actually evaluate -- is within
+  max_meters_per_served_acre. Among the qualifiers, the node minimizing
   accumulated_cost(t) / newly_served_acres(t) is selected -- terrain
-  quality (accumulated_cost, which already reflects grade/floodplain/TPI/
-  production penalties) decides between competing candidates. Before
-  that candidate is accepted, its length_meters(t) / newly_served_acres(t)
-  -- a plain, terrain-blind meters-per-acre figure a person can actually
-  evaluate -- is checked against max_meters_per_served_acre. These two
-  ratios are DELIBERATELY different quantities measuring different
-  things (accumulated cost for selection, real distance for the stopping
-  rule) -- see route_road_network()'s own docstring for why they must
-  stay that way.
+  quality (accumulated_cost, which already reflects grade/floodplain/
+  TPI/production penalties) decides between competing candidates. These
+  two ratios are DELIBERATELY different quantities measuring different
+  things (accumulated cost for selection, real distance for the
+  qualifying rule) -- see route_road_network()'s own docstring for why
+  they must stay that way.
+
+  The per-acre ceiling is a PER-CANDIDATE FILTER, not a loop
+  terminator: growth stops when NO candidate qualifies any more, never
+  because the single cheapest-by-cost candidate happens to be over the
+  ceiling while cheaper-per-meter ground still waits elsewhere. The
+  older stop-at-first-violation rule this replaces made the ceiling
+  value erratic, because the acceptance trajectory's meters-per-acre is
+  NOT monotone (accepting a branch rewrites the cost field, so a
+  cheap-per-acre branch regularly becomes selectable only AFTER an
+  expensive one): one over-ceiling stub could zero out a network whose
+  best branches were still ahead, and dodging that failure forced the
+  ceiling far above what any individual branch should pay, which is
+  exactly how networks got too much road. The ONE exemption is the
+  first branch: if no candidate qualifies before anything has been
+  built, the best candidate by accumulated_cost per acre is built
+  anyway -- see route_road_network()'s own GUARANTEED TRUNK paragraph.
 
   Once that loop ends and the water spur has had its one attempt, a
   single LEAF-PRUNING pass drops every terminal branch shorter than
@@ -74,6 +94,106 @@ own docstring for the full contract):
   the growth rule: it changes no selection, no stopping decision and no
   coverage count, it never touches the trunk or a water_spur, and it
   never cascades. See _prune_leaf_branches() for all of that in detail.
+
+WHAT CONTROLS HOW MUCH ROAD GETS BUILT -- every factor, in one place.
+This module's job is a STARTING SKELETON a person designs their own
+full network from: it must always produce something when real demand
+is reachable, and it must not chase every last fraction of an acre.
+Every lever that moves total road quantity is listed here, grouped by
+the stage it acts at; the measured sweep behind the current settings
+is diagnose_road_network_quantity.py.
+
+  DEMAND SIDE (what there is to serve -- not knobs of this module, but
+  the figures everything below is relative to):
+
+  * demand_mask. The production acreage and HOW IT IS ARRANGED set the
+    scale of everything: full coverage of flat, wall-to-wall demand
+    costs ~area / (2 * service_radius) meters of road (strip coverage
+    -- measured within ~10% on synthetic flat parcels), so doubling
+    demand acreage roughly doubles the road a full-coverage network
+    would take, and scattered or remote demand costs more meters per
+    acre than one compact block.
+
+  * anchor_cell's own baseline disc. The anchor pre-serves one full
+    service disc at zero cost, so a parcel whose entire demand sits
+    within service_radius_meters of the access point gets NO network at
+    all ("all_demand_served") -- correct, the fields already touch the
+    road, but it means small parcels with close demand legitimately
+    produce zero road. This baseline is also why service_radius_meters
+    cannot be cranked up to shrink the network on a big parcel without
+    silently zeroing out small ones.
+
+  COVERAGE GEOMETRY (the strongest quantity lever there is):
+
+  * PRODUCTION_SERVICE_RADIUS_METERS. The disc is an AREA: doubling the
+    radius QUADRUPLES the ground one road cell serves, halves (roughly)
+    the full-coverage road length (strip spacing is 2 * radius), and
+    grows the anchor's no-road baseline disc by the same factor.
+    Measured on flat 50-acre wall-to-wall demand: full coverage is
+    4161 m at 25 m radius, 2238 m at 50 m, 1478 m at 75 m.
+
+  GROWTH / STOP RULE (what the loop itself decides):
+
+  * MAX_ROAD_METERS_PER_SERVED_ACRE. The per-CANDIDATE defensibility
+    ceiling: every branch after the trunk must individually pay no more
+    new-construction meters per newly served acre than this. It binds
+    hardest exactly where road is least defensible -- scattered
+    fractions of an acre behind expensive ground -- and barely at all
+    on compact flat demand, where a straight road through virgin demand
+    pays only ~40 m/acre (1 m of road sweeps 2 * radius square meters
+    of new ground) until the parcel saturates. Because it filters
+    candidates rather than stopping the loop (see the algorithm above),
+    lowering it trims the expensive tail without risking the empty
+    networks the old stop-at-first-violation rule produced.
+
+  * The GUARANTEED TRUNK exemption. The floor under "how little":
+    reachable demand beyond the anchor disc always gets at least one
+    branch, whatever the ceiling. Quantity-wise it adds at most one
+    branch, and only on parcels that would otherwise get nothing.
+
+  * EXISTING_ROAD_TRAVERSAL_COST. Accepted cells become near-free, so
+    later branches re-use built road instead of paralleling it -- the
+    reason the result is a tree of spurs off a trunk rather than
+    several independent roads from the anchor. Raising it toward real
+    cost would duplicate road; it has no useful upward range.
+
+  COST SURFACE (road_cost_path.build_cost_raster() -- decides WHERE
+  road goes, and through that how MANY meters the same coverage takes):
+
+  * GRADE_PENALTY_WEIGHT (quadratic, unbounded): steep ground makes
+    routes detour and switchback, so the same served acreage simply
+    takes more meters on steep parcels. Terrain steepness does NOT make
+    the router stop sooner by itself -- the ceiling is deliberately
+    terrain-blind real distance -- but the extra meters detours add DO
+    push marginal branches over the ceiling, which is the designed way
+    steep nooks drop out.
+  * impassable_grade_pct (road_corridors.MAX_ROAD_GRADE_PCT, 35.0, a
+    cliff cutoff): hard walls can sever demand entirely (zero road to
+    it, "no_reachable_demand") or force long perimeter detours (more
+    road) -- see that constant's own 0-of-993-cells history.
+  * TPI ridge preference, floodplain + canopy flat penalties,
+    PRODUCTION_TRAVERSAL_COST_MULTIPLIER: each bends routes off the
+    straight line (onto crests, around wet ground and timber, around
+    rather than through crop blocks), each adding meters for the same
+    coverage. None of them is a quantity knob to tune road amount with;
+    they are route-quality knobs whose side effect is length.
+
+  POST-PASSES (after growth has already decided):
+
+  * MIN_LEAF_BRANCH_METERS. Drops terminal stubs shorter than this.
+    On compact demand this is the pass that does the visible
+    de-noising (the growth loop legitimately accepts 5-7 m stubs that
+    read as clutter); it never shortens the trunk, a water spur, or
+    any mid-network branch.
+  * MAX_WATER_SPUR_METERS. Bounds the single water-access spur's new
+    construction; skipped entirely rather than built over-length.
+
+  DELETED, deliberately (test_roads_step.py pins their absence):
+
+  * MIN_CORRIDOR_LENGTH_METERS, the old network-level length floor
+    that deleted whole short networks and reported zero served acres
+    against real demand. A short network is a correct answer when the
+    field is close; nothing re-adds a floor.
 """
 
 import math
@@ -322,64 +442,118 @@ def _compute_served_tree(
     pad_c: int,
     rows: int,
     cols: int,
-) -> np.ndarray:
+    accepted_cells: set[tuple[int, int]],
+    px: float,
+    py: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """
     DFS over the tree via an explicit stack (never recursion -- path
     depth can exceed Python's recursion limit on a large grid), recording
-    served[r, c] = the cumulative newly_served_acres a route from the
-    anchor to (r, c) would bring, for every reachable cell. Every
-    push/pop pair is an (enter, leave) event, in the exact LIFO order
-    _enter_coverage()/_leave_coverage() need: cover_count (and the
+    TWO per-cell figures for every reachable cell at once:
+
+      served[r, c]     = the cumulative newly_served_acres a route from
+                         the anchor to (r, c) would bring.
+      new_length[r, c] = the real meters of NEW construction that same
+                         route would build -- each tree edge contributes
+                         hypot() ground distance unless the cell it steps
+                         INTO is already part of an accepted branch, the
+                         exact per-step rule _new_length_meters() applies
+                         to a backtraced path. (The two always agree: the
+                         tree path from the anchor to any cell IS the path
+                         backtrace_route() would return for it.)
+
+    new_length exists so the per-acre STOP rule can be evaluated for
+    EVERY candidate during selection (see _select_best_candidate()),
+    rather than only for the single already-selected winner -- the
+    selection-time filtering route_road_network()'s own docstring
+    describes. It costs one running float alongside the coverage counter,
+    nothing more.
+
+    Every push/pop pair is an (enter, leave) event, in the exact LIFO
+    order _enter_coverage()/_leave_coverage() need: cover_count (and the
     persistent baseline it started this call at, from every previously
     accepted branch plus the anchor's own initial coverage) is back to
     exactly where it started once this returns -- this walk only ever
     EVALUATES candidates, it never itself commits anything. cover_count
-    and demand_acres are both padded (see _kernel_padding()); served
-    itself stays unpadded -- it's indexed by real (r, c) tree nodes only.
+    and demand_acres are both padded (see _kernel_padding()); served and
+    new_length stay unpadded -- they're indexed by real (r, c) tree nodes
+    only.
     """
     served = np.zeros((rows, cols), dtype=np.float64)
+    new_length = np.zeros((rows, cols), dtype=np.float64)
     running = 0.0
-    stack: list[tuple[tuple[int, int], bool]] = [(anchor_cell, False)]
+    running_length = 0.0
+    # Stack entries are (node, parent, leaving). parent is None only for
+    # the anchor; the parent is what the entering step's own ground
+    # distance is measured from, and the same step is subtracted back out
+    # on the leave event, mirroring the coverage counter's own
+    # enter/leave reversibility exactly.
+    stack: list[tuple[tuple[int, int], Optional[tuple[int, int]], bool]] = [(anchor_cell, None, False)]
 
     while stack:
-        node, leaving = stack.pop()
+        node, parent, leaving = stack.pop()
         r, c = node
+        if parent is None:
+            step = 0.0
+        elif node in accepted_cells:
+            step = 0.0  # existing road, not new construction
+        else:
+            step = math.hypot((c - parent[1]) * px, (r - parent[0]) * py)
+
         if leaving:
             running -= _leave_coverage(r, c, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c)
+            running_length -= step
             continue
 
         running += _enter_coverage(r, c, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c)
+        running_length += step
         served[r, c] = running
-        stack.append((node, True))
+        new_length[r, c] = running_length
+        stack.append((node, parent, True))
         for child in children.get(node, []):
-            stack.append((child, False))
+            stack.append((child, node, False))
 
-    return served
+    return served, new_length
 
 
 def _select_best_candidate(
-    served: np.ndarray, accumulated_cost: np.ndarray
+    served: np.ndarray,
+    accumulated_cost: np.ndarray,
+    new_length: np.ndarray,
+    max_meters_per_served_acre: float,
 ) -> Optional[tuple[int, int]]:
     """
-    Among every cell with newly_served_acres > 0 and finite
-    accumulated_cost, the one minimizing accumulated_cost / served --
-    ties broken toward lower accumulated_cost, then lower (row, col), so
-    the result is deterministic run to run. Returns None if no cell
-    qualifies at all.
+    Among every cell with newly_served_acres > 0, finite accumulated_cost,
+    AND new_length / served within max_meters_per_served_acre (the STOP
+    rule, applied here as a per-candidate FILTER -- see
+    route_road_network()'s own docstring for why filtering during
+    selection replaced the older stop-at-first-violation rule), the one
+    minimizing accumulated_cost / served -- ties broken toward lower
+    accumulated_cost, then lower (row, col), so the result is
+    deterministic run to run. Returns None if no cell qualifies at all.
+
+    The ceiling test is written multiplicatively (new_length <= ceiling *
+    served) rather than as a division, so a candidate is never divided by
+    a denormally-small served value; np.inf as the ceiling disables the
+    filter entirely (anything times inf is inf, and new_length is always
+    finite), which is exactly how the ceiling-exempt trunk selection
+    reuses this function.
     """
     candidate_rows, candidate_cols = np.where(served > 0.0)
     if candidate_rows.size == 0:
         return None
 
     costs = accumulated_cost[candidate_rows, candidate_cols]
-    finite = np.isfinite(costs)
-    if not np.any(finite):
+    served_values = served[candidate_rows, candidate_cols]
+    lengths = new_length[candidate_rows, candidate_cols]
+    qualifies = np.isfinite(costs) & (lengths <= max_meters_per_served_acre * served_values)
+    if not np.any(qualifies):
         return None
 
-    candidate_rows = candidate_rows[finite]
-    candidate_cols = candidate_cols[finite]
-    costs = costs[finite]
-    served_values = served[candidate_rows, candidate_cols]
+    candidate_rows = candidate_rows[qualifies]
+    candidate_cols = candidate_cols[qualifies]
+    costs = costs[qualifies]
+    served_values = served_values[qualifies]
     ratios = costs / served_values
 
     # np.lexsort's LAST key is primary: ratio first, then cost, then row,
@@ -569,21 +743,48 @@ def route_road_network(
     this module's own docstring for the full algorithm; the essential
     contract:
 
-      SELECT (which candidate wins, every iteration): the node
+      QUALIFY (which candidates are buildable at all, every iteration):
+      a node qualifies when newly_served_acres > 0 AND its own
+      new-construction meters per newly served acre is within
+      max_meters_per_served_acre -- a plain, terrain-blind real-distance
+      figure a person can actually evaluate, computed exactly for every
+      candidate in the same tree walk that computes coverage. The
+      ceiling FILTERS candidates; it does not terminate the loop. One
+      over-ceiling candidate (however cheap by cost) simply drops out,
+      and growth continues through whatever still qualifies -- the loop
+      ends when nothing does. (The older rule -- stop outright the
+      moment the SELECTED candidate was over the ceiling -- made the
+      ceiling erratic, because the acceptance trajectory's
+      meters-per-acre is not monotone; see the module docstring.)
+
+      SELECT (which qualifying candidate wins): the qualifier
       minimizing accumulated_cost / newly_served_acres -- accumulated
       cost already reflects grade/floodplain/TPI/production penalties
       from cost_raster, so this lets terrain quality decide between
-      competing candidates that serve similar acreage.
-
-      STOP (whether the winning candidate gets built at all): that same
-      node's length_meters / newly_served_acres against
-      max_meters_per_served_acre -- a plain, terrain-blind real-distance
-      figure a person can actually evaluate. These two ratios are
-      DELIBERATELY different: unifying them would let a route deep
+      competing candidates that serve similar acreage. These two ratios
+      are DELIBERATELY different: unifying them would let a route deep
       inside a production-penalized parcel (very high accumulated_cost,
       but no worse in real meters) get rejected for the wrong reason, or
       a cheap-looking-by-cost but absurdly long detour get accepted for
       the wrong one.
+
+      GUARANTEED TRUNK (the one ceiling exemption): if NO candidate
+      qualifies while the branch list is still empty, the best
+      candidate by accumulated_cost per acre is built anyway, as the
+      trunk. A parcel whose production ground is real, reachable, and
+      beyond the anchor's own baseline disc gets a road to it, period
+      -- the starting skeleton this module exists to produce is useless
+      if it can come back empty just because the first stretch of road
+      is expensive per acre (a long approach across non-production
+      ground to a small remote field is EXACTLY the first-branch shape
+      that legitimately costs the most per acre and is still worth
+      building). Every branch AFTER the trunk faces the ceiling with no
+      exemption, so this can never add more than the one branch the
+      network cannot exist without. The empty network with
+      "cost_per_acre_exceeded" is therefore no longer a reachable
+      outcome; an empty network now only ever means no demand, demand
+      already served by the anchor's own baseline, or demand genuinely
+      unreachable.
 
     anchor_cell is treated as already providing PRODUCTION_SERVICE_RADIUS
     coverage on its own, at zero cost, before any branch is ever built --
@@ -621,12 +822,14 @@ def route_road_network(
     demand_mask has no True cells at all ("no_demand"), when anchor_cell's
     own baseline coverage already serves every acre of real demand
     ("all_demand_served"), when no remaining demand is reachable from it
-    at all ("no_reachable_demand"), when even the very first
-    candidate's meters-per-acre is already too expensive
-    ("cost_per_acre_exceeded"), or when leaf pruning below removed every
-    branch there was ("all_branches_below_minimum" -- reported instead of
-    the loop's own reason, which would misdescribe why the network came
-    back empty).
+    at all ("no_reachable_demand"), or when leaf pruning below removed
+    every branch there was ("all_branches_below_minimum" -- reported
+    instead of the loop's own reason, which would misdescribe why the
+    network came back empty). "cost_per_acre_exceeded" -- growth ended
+    with reachable demand still unserved because no remaining candidate
+    qualified under max_meters_per_served_acre -- now always arrives WITH
+    a network attached: the guaranteed trunk (see above) means the
+    ceiling can end growth but can no longer zero it out.
 
     LEAF PRUNING runs last, after the coverage loop AND after the water
     spur step, over the finished topology: every TERMINAL branch shorter
@@ -691,26 +894,45 @@ def route_road_network(
     while True:
         field = cost_distance_field(dem, working_cost_raster, [anchor_cell])
         children = _build_children_map(field, anchor_cell)
-        served = _compute_served_tree(
-            anchor_cell, children, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c, rows, cols
+        served, candidate_new_length = _compute_served_tree(
+            anchor_cell, children, cover_count, demand_acres, kernel_dr, kernel_dc, pad_r, pad_c, rows, cols,
+            accepted_cells, px, py,
         )
 
-        best_cell = _select_best_candidate(served, field["accumulated_cost"])
+        best_cell = _select_best_candidate(
+            served, field["accumulated_cost"], candidate_new_length, max_meters_per_served_acre
+        )
+        if best_cell is None and not branches:
+            # CEILING-EXEMPT TRUNK: no candidate satisfies the per-acre
+            # ceiling and nothing has been built yet. If any reachable
+            # new demand exists at all, build the best candidate anyway
+            # -- see route_road_network()'s own docstring for why the
+            # first branch is guaranteed rather than ceiling-gated.
+            best_cell = _select_best_candidate(
+                served, field["accumulated_cost"], candidate_new_length, np.inf
+            )
+
         if best_cell is None:
             if total_demand_acres <= _UNSERVED_ACRES_EPSILON:
                 stop_reason = "no_demand"
-            else:
-                unserved_acres = max(0.0, total_demand_acres - total_served_acres)
-                stop_reason = "all_demand_served" if unserved_acres <= _UNSERVED_ACRES_EPSILON else "no_reachable_demand"
+                break
+            unserved_acres = max(0.0, total_demand_acres - total_served_acres)
+            if unserved_acres <= _UNSERVED_ACRES_EPSILON:
+                stop_reason = "all_demand_served"
+                break
+            # Demand remains unserved. Distinguish "nothing qualifies
+            # under the ceiling" (some candidate still has served > 0 and
+            # finite cost -- the ceiling is what stopped growth) from
+            # "nothing is reachable at all."
+            any_candidate = _select_best_candidate(
+                served, field["accumulated_cost"], candidate_new_length, np.inf
+            )
+            stop_reason = "cost_per_acre_exceeded" if any_candidate is not None else "no_reachable_demand"
             break
 
         raw_cells = backtrace_route(field["came_from_row"], field["came_from_col"], best_cell)
         served_acres = float(served[best_cell])
         new_length = _new_length_meters(raw_cells, accepted_cells, px, py)
-
-        if new_length / served_acres > max_meters_per_served_acre:
-            stop_reason = "cost_per_acre_exceeded"
-            break
 
         trimmed_cells, join_cell = _trim_to_join(raw_cells, accepted_cells)
         joins_branch_index = cell_to_branch_index[join_cell] if join_cell is not None else None
