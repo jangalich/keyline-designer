@@ -80,7 +80,7 @@ completing:
 
 `stage` and `detail` are KEYS, not prose. The words the user reads are the
 frontend's (ReportProgress.jsx), as every other sentence in that UI is; a
-layer's module name (nhd_points, soil_woodland) never reaches the wire.
+layer's module name (nhdplus_hr, soil_woodland) never reaches the wire.
 
 `percent` is FLOORED, so it reads 100 only when every unit is done -- a
 bar showing 100 over a job still laying out pages is the one lie a
@@ -132,7 +132,6 @@ REPORT_LAYER_KINDS = {
     "daymet_daily": KIND_CLIMATE,
     "atlas14": KIND_STORMS,
     "power_wind": KIND_CLIMATE,
-    "nhd_points": KIND_STREAMS,
     "nhdplus_hr": KIND_STREAMS,
     "nwi": KIND_WETLANDS,
     "fema_nfhl": KIND_FLOOD,

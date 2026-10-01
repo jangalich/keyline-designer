@@ -288,11 +288,10 @@ def install_instrumentation():
         "atlas14": (report_data, "get_atlas14_for_point"),
         "power_wind": (report_data, "get_power_wind_for_point"),
     }
-    import bedrock_geology, census_geography, context_map_data, forest_type_data, hydrology_data  # noqa: E401
+    import bedrock_geology, census_geography, context_map_data, forest_type_data  # noqa: E401
     import naip_imagery, nfhl_data, nhdplus_data, nlcd_landcover_data, nwi_data, soil_road_ratings  # noqa: E401
     import soil_survey, soil_water_table, soil_woodland, structures_data, transmission_lines  # noqa: E401
     fetchers.update({
-        "nhd_points": (hydrology_data, "get_nhd_points_for_boundary"),
         "nhdplus_hr": (nhdplus_data, "get_flowline_attributes_for_boundary"),
         "nwi": (nwi_data, "get_wetlands_for_boundary"),
         "fema_nfhl": (nfhl_data, "get_flood_hazard_for_boundary"),

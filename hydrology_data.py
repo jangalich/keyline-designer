@@ -16,6 +16,7 @@ import requests
 from typing import Optional
 
 import fetch_attempts
+import host_breaker
 from feature_schema import CONFIDENCE_MEDIUM, make_feature, make_feature_collection
 
 NHD_BASE = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer"
@@ -129,6 +130,14 @@ def _query_layer(
     url = f"{NHD_BASE}/{layer_id}/query"
     last_error = None
 
+    # THE HOST'S CIRCUIT, CHECKED BEFORE THE LOOP. When another fetch
+    # just exhausted its whole retry budget against this host, this call
+    # fails NOW with the same exception type the loop below would raise
+    # after 30/60/90-second timeouts -- see host_breaker.py. Outside the
+    # try, deliberately: the except clause below must not catch it and
+    # retry into an open circuit.
+    host_breaker.check(url)
+
     # ATTEMPTS ARE PUBLISHED, NOT SWALLOWED -- fetch_attempts.attempts()
     # yields exactly what range(max_retries + 1) yielded and counts each
     # pass into the ledger the calling layer entry point opened, and
@@ -142,12 +151,14 @@ def _query_layer(
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
             data = response.json()
+            host_breaker.record_success(url)
             return data.get("features", [])
         except requests.exceptions.RequestException as e:
             last_error = e
             if attempt < max_retries:
                 fetch_attempts.sleep(fetch_attempts.RETRY_PAUSE_SECONDS)
                 continue
+            host_breaker.record_failure(url)
             raise last_error
 
 
@@ -174,13 +185,30 @@ def get_water_features_for_boundary(
     Returns a dict:
         {
             'streams': [ {name, feature_code, geometry}, ... ],
-            'water_bodies': [ {name, feature_code, geometry}, ... ]
+            'water_bodies': [ {name, feature_code, geometry}, ... ],
+            'points': [ {name, feature_code, feature_type, geometry,
+                         permanent_identifier}, ... ] | None
         }
+
+    'points' is the NHD Point layer (springs and seeps among them --
+    springs_and_seeps() picks those), FOLDED INTO THIS CALL's pass so the
+    report does not go back to the flakiest host in the stack at report
+    time for one more query over the same bbox (the move report_data.py's
+    fetch-order note logged). It is the one DEGRADABLE key in this dict:
+    streams and water_bodies keep the hard-fail contract (a failure
+    raises, parcel_data fails the session), but a points failure yields
+    'points': None -- the report's Water section then says springs went
+    unfetched, exactly as it did when the report's own point fetch
+    degraded. None means "not fetched"; "nothing mapped here" is [].
     """
     bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
 
     stream_features = _query_layer(FLOWLINE_LAYER, bbox)
     waterbody_features = _query_layer(WATERBODY_LAYER, bbox)
+    try:
+        points = _point_rows(_query_layer(POINT_LAYER, bbox))
+    except requests.exceptions.RequestException:
+        points = None
 
     # `permanent_identifier` is carried beside the three original keys so
     # water_features_to_geojson() below can mint the SAME schema feature id
@@ -208,7 +236,7 @@ def get_water_features_for_boundary(
         for f in waterbody_features
     ]
 
-    return {"streams": streams, "water_bodies": water_bodies}
+    return {"streams": streams, "water_bodies": water_bodies, "points": points}
 
 
 def _nhd_permanent_identifier(raw_feature: dict):
@@ -334,13 +362,35 @@ def get_water_features_geojson(
 #
 # NHD maps a spring or seep as a point feature (FCode 45800) on the Point
 # layer of the same service the flowlines come from. The site data
-# report's Water section asks for them by name; it is one more query over
-# the same bbox, and the honest common answer -- none mapped -- is a real
-# finding that the section states with the field-verification caveat.
-# NOT on the Layer 1 path: parcel_data.fetch_parcel_data() is unchanged;
-# report_data.fetch_report_data() calls this at report time.
+# report's Water section asks for them by name, and the honest common
+# answer -- none mapped -- is a real finding that the section states with
+# the field-verification caveat. ON THE LAYER 1 PATH since the NHD
+# reliability work: get_water_features_for_boundary() fetches the points
+# in the same pass as the flowlines (its 'points' key, degradable), so
+# the report reads them off the parcel's cached water_features instead of
+# going back to this host at report time. This standalone entry point
+# remains for fixture capture and direct callers.
 POINT_LAYER = 0
 SPRING_SEEP_FCODE = 45800
+
+
+def _point_rows(raw_features: list) -> list[dict]:
+    """_query_layer(POINT_LAYER, ...)'s raw features -> the row shape
+    every consumer reads: [{name, feature_code, feature_type, geometry,
+    permanent_identifier}]."""
+    rows = []
+    for f in raw_features:
+        # The Point layer publishes its fields in UPPER CASE (GNIS_NAME,
+        # FCODE), the flowline layer in lower case; read either.
+        props = {str(k).lower(): v for k, v in (f.get("properties") or {}).items()}
+        rows.append({
+            "name": props.get("gnis_name"),
+            "feature_code": props.get("fcode"),
+            "feature_type": props.get("ftype"),
+            "geometry": f.get("geometry"),
+            "permanent_identifier": props.get("permanent_identifier") or props.get("objectid"),
+        })
+    return rows
 
 
 @fetch_attempts.publishes
@@ -355,19 +405,7 @@ def get_nhd_points_for_boundary(
     picks. Same fetch box, same retry loop as the flowlines.
     """
     bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
-    rows = []
-    for f in _query_layer(POINT_LAYER, bbox):
-        # The Point layer publishes its fields in UPPER CASE (GNIS_NAME,
-        # FCODE), the flowline layer in lower case; read either.
-        props = {str(k).lower(): v for k, v in (f.get("properties") or {}).items()}
-        rows.append({
-            "name": props.get("gnis_name"),
-            "feature_code": props.get("fcode"),
-            "feature_type": props.get("ftype"),
-            "geometry": f.get("geometry"),
-            "permanent_identifier": props.get("permanent_identifier") or props.get("objectid"),
-        })
-    return rows
+    return _point_rows(_query_layer(POINT_LAYER, bbox))
 
 
 def springs_and_seeps(points: Optional[list]) -> list[dict]:

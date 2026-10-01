@@ -47,7 +47,6 @@ offline_harness.install()
 
 import requests
 
-import hydrology_data
 import nfhl_data
 import nhdplus_data
 import nlcd_landcover_data
@@ -103,7 +102,7 @@ print("1. REPORT_FETCH_LAYERS names each layer once with a known policy, and eac
 assert REPORT_FETCH_LAYERS == {
     "daymet_daily": REQUIRED, "atlas14": DEGRADABLE, "power_wind": DEGRADABLE,
     # THE WATER LAYERS (branch 9), every one degradable: context beside a Layer 1 the section always has.
-    "nhd_points": DEGRADABLE, "nhdplus_hr": DEGRADABLE, "nwi": DEGRADABLE, "fema_nfhl": DEGRADABLE,
+    "nhdplus_hr": DEGRADABLE, "nwi": DEGRADABLE, "fema_nfhl": DEGRADABLE,
     "nlcd_landcover": DEGRADABLE, "soil_water_table": DEGRADABLE,
     # THE ACCESS LAYER (branch 10): the soil road-construction ratings, context beside Layer 1's road rows.
     "soil_road_ratings": DEGRADABLE,
@@ -128,7 +127,7 @@ assert "daymet_at_stations" not in ReportData.__dataclass_fields__, "the station
 sites = run_diagnostics._fetch_hook_sites()
 assert sites["report_data.fetch_report_data calls time_layer"] is True, sites
 coverage = [k for k in sites if k.startswith("report_data.fetch_report_data times")]
-assert coverage == ["report_data.fetch_report_data times 21 of 21 declared report layers"], sites
+assert coverage == ["report_data.fetch_report_data times 20 of 20 declared report layers"], sites
 assert sites[coverage[0]] is True
 assert sites["parcel_data.fetch_parcel_data calls time_layer"] is True
 print(f"   {coverage[0]}")
@@ -176,7 +175,6 @@ _WATER_RAW.update(soils_reference_fixture.raw_soils_layers())
 _WATER_RAW["naip_imagery_raw"] = naip_reference_fixture.raw_naip()
 _WATER_RAW.update(overview_reference_fixture.raw_overview_layers())
 _WATER_FETCHES = (
-    (hydrology_data, "get_nhd_points_for_boundary", "nhd_points"),
     (nhdplus_data, "get_flowline_attributes_for_boundary", "nhdplus_hr"),
     (nwi_data, "get_wetlands_for_boundary", "nwi"),
     (nfhl_data, "get_flood_hazard_for_boundary", "fema_nfhl"),
@@ -250,7 +248,8 @@ assert data.severe_weather["counts"] == {"hail": 615, "wind": 1917, "tornado": 3
 assert data.unavailable == {}
 # The Water layers, parsed once here from the mocked answers: the springs list, the NHDPlus join, the wetlands
 # block (four fine, one coarse), the flood block, the NLCD grid the DEM's shape with the pinned year, the water table.
-assert data.nhd_points == [] and len(data.nhdplus_hr) == 3 and len(data.nwi["features"]) == 5
+# nhd_points is no longer a report fetch (springs ride Layer 1's water pass); the field defaults None here.
+assert data.nhd_points is None and len(data.nhdplus_hr) == 3 and len(data.nwi["features"]) == 5
 assert data.fema_nfhl["available"] is True and data.nlcd_landcover["year"] == nlcd_landcover_data.NLCD_YEAR == 2024
 assert data.nlcd_landcover["array"].shape == (108, 96) and len(data.soil_water_table["map_units"]) == 7
 assert len(data.soil_road_ratings["map_units"]) == 7 and len(data.soil_road_ratings["components"]) == 30
@@ -380,7 +379,7 @@ print("   1 fetch for 2 calls on one boundary; a failed fetch leaves the cache e
 # ======================================================================
 # 6. Each Water layer degrades alone
 # ======================================================================
-print("6. each of the six Water, one Access, two Trees, two Soils, one Design and six Overview layers failing is recorded alone; an empty NWI answer is not a degradation")
+print("6. each of the five Water, one Access, two Trees, two Soils, one Design and six Overview layers failing is recorded alone; an empty NWI answer is not a degradation")
 _water_stack.close()
 for module, name, key in _WATER_FETCHES:
     layer = _layer_of(key)
@@ -429,7 +428,7 @@ a, b, c = _all_mocked()
 with a, b, c:
     all_down = fetch_report_data(REAL_BOUNDARY)
 assert set(all_down.unavailable) == {_layer_of(key) for _, _, key in _WATER_FETCHES}
-assert set(all_down.unavailable) == {"nhd_points", "nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table",
+assert set(all_down.unavailable) == {"nhdplus_hr", "nwi", "fema_nfhl", "nlcd_landcover", "soil_water_table",
                                      "soil_road_ratings", "forest_type_group", "soil_woodland",
                                      "soil_survey", "bedrock_geology", "naip_imagery",
                                      "context_dem", "context_water", "context_roads", "county_state", "structures",

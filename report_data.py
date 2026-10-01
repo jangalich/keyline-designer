@@ -61,9 +61,12 @@ they are context beside a Layer 1 the section always has (the NHD rows,
 the SSURGO rows, the DEM), and a missing wetland layer must not sink a
 paid report; each absent layer leaves a visible statement in its place):
 
-  nhd_points          DEGRADABLE  NHD's Point layer: mapped springs and
-                                  seeps (hydrology_data). "None mapped" is
-                                  the expected answer and a real one.
+  (springs and seeps -- NHD's Point layer -- were a seventh row here
+  until the NHD reliability work folded that query into Layer 1's water
+  fetch: hydrology_data.get_water_features_for_boundary's 'points' key,
+  read off the parcel's cache by water_derivations. One fewer report-time
+  query against the flakiest host in this table.)
+
   nhdplus_hr          DEGRADABLE  NHDPlus HR stream order and the reach's
                                   total drainage area, joined to the NHD
                                   rows by permanent_identifier
@@ -171,7 +174,7 @@ weather, have no row in the table; the overview reads them directly.
 A DEGRADABLE LAYER RETRIES BEFORE IT DEGRADES, PER REQUEST. Every
 network-backed module this table calls runs each of its requests in the
 bounded, progressive-timeout loop fetch_attempts.py describes: at most
-three attempts, 30/60/90 s timeouts, a two-second pause between them, the
+three attempts, 30/60/90 s timeouts, a RETRY_PAUSE_SECONDS pause between them, the
 attempts published. The three layers the report-generation audit measured
 as the slowest -- fema_nfhl (nfhl_data._get), nwi (nwi_data._get) and
 context_roads (farm_roads_data._query_road_layer) -- are held to it by
@@ -181,21 +184,21 @@ mapped wetland) is a success, taken once and never retried. There is
 deliberately no second, layer-level retry around those loops: it would
 multiply the worst case for no failure the inner loop does not cover.
 
-LOGGED FOR THE PARALLEL-FETCH BRANCH, NOT FIXED (branch 23, the progress
-bar). Two things the bar makes more visible, both belonging with the move
-to concurrent report fetches:
+THE TWO NHD-HOST FIXES THE PROGRESS BAR MADE PRESSING, both landed with
+the NHD reliability work (the branch 23 log that used to sit here):
 
-  THE NHD POINT LAYER COULD MOVE TO LAYER 1. nhd_points (springs and
-  seeps) is one more query on the NHD service Layer 1's water_features
-  already calls at the same bbox. Moving it takes a report-time fetch off
-  the flakiest host in this table.
+  THE NHD POINT LAYER MOVED TO LAYER 1. Springs and seeps now ride
+  Layer 1's water fetch (hydrology_data.get_water_features_for_
+  boundary's 'points' key) and the report reads them off the parcel's
+  cache -- one fewer report-time query against the flakiest host.
 
-  THE RETRY BUDGET FOR DEGRADABLE LAYERS. 30/60/90 s across two layers on
-  the same NHD host turned one flaky service into ~4.5 minutes of report.
-  With a progress bar the user now watches that happen -- the bar holds,
-  truthfully, naming "springs and streams" for minutes -- which makes the
-  budget question more pressing, not less. A degradable layer's worst case
-  should be decided deliberately, and per host rather than per layer.
+  THE RETRY BUDGET IS NOW BOUNDED PER HOST. 30/60/90 s across two layers
+  on the same NHD host used to turn one flaky service into ~4.5 minutes
+  of report, the bar holding truthfully for minutes. host_breaker.py is
+  the per-host decision: a layer that exhausts its whole budget against
+  a host opens that host's circuit, and the next layer's call to the
+  same host fails instantly into its own degrade branch instead of
+  burning another budget into the same episode.
 
 PROGRESS. report_progress.py counts each layer's completion through the
 time_layer() block below (run_diagnostics hands it on), and _degrade()
@@ -261,7 +264,6 @@ import run_diagnostics
 import report_progress
 import spc_reports
 import forest_type_data
-import hydrology_data
 import nfhl_data
 import nhdplus_data
 import nlcd_landcover_data
@@ -292,7 +294,6 @@ REPORT_FETCH_LAYERS = {
     "daymet_daily": REQUIRED,
     "atlas14": DEGRADABLE,
     "power_wind": DEGRADABLE,
-    "nhd_points": DEGRADABLE,
     "nhdplus_hr": DEGRADABLE,
     "nwi": DEGRADABLE,
     "fema_nfhl": DEGRADABLE,
@@ -318,7 +319,6 @@ REPORT_FETCH_LAYERS = {
 LAYER_CLIMATE = ("climate", "climate records")
 LAYER_ATLAS14 = ("design_storms", "design storm depths")
 LAYER_POWER_WIND = ("wind", "wind records")
-LAYER_NHD_POINTS = ("springs", "mapped springs and seeps")
 LAYER_NHDPLUS_HR = ("stream_order", "stream order")
 LAYER_NWI = ("wetlands", "mapped wetlands")
 LAYER_NFHL = ("flood_hazard", "flood hazard zones")
@@ -419,12 +419,16 @@ class ReportData:
     # spc_reports.reports_within() at the centroid -- bundled, always
     # present.
     severe_weather: Optional[dict]
-    # THE WATER LAYERS (branch 9), each None when it degraded. The NHD
-    # point rows as hydrology_data returns them; the others PARSED by
+    # THE WATER LAYERS (branch 9), each None when it degraded, PARSED by
     # their modules (nhdplus_data.parse_flowline_attributes,
     # nwi_data.parse_wetlands, nfhl_data.parse_flood_hazard,
     # nlcd_landcover_data.parse_land_cover,
     # soil_water_table.parse_seasonal_water_table).
+    # nhd_points is NO LONGER FETCHED HERE -- springs ride Layer 1's
+    # water fetch now and water_derivations reads them off the parcel's
+    # cache. The field stays so a ReportData cached or fixture-built
+    # before the move still carries its rows, and water_derivations falls
+    # back to it when the parcel's water_features has no points.
     nhd_points: Optional[list] = None
     nhdplus_hr: Optional[dict] = None
     nwi: Optional[dict] = None
@@ -563,15 +567,10 @@ def fetch_report_data(boundary) -> ReportData:
     severe_weather = spc_reports.reports_within(centroid[0], centroid[1])
 
     # THE WATER LAYERS, in the order the section reads them. Each is one
-    # timed block; each degrades on its own.
-    nhd_points = None
-    try:
-        with run_diagnostics.time_layer("nhd_points", hydrology_data.get_nhd_points_for_boundary):
-            nhd_points = hydrology_data.get_nhd_points_for_boundary(boundary)
-    except _WATER_FETCH_ERRORS as exc:
-        nhd_points = None
-        _degrade("nhd_points", LAYER_NHD_POINTS, exc)
-
+    # timed block; each degrades on its own. (Springs and seeps are NOT
+    # fetched here any more: they ride Layer 1's water fetch and the
+    # Water section reads them off the parcel's cache -- see the module
+    # docstring and hydrology_data.get_water_features_for_boundary.)
     nhdplus_hr = None
     try:
         with run_diagnostics.time_layer("nhdplus_hr", nhdplus_data.get_flowline_attributes_for_boundary):
@@ -730,7 +729,6 @@ def fetch_report_data(boundary) -> ReportData:
         power_wind=power_wind,
         wind=wind,
         severe_weather=severe_weather,
-        nhd_points=nhd_points,
         nhdplus_hr=nhdplus_hr,
         nwi=nwi,
         fema_nfhl=fema_nfhl,

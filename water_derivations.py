@@ -161,17 +161,27 @@ def water_inputs_from_context(context, document: dict, report_data) -> WaterInpu
         raise ValueError("the session's exclusion result carries no slope grid")
     parcel = context.parcel_data
     boundary = context.boundary_polygon_utm
+    parcel_water = getattr(parcel, "water_features", None) or {"streams": [], "water_bodies": []}
+    # SPRINGS COME OFF THE PARCEL'S OWN WATER FETCH since the NHD
+    # reliability work folded the Point layer into Layer 1's pass
+    # (hydrology_data.get_water_features_for_boundary's 'points' key).
+    # A ParcelData cached before the fold has no such key, and a Layer 1
+    # pass whose point query degraded carries None -- both fall back to
+    # the report row's nhd_points, which older cached ReportData and the
+    # fixtures still populate. None in both places reads as "springs not
+    # fetched", which is what the section then says.
+    parcel_points = parcel_water.get("points")
     return WaterInputs(
         dem=context.dem,
         boundary_polygon_utm=boundary,
         slope_pct=slope,
         valleys=list(context.valleys or []),
-        water_features=getattr(parcel, "water_features", None) or {"streams": [], "water_bodies": []},
+        water_features=parcel_water,
         soil_components=list(getattr(parcel, "soil_components", None) or []),
         soil_geometries=dict(getattr(parcel, "soil_geometries", None) or {}),
         parcel_acres=boundary.area / SQUARE_METERS_PER_ACRE,
         retrieved_on=_created_on(document),
-        nhd_points=getattr(report_data, "nhd_points", None),
+        nhd_points=parcel_points if parcel_points is not None else getattr(report_data, "nhd_points", None),
         nhdplus_hr=getattr(report_data, "nhdplus_hr", None),
         nwi=getattr(report_data, "nwi", None),
         fema_nfhl=getattr(report_data, "fema_nfhl", None),

@@ -691,9 +691,11 @@ describes the water that is there beside a Layer 1 it always has (the NHD
 rows, the SSURGO rows, the DEM), and a missing wetland layer must not sink
 a paid report. Each absent layer leaves a visible statement in its place.
 
-- `hydrology_data.get_nhd_points_for_boundary()` — NHD's Point layer, for
-  mapped springs and seeps (FCode 45800). "None mapped" is the expected
-  answer; seeps and springs need field verification either way.
+- NHD's Point layer — mapped springs and seeps (FCode 45800) — rides
+  Layer 1's water fetch since the NHD reliability work
+  (`hydrology_data.get_water_features_for_boundary()`'s `points` key);
+  the report reads it off the parcel's cache. "None mapped" is the
+  expected answer; seeps and springs need field verification either way.
 - `nhdplus_data.py` — NHDPlus HR stream order and the reach's total
   drainage area, joined to the NHD rows by `permanent_identifier`. The
   reach figure is the stream's un-truncated catchment and leads the

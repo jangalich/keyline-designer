@@ -98,7 +98,7 @@ def plan(**overrides):
 
 
 print("\n[A1] THE PLAN")
-assert len(REPORT_LAYERS) == 21, REPORT_LAYERS
+assert len(REPORT_LAYERS) == 20, REPORT_LAYERS
 assert set(report_progress.REPORT_LAYER_KINDS) == set(REPORT_LAYERS), (
     set(report_progress.REPORT_LAYER_KINDS) ^ set(REPORT_LAYERS)
 )
@@ -116,7 +116,7 @@ def weight(units, stage=None):
     return sum(u.weight for u in units if stage is None or u.stage == stage)
 
 
-assert len(WARM) == 21 + 15 + 3, len(WARM)
+assert len(WARM) == 20 + 15 + 3, len(WARM)
 assert abs(weight(WARM) - 100.0) < 1e-9, weight(WARM)
 assert abs(weight(WARM, STAGE_RECORDS) - 80.0) < 1e-9
 assert abs(weight(WARM, STAGE_TERRAIN) - 10.0) < 1e-9
@@ -209,7 +209,7 @@ progress.complete("records:nwi")
 progress.complete("records:soil_survey")
 snap = progress.snapshot()
 assert (snap["stage"], snap["detail"]) == (STAGE_RECORDS, "flood"), snap
-assert snap["fetches"] == {"completed": 2, "total": 21}, snap
+assert snap["fetches"] == {"completed": 2, "total": 20}, snap
 progress.complete("records:fema_nfhl")
 assert progress.snapshot()["detail"] is None
 progress.enter_stage(STAGE_TERRAIN)
@@ -345,13 +345,13 @@ with Harness(), mock_patch.object(report_data, "get_daymet_daily_for_point", fix
     assert body["status"] == job_runner.STATUS_DONE, body
     assert_honest(snaps, "warm")
     final = snaps[-1]
-    assert final["percent"] == 100 and final["completed"] == final["total"] == 39, final
+    assert final["percent"] == 100 and final["completed"] == final["total"] == 38, final
     assert STAGE_REBUILD not in stages_seen(snaps), stages_seen(snaps)
     assert all(s["percent"] < 100 for s in snaps if s["status"] == job_runner.STATUS_RUNNING and
                s["completed"] < s["total"])
     fetch_counts = [s["fetches"]["completed"] for s in snaps if s["total"]]
-    assert fetch_counts == sorted(fetch_counts) and fetch_counts[-1] == 21, fetch_counts
-    assert all(s["fetches"]["total"] == 21 for s in snaps if s["total"])
+    assert fetch_counts == sorted(fetch_counts) and fetch_counts[-1] == 20, fetch_counts
+    assert all(s["fetches"]["total"] == 20 for s in snaps if s["total"])
     print(f"   {describe(snaps)}")
     print(f"   fetch counts observed: {sorted(set(fetch_counts))}")
     print("   PASS")
@@ -363,7 +363,7 @@ with Harness(), mock_patch.object(report_data, "get_daymet_daily_for_point", fix
     assert body["status"] == job_runner.STATUS_DONE, body
     assert_honest(snaps, "cold")
     planned = [s for s in snaps if s["total"]]
-    assert planned[0]["total"] == 39 + len(parcel_data.FETCH_LAYERS) + 1, planned[0]
+    assert planned[0]["total"] == 38 + len(parcel_data.FETCH_LAYERS) + 1, planned[0]
     assert STAGE_REBUILD in stages_seen(snaps), stages_seen(snaps)
     assert snaps[-1]["percent"] == 100
     print(f"   {describe(snaps)}; total {planned[0]['total']} units from the first planned poll")
