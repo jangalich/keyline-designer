@@ -90,6 +90,6 @@
     {{ c9.unavailable(section.geology_unavailable) }}
 {%- endif %}
     {{ c9.caption(section.cross_reference) }}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="soils.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

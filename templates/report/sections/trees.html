@@ -49,6 +49,6 @@
 {%- if section.limitations_table %}
     {% call c9.captioned(section.limitations_caption) %}{{ c5.data_table(section.limitations_table) }}{% endcall %}
 {%- endif %}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="trees.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

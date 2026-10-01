@@ -34,5 +34,5 @@
   {{ c9.unavailable(statement) }}
 {%- endfor %}
   {% call c9.captioned(section.boundary_statement, variant="boundary") %}{{ c5.data_table(section.facts) }}{% endcall %}
-  {{ c6.source_footer({"lines": section.sources}) }}
+  {{ c6.source_footer({"lines": section.sources}, refit="overview.sources", moved="sources" in (section.refit or [])) }}
 </section>

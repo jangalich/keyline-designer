@@ -953,10 +953,33 @@ th.num {
   max-width: 6.4in;
 }
 
-/* 6. Source footer -- the caveat, then the citation smaller */
+/* 6. Source footer -- the caveat, then the citation smaller.
+   THE FOOTER NEVER OPENS A PAGE ALONE (branch 28): it binds to the block
+   above it, so a footer that does not fit takes that block's tail along
+   to the next page instead of standing there as a page of source lines
+   -- a live render left the Design record's footer alone on a page. Not
+   break-inside: avoid: a footer can be long, and an atomic block pushed
+   whole leaves the page before it short (branch 24); its lines may still
+   split, under the orphans and widows rules below. */
 .source-footer {
   color: var(--ink-muted);
   padding-top: var(--space-2);
+  break-before: avoid;
+}
+/* NO LINE OR TWO STRANDED (branch 28): the footer's paragraphs split only
+   with three or more lines on each side, or move whole. The source lines
+   are one paragraph, <br>-separated (components/source_footer.html), so
+   the rule counts the whole run's lines -- a live render left the Site
+   overview's last two source lines alone on a page. */
+.source-footer p {
+  orphans: 3;
+  widows: 3;
+}
+/* The refit remedy (site_report.refit_sections, "sources"): a footer
+   whose split still left its lines a page of their own moves whole
+   instead -- bound above, it takes the block before it along. */
+.source-footer--whole {
+  break-inside: avoid;
 }
 .source-footer__caveat {
   font-size: var(--text-footer);
@@ -973,9 +996,6 @@ th.num {
 .source-footer .data {
   font-style: normal;
   font-size: 8pt;
-}
-.source-footer__line {
-  margin: 0 0 1.5pt 0;
 }
 
 /* --- the cover's county and contents (branch 17) ------------------------ */
@@ -1058,7 +1078,7 @@ th.num {
    wraps inside it rather than widening the column past the measure. */
 .overview__map {
   flex: none;
-  width: 318pt;
+  width: 284pt;
 }
 .overview__map .report-map__entry {
   margin-right: var(--space-3);

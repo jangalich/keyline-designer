@@ -61,6 +61,6 @@
 {%- endif %}
     </div>
 {%- endfor %}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="design.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

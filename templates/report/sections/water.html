@@ -67,6 +67,6 @@
 {%- else %}
     {{ c9.unavailable(section.flood_unavailable) }}
 {%- endif %}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="water.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

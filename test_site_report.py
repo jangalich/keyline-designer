@@ -346,7 +346,11 @@ assert 'from late April to mid October' in html and '<span class="data">late Apr
 assert html.count('<span class="data">') == 5, html.count('<span class="data">')
 assert html.count('class="key-figure"') == 9
 assert html.count('<td class="num">') == 9 * 12 + 2 * 4 + 3 * 2 and html.count('<th class="num">') == 12 + 4 + 2
-assert html.count('class="source-footer__citation source-footer__line"') == 5 and 'class="source-footer__caveat"' not in html
+# The five source lines are ONE paragraph, <br>-separated (branch 28), so
+# the stylesheet's orphans and widows rules count the whole run's lines.
+assert html.count('class="source-footer__citation source-footer__lines"') == 1 and 'class="source-footer__caveat"' not in html
+footer_block = re.search(r'<p class="source-footer__citation source-footer__lines">(.*?)</p>', html, re.S).group(1)
+assert footer_block.count("<br>") == 4, footer_block.count("<br>")
 assert html.index('class="section__figures"') < html.index('class="section__detail"')
 assert html.index('report-chart--water-balance') < html.index('report-chart--wind-roses') < html.index('class="section__detail"')
 assert MINUS + "1.2" in html and "-1.2" not in html

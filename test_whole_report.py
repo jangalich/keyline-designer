@@ -94,13 +94,15 @@ print(f"   {len(templates)} templates and {len(modules) + 1} modules clean; the 
 
 # ======================================================================
 print("2. every source printed in any footer is in the vintage table")
-# The footers AS PRINTED: each section's source-footer block in the HTML, citation lines only (a caveat is not a source).
+# The footers AS PRINTED: each section's source-footer block in the HTML, citation lines only (a caveat is not a
+# source). A source-footer__lines paragraph holds every line of its run, <br>-separated (branch 28).
 printed = {}
 for chunk in re.split(r'<section class="section section--', HTML_TEXT)[1:]:
     name = chunk.split('"')[0].split()[0]
-    for block in re.findall(r'<div class="source-footer">(.*?)</div>', chunk, re.S):
-        for line in re.findall(r'<p class="source-footer__citation[^"]*">(.*?)</p>', block, re.S):
-            printed.setdefault(name, []).append(" ".join(html_module.unescape(re.sub(r"<[^>]+>", "", line)).split()))
+    for block in re.findall(r'<div class="source-footer[^"]*"[^>]*>(.*?)</div>', chunk, re.S):
+        for paragraph in re.findall(r'<p class="source-footer__citation[^"]*">(.*?)</p>', block, re.S):
+            for line in re.split(r"<br\s*/?>", paragraph):
+                printed.setdefault(name, []).append(" ".join(html_module.unescape(re.sub(r"<[^>]+>", "", line)).split()))
 assert set(printed) == {"overview", "climate", "landform", "water", "access", "trees", "soils", "design"}, sorted(printed)
 # The builder reads the same lines the page prints.
 for section in SECTIONS:
