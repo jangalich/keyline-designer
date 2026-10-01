@@ -521,16 +521,38 @@ def _select_best_candidate(
     accumulated_cost: np.ndarray,
     new_length: np.ndarray,
     max_meters_per_served_acre: float,
+    min_served_acres: float,
 ) -> Optional[tuple[int, int]]:
     """
-    Among every cell with newly_served_acres > 0, finite accumulated_cost,
-    AND new_length / served within max_meters_per_served_acre (the STOP
-    rule, applied here as a per-candidate FILTER -- see
-    route_road_network()'s own docstring for why filtering during
-    selection replaced the older stop-at-first-violation rule), the one
-    minimizing accumulated_cost / served -- ties broken toward lower
-    accumulated_cost, then lower (row, col), so the result is
-    deterministic run to run. Returns None if no cell qualifies at all.
+    Among every cell with newly_served_acres above min_served_acres,
+    finite accumulated_cost, AND new_length / served within
+    max_meters_per_served_acre (the STOP rule, applied here as a
+    per-candidate FILTER -- see route_road_network()'s own docstring for
+    why filtering during selection replaced the older
+    stop-at-first-violation rule), the one minimizing accumulated_cost /
+    served -- ties broken toward lower accumulated_cost, then lower
+    (row, col), so the result is deterministic run to run. Returns None
+    if no cell qualifies at all.
+
+    min_served_acres exists because served carries FLOAT RESIDUE, and a
+    bare `served > 0.0` here is a LIVE INFINITE-LOOP BUG, found by this
+    very filter hanging a steep-parcel run. The reversible coverage
+    counter adds and subtracts the same acreages in different groupings
+    down different subtrees, so a cell whose true newly-served value is
+    exactly zero can come back as ~1e-16 instead. Under the old
+    stop-at-first-violation rule those phantom candidates were harmless
+    (cost / 1e-16 never wins a min-ratio selection, and a fully-served
+    walk performs no additions at all, so it returns EXACT zeros and
+    the loop still terminated). Under ceiling filtering they are fatal:
+    a phantom sits ON existing road, so its new_length is exactly 0.0,
+    it passes `0.0 <= ceiling * 1e-16`, and the moment every REAL
+    candidate is over the ceiling the phantom is the only qualifier
+    left -- it gets accepted as a zero-length branch that changes no
+    state, and the loop re-selects it forever. The floor is half of one
+    grid cell's acreage (route_road_network() passes it): any REAL
+    newly-served figure is at least ONE whole demand cell's acreage, so
+    the threshold cannot drop a genuine candidate, while sitting ~12
+    orders of magnitude above any float residue.
 
     The ceiling test is written multiplicatively (new_length <= ceiling *
     served) rather than as a division, so a candidate is never divided by
@@ -539,7 +561,7 @@ def _select_best_candidate(
     finite), which is exactly how the ceiling-exempt trunk selection
     reuses this function.
     """
-    candidate_rows, candidate_cols = np.where(served > 0.0)
+    candidate_rows, candidate_cols = np.where(served > min_served_acres)
     if candidate_rows.size == 0:
         return None
 
@@ -899,8 +921,12 @@ def route_road_network(
             accepted_cells, px, py,
         )
 
+        # min_served_acres: half of one grid cell's acreage -- the float-
+        # residue guard _select_best_candidate()'s own docstring explains.
+        min_served_acres = 0.5 * cell_area
         best_cell = _select_best_candidate(
-            served, field["accumulated_cost"], candidate_new_length, max_meters_per_served_acre
+            served, field["accumulated_cost"], candidate_new_length, max_meters_per_served_acre,
+            min_served_acres,
         )
         if best_cell is None and not branches:
             # CEILING-EXEMPT TRUNK: no candidate satisfies the per-acre
@@ -909,7 +935,7 @@ def route_road_network(
             # -- see route_road_network()'s own docstring for why the
             # first branch is guaranteed rather than ceiling-gated.
             best_cell = _select_best_candidate(
-                served, field["accumulated_cost"], candidate_new_length, np.inf
+                served, field["accumulated_cost"], candidate_new_length, np.inf, min_served_acres
             )
 
         if best_cell is None:
@@ -925,7 +951,7 @@ def route_road_network(
             # finite cost -- the ceiling is what stopped growth) from
             # "nothing is reachable at all."
             any_candidate = _select_best_candidate(
-                served, field["accumulated_cost"], candidate_new_length, np.inf
+                served, field["accumulated_cost"], candidate_new_length, np.inf, min_served_acres
             )
             stop_reason = "cost_per_acre_exceeded" if any_candidate is not None else "no_reachable_demand"
             break
