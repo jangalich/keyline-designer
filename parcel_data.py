@@ -329,7 +329,7 @@ def fetch_parcel_data(boundary_coordinates: list[tuple[float, float]]) -> Parcel
     wkt_polygon = coordinates_to_wkt_polygon(boundary_coordinates)
     # THE FIVE SDA CALLS, one after another against the same service. The
     # block to watch when a creation is slow: soil_data._run_sda_query()
-    # retries twice with a longer timeout and a 2-second pause each time.
+    # retries twice with a longer timeout and a RETRY_PAUSE_SECONDS pause each time.
     # That used to be invisible to this caller, so these five rows carried
     # the wait without being able to say how much of it was retry; the
     # loop now publishes both, and each row records its own attempts and

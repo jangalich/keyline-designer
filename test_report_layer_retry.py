@@ -17,7 +17,7 @@ convention every network-backed module here uses (fetch_attempts.py):
     context_roads  farm_roads_data._query_road_layer 3 requests per fetch
 
     each request:  max_retries=2 -> at most 3 attempts, timeouts 30/60/90 s,
-                   RETRY_PAUSE_SECONDS (2 s) between attempts, the attempts
+                   RETRY_PAUSE_SECONDS (15 s) between attempts, the attempts
                    published through fetch_attempts.
 
 THE RETRY IS PER REQUEST, NOT PER LAYER, and deliberately not both: a
@@ -70,7 +70,7 @@ from reference_fixture import REAL_BOUNDARY  # noqa: E402
 from unittest.mock import patch as mock_patch  # noqa: E402
 
 # The pause is measured and published by the loop; 10 ms proves that as well
-# as two seconds (test_fetch_attempts.py's reason).
+# as fifteen seconds (test_fetch_attempts.py's reason).
 fetch_attempts.RETRY_PAUSE_SECONDS = 0.01
 
 RAW = water_reference_fixture.raw_water_layers()

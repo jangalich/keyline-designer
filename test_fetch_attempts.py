@@ -57,10 +57,10 @@ import fetch_attempts
 # sleep fetch_attempts.RETRY_PAUSE_SECONDS between attempts -- 2.0 in
 # production, pinned below. What this file proves is that the pause is
 # MEASURED and PUBLISHED by the loop that slept, and a 50 ms pause proves
-# that exactly as well as a two-second one; the two-second version cost
-# this file thirty seconds of wall clock per run and proved nothing extra.
+# that exactly as well as a fifteen-second one, which would cost this file
+# minutes of wall clock per run and prove nothing extra.
 # Every sleep assertion below is relative to the value set here.
-assert fetch_attempts.RETRY_PAUSE_SECONDS == 2.0, fetch_attempts.RETRY_PAUSE_SECONDS
+assert fetch_attempts.RETRY_PAUSE_SECONDS == 15.0, fetch_attempts.RETRY_PAUSE_SECONDS
 RETRY_PAUSE_SECONDS = 0.05
 fetch_attempts.RETRY_PAUSE_SECONDS = RETRY_PAUSE_SECONDS
 ONE_PAUSE_MS = RETRY_PAUSE_SECONDS * 1000.0
@@ -486,9 +486,11 @@ with patch.object(hydrology_data.requests, "get", _one_failure):
 _hydro_wall_ms = (time.perf_counter() - _hydro_started) * 1000.0
 _hydro_attempts, _hydro_sleep, _hydro_detail = _published(hydrology_data)
 
-# Two layers queried (flowline, waterbody); the first retried once.
-assert _hydro_attempts == 3, _hydro_attempts
-assert _hydro_detail["helpers"]["hydrology_data._query_layer"]["calls"] == 2
+# Three layers queried (flowline, waterbody, point -- the point layer
+# rides the same pass since the NHD reliability work); the first
+# retried once.
+assert _hydro_attempts == 4, _hydro_attempts
+assert _hydro_detail["helpers"]["hydrology_data._query_layer"]["calls"] == 3
 assert ONE_PAUSE_MS <= _hydro_sleep <= _hydro_wall_ms, (_hydro_sleep, _hydro_wall_ms)
 
 # WHERE IT CANNOT: dem_data does not retry, so it publishes nothing at
@@ -506,8 +508,8 @@ assert run_diagnostics._published_attempts(dem_data.get_dem_for_boundary) == (
 
 print(
     f"5 [test 5]. SLEEP IS MEASURED BY THE LOOP THAT SLEPT: all {len(_loops)} counting loops sleep "
-    f"between attempts and all {len(_loops)} publish the total. hydrology's two layer queries with "
-    f"one induced failure published attempts={_hydro_attempts} over calls=2 and "
+    f"between attempts and all {len(_loops)} publish the total. hydrology's three layer queries with "
+    f"one induced failure published attempts={_hydro_attempts} over calls=3 and "
     f"{_hydro_sleep:.0f} ms slept inside a {_hydro_wall_ms:.0f} ms call -- the loop's own clock on "
     f"its own pauses, bounded above by the call that contained them. Where there is no loop there "
     f"is no figure: dem_data publishes neither and the reader reports 'not published by dem_data', "

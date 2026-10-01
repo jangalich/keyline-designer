@@ -44,6 +44,7 @@ from urllib.parse import urlsplit
 import requests
 
 import fetch_attempts
+import host_breaker
 
 _LOCK = threading.Lock()
 _INSTALLED = False
@@ -107,6 +108,15 @@ def install(*, retry_pause_seconds: float = 0.0) -> None:
         requests.Session.request = _refusing_session()
         _ORIGINALS["retry_pause_seconds"] = fetch_attempts.RETRY_PAUSE_SECONDS
         fetch_attempts.RETRY_PAUSE_SECONDS = retry_pause_seconds
+        # THE PER-HOST CIRCUIT BREAKER IS OFF UNDER THE HARNESS, for the
+        # same reason the pause is zero: the suite's contract is that
+        # every fetch runs its REAL retry loop and publishes its real
+        # attempt counts, and a breaker opened by one file's exhausted
+        # budget would make every later fetch against the same host fail
+        # with zero attempts, in file order. test_host_breaker.py enables
+        # it explicitly and is the file that proves its behavior.
+        _ORIGINALS["host_breaker_enabled"] = host_breaker.enabled()
+        host_breaker.set_enabled(False)
         _INSTALLED = True
 
 
@@ -121,6 +131,7 @@ def uninstall() -> None:
             setattr(requests, verb, _ORIGINALS.pop(verb))
         requests.Session.request = _ORIGINALS.pop("session_request")
         fetch_attempts.RETRY_PAUSE_SECONDS = _ORIGINALS.pop("retry_pause_seconds")
+        host_breaker.set_enabled(_ORIGINALS.pop("host_breaker_enabled"))
         _INSTALLED = False
 
 

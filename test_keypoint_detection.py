@@ -499,6 +499,18 @@ print(
 # it is kept and flagged; at 60 m it is inadmissible, and the highest
 # admissible survivor answers instead. (24, 7), the fit's own split, stays
 # named as _P6 because TEST 6b's fit-level checks are anchored on it.
+#
+# 10 m AND 20 m BOXES MOVED BY THE ON-PARCEL-PREFERENCE BRANCH. A box SOUTH
+# of (17, 7) puts the rest of its block -- rows 19-31 at 10 m, 21-31 at 20 m
+# -- on the parcel, and selection now prefers an on-parcel survivor (fix #8,
+# TEST 18), so those boxes no longer test what this test is for: that the
+# margin KEEPS and FLAGS an off-parcel keypoint. They now lie EAST of the
+# stem, the full grid height, so every stem cell is exactly _offset metres
+# out, no survivor is on parcel, and the fallback returns (17, 7) flagged
+# and measured. The 60 m box stays south: there the stem itself is what
+# runs into the margin. Its selection moved with the preference: the
+# highest admissible survivor is (24, 7), exactly 25 m out, but rows 29-31
+# are on the parcel, so (29, 7) answers.
 # ============================================================================
 _arr6 = _v_valley(_rows1, _cols1, _profile1, cross=2.0)
 _dem6 = _dem(_arr6)
@@ -510,8 +522,13 @@ _P6_TOP = _kp6["point_utm"]
 _P6 = Point(*pixel_center_xy(_dem6, 24, 7))
 _kept6 = {}
 for _offset in (10.0, 20.0, 60.0):
-    # A box lying entirely to the SOUTH of the selection, its northern edge _offset metres away.
-    _bnd = box(_P6_TOP.x - 100.0, _P6_TOP.y - _offset - 300.0, _P6_TOP.x + 100.0, _P6_TOP.y - _offset)
+    if _offset < KEYPOINT_BOUNDARY_MARGIN_METERS:
+        # A box beside the stem, to the EAST, its western edge _offset metres from every stem cell.
+        _bnd = box(_P6_TOP.x + _offset, ORIGIN_Y - _rows1 * RES[1] - 100.0,
+                   _P6_TOP.x + _offset + 200.0, ORIGIN_Y + 100.0)
+    else:
+        # A box lying entirely to the SOUTH of the selection, its northern edge _offset metres away.
+        _bnd = box(_P6_TOP.x - 100.0, _P6_TOP.y - _offset - 300.0, _P6_TOP.x + 100.0, _P6_TOP.y - _offset)
     assert not _bnd.contains(_P6_TOP)
     _res = detect_keypoints(_dem6, _bnd)
     _kept6[_offset] = _res
@@ -537,6 +554,7 @@ for _offset, _res in _kept6.items():
             f"{KEYPOINT_BOUNDARY_MARGIN_METERS} m margin"
         )
 _far6 = _kept6[60.0][0]
+assert tuple(_far6["rowcol"]) == (29, 7) and _far6["on_parcel"] is True, (_far6["rowcol"], _far6["on_parcel"])
 print(
     f"Test 6: on the bowl-free landform DEM the unconstrained keypoint lands at {tuple(_kp6['rowcol'])} "
     "(the highest survivor). Kept at 10 m outside (on_parcel=False, distance="
@@ -1034,8 +1052,9 @@ print(
 # selection is the 4.0 one, whatever order the candidates arrive in, run
 # after run. A further exact tie on residual falls to the lowest index.
 # ============================================================================
-def _cand(index, elevation, residual, rejected_by=()):
-    return {"index": index, "elevation_m": elevation, "residual": residual, "rejected_by": list(rejected_by)}
+def _cand(index, elevation, residual, rejected_by=(), on_parcel=True):
+    return {"index": index, "elevation_m": elevation, "residual": residual, "rejected_by": list(rejected_by),
+            "on_parcel": on_parcel}
 
 
 _tie16 = [
@@ -1083,6 +1102,180 @@ print(
 
 
 # ============================================================================
+# ON-PARCEL PREFERENCE (fix #8 in the module docstring). Within the
+# survivors, an on-parcel one is preferred; only a valley with none falls
+# back to its off-parcel survivors, under the same highest-elevation rule.
+#
+# _box_south_of(y) is a boundary covering the whole grid width from y
+# southward -- on the landform DEM (TEST 6's) its northern edge decides which
+# of the fifteen survivors (rows 17-31) are on the parcel, and how far out
+# the rest sit. Row r's centre is at ORIGIN_Y - (r + 0.5) * 5.
+# ============================================================================
+def _box_south_of(y):
+    return box(ORIGIN_X - 100.0, ORIGIN_Y - _rows1 * RES[1] - 100.0, ORIGIN_X + _cols1 * RES[0] + 100.0, y)
+
+
+def _row_y(r):
+    return ORIGIN_Y - (r + 0.5) * RES[1]
+
+
+# ============================================================================
+# TEST 18 -- Mixed survivor set: the highest ON-parcel survivor is selected,
+# though the highest survivor overall is OFF parcel.
+#
+# Northern edge between rows 19 and 20. All fifteen survivors still pass
+# every filter (rows 17-19 sit 12.5, 7.5 and 2.5 m out, inside the margin);
+# rows 20-31 are on the parcel. The highest survivor overall is (17, 7) at
+# 132.0 m, 12.5 m OUTSIDE the boundary -- the previous rule's selection. The
+# highest ON-parcel survivor is (20, 7) at 120.0 m, and it is selected:
+# on-parcel precedence sits above elevation, a 12.0 m lower keypoint on
+# ground the owner controls over a higher one past the line.
+# ============================================================================
+_diag18 = {}
+_kps18 = detect_keypoints(_dem6, _box_south_of(_row_y(19.5)), diagnostics=_diag18)
+_rec18 = _diag18["valley_candidates"][0]
+_by18 = {_c["index"]: _c for _c in _rec18["candidates"]}
+_surv18 = [_c for _c in _rec18["candidates"] if not _c["rejected_by"]]
+assert [_c["index"] for _c in _surv18] == list(range(17, 32)), "the same fifteen survivors as the full boundary"
+assert _survivor_record(_diag18) == _D1F3_DEM6_SURVIVORS, "byte-identical to the previous commits' set"
+assert [_c["index"] for _c in _surv18 if not _c["on_parcel"]] == [17, 18, 19]
+assert _by18[17]["elevation_m"] == 132.0 and abs(_by18[17]["distance_outside_boundary_m"] - 12.5) < 1e-6
+assert _by18[20]["elevation_m"] == 120.0 and _by18[20]["on_parcel"] is True
+assert _rec18["highest_survivor_index"] == 17, "the previous rule's selection: highest overall, off parcel"
+assert _rec18["selected_index"] == 20 and kd.select_keypoint_candidate(_rec18["candidates"]) is _by18[20]
+assert _rec18["survivors_on_parcel"] == 12 and _rec18["survivors_off_parcel"] == 3
+assert _rec18["selection_branch"] == kd.SELECTION_ON_PARCEL and _rec18["parcel_preference_moved"] is True
+assert _diag18["parcel_preference_moved_valleys"] == 1 and _diag18["off_parcel_fallback_valleys"] == 0
+assert [(tuple(_k["rowcol"]), _k["on_parcel"], _k["distance_outside_boundary_m"]) for _k in _kps18] == [
+    ((20, 7), True, 0.0)
+]
+print(
+    f"Test 18: survivors on parcel {_rec18['survivors_on_parcel']}, off {_rec18['survivors_off_parcel']}; "
+    f"the highest overall is (17, 7) at {_by18[17]['elevation_m']} m, "
+    f"{_by18[17]['distance_outside_boundary_m']:.1f} m outside -- the highest ON-parcel one, (20, 7) at "
+    f"{_by18[20]['elevation_m']} m, is selected (branch {_rec18['selection_branch']})."
+)
+
+
+# ============================================================================
+# TEST 19 -- All survivors on parcel: the selection is the previous rule's,
+# unchanged. Synthetic (the full boundary, TEST 14's run) and on the
+# reference property, where valleys 8 and 4 must not move.
+#
+# Reference valley 4 is NOT an all-on-parcel set: its lower block (indices
+# 54-57) sits 5.2-5.9 m outside the boundary. It is pinned here anyway
+# because its highest survivor, index 33, is on the parcel, so the
+# preference cannot move it -- the property's only mixed set, and a
+# no-op one.
+# ============================================================================
+assert _rec14["survivors_on_parcel"] == 15 and _rec14["survivors_off_parcel"] == 0
+assert _rec14["selection_branch"] == kd.SELECTION_ON_PARCEL
+assert _rec14["selected_index"] == _rec14["highest_survivor_index"] == 17 and not _rec14["parcel_preference_moved"]
+_ref_by_valley = {_rec["valley_id"]: _rec for _rec in _ref_diag["valley_candidates"]}
+_REF_PARTITION = {
+    # valley: (on, off, branch, selected index = the previous rule's)
+    2: (0, 2, kd.SELECTION_OFF_PARCEL_FALLBACK, 40),
+    4: (9, 4, kd.SELECTION_ON_PARCEL, 33),
+    8: (13, 0, kd.SELECTION_ON_PARCEL, 13),
+}
+for _vid, (_on, _off, _branch, _sel) in _REF_PARTITION.items():
+    _rec = _ref_by_valley[_vid]
+    assert (_rec["survivors_on_parcel"], _rec["survivors_off_parcel"], _rec["selection_branch"]) == (
+        _on, _off, _branch
+    ), (_vid, _rec["survivors_on_parcel"], _rec["survivors_off_parcel"], _rec["selection_branch"])
+    assert _rec["selected_index"] == _rec["highest_survivor_index"] == _sel, (_vid, _rec["selected_index"])
+    assert not _rec["parcel_preference_moved"]
+assert _ref_diag["parcel_preference_moved_valleys"] == 0 and _ref_diag["off_parcel_fallback_valleys"] == 1
+print(
+    "Test 19: with every survivor on parcel the selection is the previous rule's ((17, 7) on the landform "
+    "valley); on the reference property valley 8 (13 on / 0 off) stays at idx 13 and valley 4 (9 on / 4 "
+    "off, its highest on parcel) at idx 33 -- nothing moves."
+)
+
+
+# ============================================================================
+# TEST 20 -- All survivors off parcel: the fallback fires, the highest
+# off-parcel survivor is selected, and the valley is NOT dropped.
+#
+# Northern edge 1 m south of row 31's centre: rows 27-31 sit 21, 16, 11, 6
+# and 1 m out and survive; row 26 (26 m) and everything above it fall to the
+# margin. No survivor is on the parcel, so the highest off-parcel one,
+# (27, 7) at 102.5 m, 21.0 m out, is the keypoint, flagged off parcel with
+# its distance on the record. Reference valley 2 is the real case: 0 on /
+# 2 off (24.19 and 19.55 m), index 40 selected, 24.19 m out.
+# ============================================================================
+_diag20 = {}
+_kps20 = detect_keypoints(_dem6, _box_south_of(_row_y(31) - 1.0), diagnostics=_diag20)
+_rec20 = _diag20["valley_candidates"][0]
+_surv20 = [_c for _c in _rec20["candidates"] if not _c["rejected_by"]]
+assert [_c["index"] for _c in _surv20] == [27, 28, 29, 30, 31]
+assert _survivor_record(_diag20) == _D1F3_DEM6_SURVIVORS[10:], "the margin narrows the set; nothing else moves"
+assert not any(_c["on_parcel"] for _c in _surv20)
+assert _rec20["survivors_on_parcel"] == 0 and _rec20["survivors_off_parcel"] == 5
+assert _rec20["selection_branch"] == kd.SELECTION_OFF_PARCEL_FALLBACK and _rec20["outcome"] == "selected"
+assert _rec20["selected_index"] == _rec20["highest_survivor_index"] == 27
+assert _rec20["selected_on_parcel"] is False and abs(_rec20["selected_distance_outside_boundary_m"] - 21.0) < 1e-6
+assert _diag20["off_parcel_fallback_valleys"] == 1 and _diag20["surviving"] == 1
+assert len(_kps20) == 1, "a valley with only off-parcel survivors keeps its keypoint"
+assert tuple(_kps20[0]["rowcol"]) == (27, 7) and _kps20[0]["elevation_m"] == 102.5
+assert _kps20[0]["on_parcel"] is False and _kps20[0]["distance_outside_boundary_m"] == 21.0
+_rec20ref = _ref_by_valley[2]
+_ref2 = [_k for _k in _ref_kps if _k["valley_id"] == 2]
+assert len(_ref2) == 1 and _ref2[0]["on_parcel"] is False and _ref2[0]["distance_outside_boundary_m"] == 24.19
+assert sorted(round(_c["distance_outside_boundary_m"], 2) for _c in _rec20ref["candidates"] if not _c["rejected_by"]) == [
+    19.55, 24.19
+]
+assert round(_rec20ref["selected_distance_outside_boundary_m"], 2) == 24.19
+print(
+    f"Test 20: with no survivor on parcel ({_rec20['survivors_off_parcel']} off) the fallback selects "
+    f"(27, 7) at {_kps20[0]['elevation_m']} m, {_kps20[0]['distance_outside_boundary_m']} m out, flagged "
+    f"on_parcel={_kps20[0]['on_parcel']}; the valley keeps its keypoint. Reference valley 2 the same: "
+    f"idx 40, {_ref2[0]['distance_outside_boundary_m']} m out."
+)
+
+
+# ============================================================================
+# TEST 21 -- Tiebreak within each partition: lowest residual, then lowest
+# index, in every ordering.
+#
+# On-parcel branch: three on-parcel survivors tied at 120.0 m (residuals
+# 9.0, 4.0, 7.0) and a lower on-parcel one fitting best (110.0 m, 1.0); an
+# OFF-parcel survivor at 130.0 m that the preference must pass over; a
+# REJECTED on-parcel candidate at 140.0 m that must be ignored. -> index 6.
+# Fallback branch: the same shape with every survivor off parcel, plus a
+# rejected ON-parcel candidate at 140.0 m -- rejected, so it must not count
+# as an on-parcel survivor and must not stop the fallback. -> index 6.
+# An exact tie on residual falls to the lowest index in both branches.
+# ============================================================================
+_on21 = [
+    _cand(2, 140.0, 0.1, [kd.REJECT_SLOPE_DROP], on_parcel=True),
+    _cand(3, 130.0, 0.5, on_parcel=False),
+    _cand(5, 120.0, 9.0), _cand(6, 120.0, 4.0), _cand(7, 120.0, 7.0), _cand(9, 110.0, 1.0),
+]
+_off21 = [
+    _cand(2, 140.0, 0.1, [kd.REJECT_SLOPE_DROP], on_parcel=True),
+    _cand(5, 120.0, 9.0, on_parcel=False), _cand(6, 120.0, 4.0, on_parcel=False),
+    _cand(7, 120.0, 7.0, on_parcel=False), _cand(9, 110.0, 1.0, on_parcel=False),
+]
+for _perm in itertools.permutations(_on21):
+    assert kd.select_keypoint_candidate(list(_perm))["index"] == 6
+for _perm in itertools.permutations(_off21):
+    _sel21 = kd.select_keypoint_candidate(list(_perm))
+    assert _sel21["index"] == 6 and _sel21["on_parcel"] is False
+for _flag in (True, False):
+    _exact21 = [_cand(8, 120.0, 4.0, on_parcel=_flag), _cand(6, 120.0, 4.0, on_parcel=_flag),
+                _cand(7, 119.0, 0.1, on_parcel=_flag)]
+    for _perm in itertools.permutations(_exact21):
+        assert kd.select_keypoint_candidate(list(_perm))["index"] == 6
+print(
+    "Test 21: tied at 120.0 m, the lowest residual (4.0) wins inside the on-parcel set -- over a higher "
+    "off-parcel survivor and a higher rejected one -- and inside the off-parcel set when the fallback "
+    "fires, where a rejected on-parcel candidate does not count; an exact residual tie falls to the "
+    "lowest index in both."
+)
+
+
+# ============================================================================
 # TEST 15 -- Output contract: one keypoint per valley, and every field a
 # downstream consumer reads is present with its retired type.
 #
@@ -1107,7 +1300,7 @@ _CONSUMER_FIELDS = {
     "confidence": str, "confidence_notes": str,
 }
 assert set(_CONSUMER_FIELDS) == _EXPECTED_KEYS
-for _kps in (_kps1, _kps5, _kps10, _kps17, _ref_kps):
+for _kps in (_kps1, _kps5, _kps10, _kps17, _kps18, _kps20, _ref_kps):
     _vids = [_k["valley_id"] for _k in _kps]
     assert len(_vids) == len(set(_vids)), f"more than one keypoint for a valley: {_vids}"
     assert [_k["id"] for _k in _kps] == list(range(len(_kps)))

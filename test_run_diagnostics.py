@@ -2229,7 +2229,7 @@ import fetch_attempts
 # The pause between retry attempts, shortened for the same reason
 # test_fetch_attempts.py shortens it: the loop MEASURES its pause and the
 # record reads the measurement, and that is true at 50 ms as at 2 s.
-assert fetch_attempts.RETRY_PAUSE_SECONDS == 2.0, fetch_attempts.RETRY_PAUSE_SECONDS
+assert fetch_attempts.RETRY_PAUSE_SECONDS == 15.0, fetch_attempts.RETRY_PAUSE_SECONDS
 fetch_attempts.RETRY_PAUSE_SECONDS = 0.05
 _TWO_PAUSES_MS = 2 * fetch_attempts.RETRY_PAUSE_SECONDS * 1000.0
 
@@ -2680,11 +2680,12 @@ assert any("times 10 of 10 declared layers" in line for line in _fetch_lines), _
 # branch 12 (the Soils section's survey query and its bedrock geology),
 # fifteen since branch 13 (the layout map's NAIP imagery), twenty-one
 # since branch 17 (the Site overview's context DEM, streams and roads, its
-# county, buildings and transmission lines); a twenty-second added without
-# a timer would read "21 of 22" and fail here.
+# county, buildings and transmission lines), twenty since the NHD
+# reliability work moved springs onto Layer 1's water fetch; one added
+# without a timer would read "20 of 21" and fail here.
 assert any("report_data.fetch_report_data calls time_layer" in line for line in _fetch_lines), _fetch_lines
 assert any(
-    "report_data.fetch_report_data times 21 of 21 declared report layers" in line for line in _fetch_lines
+    "report_data.fetch_report_data times 20 of 20 declared report layers" in line for line in _fetch_lines
 ), _fetch_lines
 assert any("build_session_context calls begin_fetch" in line for line in _fetch_lines)
 assert any("build_session_context calls record_fetch" in line for line in _fetch_lines)

@@ -140,14 +140,22 @@ PUBLISHED_ATTRIBUTES = (ATTEMPTS_ATTRIBUTE, SLEEP_ATTRIBUTE, DETAIL_ATTRIBUTE)
 
 # THE PAUSE BETWEEN ATTEMPTS, in seconds. Every retry loop behind the
 # fetch layers sleeps for this long between one failed attempt and the
-# next -- the literal 2 the loops used to carry each in their own copy.
+# next. 15 rather than the 2 the loops originally carried: the NHD
+# reliability probes measured hydro.nationalmap.gov's failures as an
+# overloaded gateway shedding load -- most 5xx answers came back in under
+# 11 seconds, and an immediate retry failed again 14 times out of 17,
+# while a request minutes later was usually clean. A 2-second pause
+# therefore retried straight back into the same shedding episode and
+# bought almost nothing; 15 seconds clears the sub-11-second shedding
+# replies by an honest margin without doubling a failing layer's worst
+# case (two pauses add 30 s against retry timeouts of 30+60+90 s).
 # One name so a test can shorten it (test_fetch_attempts.py measures the
-# pause; it does not need the pause to be two seconds long to do so) and
-# so an offline harness can zero it: an unreachable host costs three
-# connection refusals and nothing else, instead of three refusals and four
-# seconds asleep per fetch. The budget, the backoff and the progressive
-# timeouts are unchanged; only the length of the pause is a name now.
-RETRY_PAUSE_SECONDS = 2.0
+# pause; it does not need the pause to be fifteen seconds long to do so)
+# and so an offline harness can zero it: an unreachable host costs three
+# connection refusals and nothing else, instead of three refusals and
+# half a minute asleep per fetch. The budget, the backoff and the
+# progressive timeouts are unchanged; only the pause is longer.
+RETRY_PAUSE_SECONDS = 15.0
 
 # The calling thread's open ledger (`ledger`) and its published totals
 # (`published`, a {module name: {attribute: value}}). Both thread-local

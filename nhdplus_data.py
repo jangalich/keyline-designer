@@ -37,6 +37,7 @@ import math
 import requests
 
 import fetch_attempts
+import host_breaker
 
 NHDPLUS_HR_BASE = "https://hydro.nationalmap.gov/arcgis/rest/services/NHDPlus_HR/MapServer"
 LAYER_NETWORK_FLOWLINE = 3
@@ -78,21 +79,29 @@ def get_flowline_attributes_for_boundary(boundary_coordinates: list, buffer_mete
         "returnGeometry": "false",
         "f": "json",
     }
+    url = f"{NHDPLUS_HR_BASE}/{LAYER_NETWORK_FLOWLINE}/query"
+    # Same host as hydrology_data's layers, same circuit: a budget the
+    # water layers just exhausted fails this call instantly instead of
+    # burning another one. Checked outside the try so the retry clause
+    # below cannot catch it. See host_breaker.py.
+    host_breaker.check(url)
     last_error = None
     for attempt in fetch_attempts.attempts(2):
         timeout = 30 + attempt * 30
         try:
-            response = requests.get(f"{NHDPLUS_HR_BASE}/{LAYER_NETWORK_FLOWLINE}/query", params=params, timeout=timeout)
+            response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
             data = response.json()
             if isinstance(data, dict) and "error" in data:
                 raise requests.exceptions.HTTPError(f"ArcGIS error: {data['error']}")
+            host_breaker.record_success(url)
             return data
         except requests.exceptions.RequestException as exc:
             last_error = exc
             if attempt < 2:
                 fetch_attempts.sleep(fetch_attempts.RETRY_PAUSE_SECONDS)
                 continue
+            host_breaker.record_failure(url)
             raise last_error
 
 
