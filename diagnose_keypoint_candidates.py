@@ -42,6 +42,13 @@ WHAT IT ANSWERS.
      it, so this gap is the cost of the rule, printed every run. If it is
      routinely large, the flagged within-a-fraction-of-best-drop rule
      (keypoint_detection.py module docstring) is the follow-up.
+  8. THE ON-PARCEL PARTITION. Selection prefers a survivor ON the parcel
+     and falls back to the off-parcel survivors only when there are none
+     (select_keypoint_candidate()). Per valley: how many survivors are on
+     and off the parcel, which branch fired, the selection before the
+     preference (the highest survivor overall) and after it, and -- when
+     the fallback fires -- the selected split's distance outside the
+     boundary, so a fallback keypoint is never read as an on-parcel one.
 
 The ONE figure computed here rather than read is the on-parcel elevation
 range in 6: the detector has no reason to know it, and it is a plain
@@ -136,8 +143,10 @@ def main() -> int:
               f"global argmin idx {record['global_argmin_index']}, "
               f"retired (pre-fill-gate) best idx {record['pre_fill_best_index']}, "
               f"fit-best survivor idx {record['fit_best_survivor_index']}, "
-              f"selected (highest survivor) idx {record['selected_index']}")
-        print(f"  survivor blocks (first-last index): {record['survivor_blocks']}")
+              f"selected idx {record['selected_index']}")
+        print(f"  survivor blocks (first-last index): {record['survivor_blocks']}; "
+              f"survivors on parcel {record['survivors_on_parcel']}, off {record['survivors_off_parcel']}; "
+              f"branch {record['selection_branch']}")
         print(f"  {'idx':>4} {'cell':>10} {'elev m':>8} {'drop %':>7} {'resid':>11} {'fill m':>7} "
               f"{'out m':>6}  outcome")
         for cand in record["candidates"]:
@@ -191,7 +200,7 @@ def main() -> int:
 
     # 7. The selection rule's effect.
     print()
-    print(f"SELECTION: highest survivor vs the residual rule's pick from the same survivors "
+    print(f"SELECTION: selected survivor vs the residual rule's pick from the same survivors "
           f"(moved in {diagnostics['selection_moved_valleys']} valley(s)); parcel range {lo:.2f} - {hi:.2f} m")
     for record in records:
         if record["selected_index"] is None:
@@ -202,7 +211,7 @@ def main() -> int:
         where = "on parcel" if new["on_parcel"] else f"{new['distance_outside_boundary_m']:.1f} m out"
         print(f"  valley {record['valley_id']}: residual rule idx {old['index']} {old['rowcol']} "
               f"{old['elevation_m']:.2f} m ({_position(old['elevation_m'], lo, hi, on_parcel)}) -> "
-              f"highest survivor idx {new['index']} {new['rowcol']} {new['elevation_m']:.2f} m "
+              f"selected idx {new['index']} {new['rowcol']} {new['elevation_m']:.2f} m "
               f"({_position(new['elevation_m'], lo, hi, on_parcel)}), rise {new['elevation_m'] - old['elevation_m']:+.2f} m, "
               f"{where}")
         above = by_index.get(new["index"] - 1)
@@ -211,6 +220,28 @@ def main() -> int:
         print(f"    drop gap: selected {record['selected_slope_drop_pct']:.2f}% vs best survivor "
               f"{record['best_survivor_slope_drop_pct']:.2f}% (idx {record['best_survivor_slope_drop_index']}), "
               f"gap {gap:.2f} pts; {edge}; blocks {record['survivor_blocks']}")
+
+    # 8. The on-parcel partition.
+    print()
+    print(f"ON-PARCEL PARTITION: highest on-parcel survivor, else the highest off-parcel one "
+          f"(fallback fired in {diagnostics['off_parcel_fallback_valleys']} valley(s); the preference moved "
+          f"the selection off the highest survivor in {diagnostics['parcel_preference_moved_valleys']})")
+    for record in records:
+        if record["selected_index"] is None:
+            print(f"  valley {record['valley_id']}: no survivor, no keypoint ({record['outcome']})")
+            continue
+        by_index = {cand["index"]: cand for cand in record["candidates"]}
+        before, after = by_index[record["highest_survivor_index"]], by_index[record["selected_index"]]
+        if record["selection_branch"] == kd.SELECTION_OFF_PARCEL_FALLBACK:
+            where = (f"OFF PARCEL, {record['selected_distance_outside_boundary_m']:.2f} m outside the boundary "
+                     f"(no survivor on parcel)")
+        else:
+            where = "on parcel"
+        moved = "MOVED" if record["parcel_preference_moved"] else "unchanged"
+        print(f"  valley {record['valley_id']}: survivors on parcel {record['survivors_on_parcel']}, "
+              f"off {record['survivors_off_parcel']}; branch {record['selection_branch']}; "
+              f"highest survivor idx {before['index']} {before['elevation_m']:.2f} m -> selected idx "
+              f"{after['index']} {after['rowcol']} {after['elevation_m']:.2f} m ({moved}); {where}")
 
     # 6. Elevation.
     print()
