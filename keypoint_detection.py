@@ -526,9 +526,12 @@ def keypoint_split_candidates(
     returns [].
 
     The global argmin of 'residual' over this set is the profile's best two-
-    segment split with no filter applied; the keypoint the detector returns is
-    the best-residual candidate that survives every filter
-    (select_keypoint_candidate()).
+    segment split with no filter applied. It is NOT what the detector
+    returns: detect_keypoints() adds each candidate's cell, raw elevation and
+    on-parcel figures, applies every filter to every candidate, and selects
+    among the survivors by elevation, preferring the on-parcel ones
+    (select_keypoint_candidate()). The residual stays on each candidate as
+    that selection's tiebreak.
     """
     n = len(elevation)
     candidates = []
