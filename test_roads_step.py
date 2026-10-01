@@ -98,7 +98,7 @@ from reference_fixture import BOUNDARY_POLYGON_UTM, CRS, PARCEL_ACRES, REAL_BOUN
 # them without running this file's tests first.
 from roads_step_fixture import (  # noqa: E402,F401
     _boundary_point,
-    NO_NETWORK_CEILING_METERS_PER_ACRE,
+    NO_NETWORK_SERVICE_RADIUS_METERS,
     ACCESS_A,
     ACCESS_B,
     ACCESS_C,
@@ -210,7 +210,7 @@ assert step_registry.get_step("water").accumulate is None
 # of any road cell, so every served-acreage and network-shape figure in
 # this file moves with it -- see that constant's own comment for the
 # measured before/after on this very parcel.
-assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 250.0
+assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 125.0
 assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 50.0
 assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
     "the network-length floor is deleted, not merely unused: a constant left "

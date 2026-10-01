@@ -260,27 +260,47 @@ from road_cost_path import backtrace_route, cost_distance_field
 # ever routes a network that clamps at 0.0; this one does not.
 PRODUCTION_SERVICE_RADIUS_METERS = 50.0
 
-# Stopping threshold, in real meters of NEW road construction per newly
-# served acre -- once the cheapest remaining extension (by
-# accumulated_cost per acre, see SELECT above) would cost more real
-# distance than this per acre it newly serves, the router stops rather
-# than accepting it. Deliberately a real-distance figure, not a cost
-# figure -- see this module's own docstring for why SELECT and STOP use
-# different ratios.
+# Per-candidate qualifying ceiling, in real meters of NEW road
+# construction per newly served acre -- every branch after the
+# guaranteed trunk must individually pay no more than this (see QUALIFY
+# in route_road_network()'s own docstring; it filters candidates, it
+# does not terminate the loop). Deliberately a real-distance figure, not
+# a cost figure -- see this module's own docstring for why QUALIFY and
+# SELECT use different ratios.
 #
-# 250.0 is the CURRENT SETTING, and it is a judgement, not a derivation --
-# no closed form produces it and no sweep has validated it. The history
-# it sits in: 200 was the original figure and stopped the router while
-# real, close production ground was still unserved; sweeping this ceiling
-# against a real reference parcel and comparing the rendered networks by
-# eye then put 500 ahead of 200 on that terrain. 250 sits between the two,
-# tightening the ceiling back toward the figure a person would actually
-# defend per acre without returning to the one that under-served.
-# CONFIGURABLE, and carries the same unvalidated-starting-value caveat
-# every other threshold here does -- one reference parcel read by eye is a
-# better starting point than a guess, not a validated figure, and this
-# value has had less of even that than the 500 it replaces.
-MAX_ROAD_METERS_PER_SERVED_ACRE = 250.0
+# 125.0 IS A MEASURED ELBOW, NOT A JUDGEMENT -- the first threshold in
+# this module validated by an actual sweep
+# (diagnose_road_network_quantity.py: flat/rolling/steep/mixed synthetic
+# terrain at 10/25/50/100 acres, ceilings 75-250, radius 50, leaf
+# pruning 50). What the sweep showed, in both directions:
+#
+#   BELOW ~125 real mainline corridors start dropping out: on 100 flat
+#   acres the ceiling at 100 loses a whole collector (served falls
+#   97% -> 88%) that 125 keeps.
+#
+#   ABOVE 125 the extra road is nook-chasing, not access: 125 -> 250
+#   adds only +2-5% served acreage while adding +10-25% length and
+#   roughly DOUBLING branch count (mixed-100ac: 25 -> 55 branches for
+#   91% -> 96% served) -- exactly the "serves every nook and cranny"
+#   overbuild this module's skeleton-not-blueprint contract excludes.
+#
+# At 125, across every swept terrain and size, the network serves
+# 82-97% of reachable demand at 38-73 m of new road per served acre.
+#
+# The history this closes out: 200 (original) and 100 both ZEROED OUT
+# real parcels under the old stop-at-first-violation rule -- not because
+# the values were wrong but because the rule was fragile (one
+# over-ceiling stub ended growth with the best branches still ahead;
+# the sweep measured a steep 100-acre parcel stopping at 2 branches
+# with 133 individually-qualifying branches cut off behind one stub).
+# 500, then 250, were eyeball compromises that dodged the zero-network
+# failure by letting everything through, which is how networks got too
+# much road. Per-candidate filtering plus the guaranteed trunk removed
+# the failure mode; this value is then free to sit where the marginal
+# road actually stops being worth drawing. CONFIGURABLE -- synthetic
+# terrain is still not a survey, and the figure deserves re-checking
+# against real parcels as they accumulate.
+MAX_ROAD_METERS_PER_SERVED_ACRE = 125.0
 
 # Real-meters ceiling on the water spur's own NEW construction length
 # (existing-road cells the spur happens to reuse don't count against

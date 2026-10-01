@@ -235,7 +235,46 @@ def _boundary_point(edge_index: int, fraction: float) -> tuple:
 # fail today. It shares edge 1 with D, at a different fraction, which the
 # comment above already anticipated: there is no edge that refuses along
 # its whole length.
-NO_NETWORK_CEILING_METERS_PER_ACRE = 120.0
+#
+# AND THE CEILING PIN IS RETIRED OUTRIGHT, ENDING THE SAGA ABOVE. The
+# router's per-acre ceiling became a per-candidate FILTER with a
+# GUARANTEED, ceiling-exempt trunk (road_network_router.
+# route_road_network(), the QUALIFY/GUARANTEED TRUNK contract): an
+# access point with reachable demand beyond its own baseline disc now
+# ALWAYS routes at least one branch, at ANY ceiling, BY DESIGN. No
+# surveyable ceiling can make this parcel refuse any more -- which is
+# the product behavior working, not a fixture problem, and it is why
+# four consecutive re-surveys above kept finding the refusing point
+# had moved: a refusal that rests on one candidate's ratio was always
+# an accident of ordering. The one refusal that remains REAL at this
+# access point is the anchor's own baseline disc serving every acre of
+# demand ("all_demand_served", branches=[]), so that is what section
+# 15 pins now, through service_radius_meters instead of the ceiling.
+#
+# MEASURED, NOT SURVEYED BY SWEEP -- the new pin rests on plain
+# geometry, which is the whole improvement. Max real distance from each
+# point's own snapped anchor cell to the farthest production demand
+# cell, over the exact cost surface and committed-production demand
+# mask build_road_network() assembles after upstream() (one capture of
+# build_road_network()'s own inputs, then _snap_anchor_to_eligible_
+# cell() + pixel_center_xy() distances per access point):
+#
+#     A (west)        275.5 m
+#     B (north-east)  288.6 m
+#     C (north)       290.0 m
+#     D (south)       264.4 m
+#     NO_NETWORK      247.0 m   <- the parcel's most demand-central edge point
+#
+# Any radius in (247.0, 264.4) makes NO_NETWORK's baseline disc cover
+# every demand cell (routes NOTHING, all_demand_served) while every
+# demand mask still holds cells beyond A/B/C/D's own discs (each still
+# routes -- guaranteed, now that reachable-demand-means-a-trunk holds).
+# 255.0 sits mid-window, ~8 m from either end -- over a cell and a half
+# of margin against the upstream drift this comment's own history
+# documents. If the pond exclusion or the production patches move
+# again, re-run the distance measurement above rather than a ceiling
+# sweep: five snap-and-measure passes, not 120 routing passes.
+NO_NETWORK_SERVICE_RADIUS_METERS = 255.0
 ACCESS_A = _boundary_point(0, 0.85)
 ACCESS_B = _boundary_point(3, 0.85)
 ACCESS_C = _boundary_point(4, 0.50)

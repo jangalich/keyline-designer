@@ -99,7 +99,7 @@ def _route(*args, **kwargs):
 
 # The shipped defaults, which the fixtures deliberately do NOT use.
 assert PRODUCTION_SERVICE_RADIUS_METERS == 50.0
-assert MAX_ROAD_METERS_PER_SERVED_ACRE == 250.0
+assert MAX_ROAD_METERS_PER_SERVED_ACRE == 125.0
 assert MIN_LEAF_BRANCH_METERS == 50.0
 
 RESOLUTION = (5.0, 5.0)
