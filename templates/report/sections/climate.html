@@ -37,6 +37,6 @@
 {%- if section.severe_weather %}
     {% call c9.captioned(section.severe_weather.caption) %}{{ c5.data_table(section.severe_weather.table) }}{% endcall %}
 {%- endif %}
-    {{ c6.source_footer({"lines": section.sources}) }}
+    {{ c6.source_footer({"lines": section.sources}, refit="climate.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

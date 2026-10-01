@@ -46,6 +46,6 @@
 {%- else %}
     {{ c9.unavailable(section.valley_table_unavailable) }}
 {%- endif %}
-    {{ c6.source_footer(section.footer) }}
+    {{ c6.source_footer(section.footer, refit="landform.sources", moved="sources" in (section.refit or [])) }}
   </div>
 </section>

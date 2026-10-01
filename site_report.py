@@ -71,6 +71,20 @@ fewer near-empty ones (a moved block can push a longer one in its place:
 the reference parcel's wetness page is 96% full). A report whose blocks
 all fit is laid out once and is exactly what it was.
 
+THE SOURCE FOOTER IS THE SAME DEFECT BY A SPLITTING MECHANISM (branch
+28): a run of one-line source entries at the very end of a section, it
+splits where a whole block moves, and a live render left its tail --
+two source lines -- alone on a page. The stylesheet handles the break
+(report.css: the footer binds to the block above it and its lines split
+only three or more to a side, one paragraph <br>-separated so the rules
+count the whole run), and every footer is marked "<section>.sources":
+pushed_blocks() reads a page that holds nothing but a footer's lines as
+pushed, and the remedy (refit "sources", source-footer--whole) moves the
+footer whole, bound above, so it takes the section's tail along for
+company. The Site overview's headroom is the context map, shrunk at this
+branch (overview_section.CONTEXT_FRAME) so the one marginal page fits
+with a failed-source note printed.
+
 THE BACK MATTER (branch 17, back_matter.py): the vintage table and the
 methods note, built after every section from the footers and methods
 structures the sections carry. The label and date also run in every section page's
@@ -364,15 +378,41 @@ def _boxes(box):
 
 
 def pushed_blocks(document) -> list:
-    """Every data-refit block that did not start on its page block's first
-    page, as its data-refit value ("<section>.<remedy>"), in document order:
-    the page before it ran out, and it was carried to a page of its own."""
+    """Every data-refit block that landed on a page of its own, as its
+    data-refit value ("<section>.<remedy>"), in document order. Two kinds
+    of block, two readings of "its own": a block inside a page block that
+    did not start on that page block's first page -- the page before it
+    ran out, and it was carried over whole (the stream table, the
+    soil-test sentence); and a source footer (a "<section>.sources"
+    marker, branch 28) some page shows nothing but -- its tail after a
+    split the orphans rule allowed, or the whole footer forced over. A
+    footer is the last block of its section, so the page-block reading
+    cannot see it: a multi-page section puts it after the first page
+    legitimately, with the section's content around it."""
     first_page = {}
-    for number, page in enumerate(document.pages, start=1):
-        for box in _boxes(page._page_box):
-            element = getattr(box, "element", None)
-            if element is not None and element not in first_page:
+    footer_pages = {}  # a *.sources element -> pages setting its text
+    other_pages = set()  # pages setting any text outside those footers
+
+    def scan(box, number, footer):
+        if type(box).__name__ == "MarginBox":  # the running footer is on every page
+            return
+        element = getattr(box, "element", None)
+        if element is not None:
+            if element not in first_page:
                 first_page[element] = number
+            refit = element.get("data-refit")
+            if refit and refit.endswith(".sources"):
+                footer = element
+        if type(box).__name__ == "TextBox" and (getattr(box, "text", "") or "").strip():
+            if footer is not None:
+                footer_pages.setdefault(footer, set()).add(number)
+            else:
+                other_pages.add(number)
+        for child in getattr(box, "children", []) or []:
+            scan(child, number, footer)
+
+    for number, page in enumerate(document.pages, start=1):
+        scan(page._page_box, number, None)
     root = next((e for e in first_page if e.tag == "html"), None)
     if root is None:
         return []
@@ -383,7 +423,10 @@ def pushed_blocks(document) -> list:
         if any(name in classes for name in PAGE_BLOCKS):
             block = element
         refit = element.get("data-refit")
-        if refit and block is not None and element in first_page and block in first_page \
+        if refit and refit.endswith(".sources"):
+            if any(number not in other_pages for number in footer_pages.get(element, ())):
+                pushed.append(refit)
+        elif refit and block is not None and element in first_page and block in first_page \
                 and first_page[element] > first_page[block]:
             pushed.append(refit)
         for child in element:

@@ -63,7 +63,14 @@ METERS_PER_MILE = 1609.344
 
 # The context map's frame: near-square, beside the key figures, so it
 # shows about a mile of ground in every direction rather than a strip.
-CONTEXT_FRAME = (318.0, 300.0)
+# SHRUNK AT BRANCH 28, (318, 300) -> (284, 266), both sides so the ground
+# shown keeps its shape: the Overview page sits at the edge of one page,
+# and a failed-source note or one more source line tipped its source
+# block onto a page of its own on a live render. The map is the page's
+# largest item; 34 pt of its height is the headroom that keeps the page
+# whole with a note printed. The window is the context DEM's either way
+# -- the frame's size sets how large it is drawn, not how far it sees.
+CONTEXT_FRAME = (284.0, 266.0)
 CONTOUR_PT = 0.3
 INDEX_CONTOUR_PT = 1.1
 # THE TINT: the ground between index contours, darker as it rises, so the
