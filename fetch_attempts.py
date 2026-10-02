@@ -106,17 +106,59 @@ touched once per attempt plus one `sys._getframe` per helper CALL (not
 per attempt), against a network request with a 30-second timeout. Test 7
 of test_fetch_attempts.py measures it rather than asserting it.
 
-NOTHING HERE RETRIES, SLEEPS LONGER, OR DECIDES ANYTHING. `attempts()`
-yields `range(max_retries + 1)`'s integers and no others; `sleep()` sleeps
-the seconds it is given; `publishes` returns what the function returned
-and re-raises what it raised. The budgets, the backoff and the timeouts
-are exactly where they were.
+NOTHING HERE RETRIES OR SLEEPS LONGER. `attempts()` yields
+`range(max_retries + 1)`'s integers and no others; `sleep()` sleeps the
+seconds it is given; `publishes` returns what the function returned and
+re-raises what it raised. The budgets and the per-attempt timeouts are
+each loop's own, where they always were.
+
+THE ONE THING IT DOES DECIDE: A LAYER'S DEADLINE
+================================================
+The per-request budgets above bound a REQUEST. A layer is several
+requests -- farm_roads three, NWI up to four, NFHL three -- each with its
+own full budget, so a layer's worst case was the SUM of its requests'
+budgets: 630 s for the context map's roads, 840 s for NWI, with nothing
+in between them to say the layer had already waited long enough. The
+transportation-host probe (probe_transportation_host.py) found that on
+carto.nationalmap.gov no request that failed at 30 s ever answered at 60
+or 90, while the retry after the pause recovered every failure it saw;
+NWI behaved the same way. A long per-request budget bought nothing
+there, and summing it across requests multiplied the nothing.
+
+So a layer entry point may open a DEADLINE, shared by every request it
+makes on this thread and on any worker thread the ledger is carried to:
+
+    with fetch_attempts.deadline(LAYER_DEADLINE_SECONDS):
+        ...the layer's requests...
+
+Under a deadline, `attempts()` raises FetchDeadlineExceeded instead of
+yielding an attempt the deadline has already passed; `timeout(seconds)`
+clamps a per-attempt timeout to the time remaining, so the last attempt
+cannot overrun the layer; and `sleep()` raises instead of pausing into a
+retry there is no time left for. FetchDeadlineExceeded is a requests
+Timeout, so every layer's existing `except RequestException` policy --
+hard-fail at Layer 1, degrade at the report layer -- applies unchanged,
+exactly as host_breaker.HostCircuitOpenError is a ConnectionError for
+the same reason. A deadline that is never opened costs one thread-local
+lookup, and a loop that never asks `timeout()` keeps its own timeouts;
+the NHD host's loops (hydrology_data, nhdplus_data) do exactly that,
+because the NHD probes measured slow answers at 36-121 s that the 60 and
+90 s attempts genuinely recover.
+
+CARRIED TO WORKER THREADS. farm_roads_data issues its three queries at
+once. `carried()` hands a worker what this thread has open -- the ledger
+and the deadline -- and `carrying(state)` installs it on the worker for
+the duration, so the three queries count into the layer's one ledger and
+share the layer's one deadline. The ledger takes a lock for that reason.
 """
 
+import contextlib
 import functools
 import sys
 import threading
 import time
+
+import requests
 
 # THE THREE PUBLISHED NAMES. The first is run_diagnostics.ATTEMPTS_
 # ATTRIBUTE's own value, spelled out here rather than imported: this
@@ -173,13 +215,16 @@ class _Ledger:
     stays the layer's TOTAL rather than only the part its own frame made.
     """
 
-    __slots__ = ("attempts", "sleep_ms", "helpers", "parent")
+    __slots__ = ("attempts", "sleep_ms", "helpers", "parent", "_lock")
 
     def __init__(self, parent=None):
         self.attempts = 0
         self.sleep_ms = 0.0
         self.helpers = {}
         self.parent = parent
+        # Worker threads a layer carries this ledger to (see carrying())
+        # write into it at once.
+        self._lock = threading.Lock()
 
     def _row(self, helper) -> dict:
         row = self.helpers.get(helper)
@@ -192,15 +237,18 @@ class _Ledger:
         """One helper CALL started -- not one attempt. Three road layers
         queried once each and one queried three times both total 3
         attempts and are told apart here."""
-        self._row(helper)["calls"] += 1
+        with self._lock:
+            self._row(helper)["calls"] += 1
 
     def attempt(self, helper) -> None:
-        self.attempts += 1
-        self._row(helper)["attempts"] += 1
+        with self._lock:
+            self.attempts += 1
+            self._row(helper)["attempts"] += 1
 
     def slept(self, helper, milliseconds) -> None:
-        self.sleep_ms += milliseconds
-        self._row(helper)["sleep_ms"] += milliseconds
+        with self._lock:
+            self.sleep_ms += milliseconds
+            self._row(helper)["sleep_ms"] += milliseconds
 
     def fold_into_parent(self) -> None:
         parent = self.parent
@@ -254,15 +302,23 @@ def attempts(max_retries: int, helper=None):
     frame when not given, which is how it is always used.
     """
     ledger = getattr(_LOCAL, "ledger", None)
-    if ledger is None:
+    deadline = getattr(_LOCAL, "deadline", None)
+    if ledger is None and deadline is None:
         return range(max_retries + 1)
-    return _counted(ledger, max_retries, _helper_name(2) if helper is None else helper)
+    return _counted(ledger, deadline, max_retries, _helper_name(2) if helper is None else helper)
 
 
-def _counted(ledger, max_retries: int, helper: str):
-    ledger.begin(helper)
+def _counted(ledger, deadline, max_retries: int, helper: str):
+    if ledger is not None:
+        ledger.begin(helper)
     for attempt in range(max_retries + 1):
-        ledger.attempt(helper)
+        # An attempt the layer has no time left for is not started: the
+        # layer's deadline has passed, and the caller's except arm takes
+        # it from here (see FetchDeadlineExceeded).
+        if deadline is not None and time.monotonic() >= deadline:
+            raise FetchDeadlineExceeded(deadline)
+        if ledger is not None:
+            ledger.attempt(helper)
         yield attempt
 
 
@@ -281,6 +337,11 @@ def sleep(seconds: float, helper=None) -> None:
     Sleeps for exactly as long as before either way; the clock is the
     only addition.
     """
+    deadline = getattr(_LOCAL, "deadline", None)
+    if deadline is not None and time.monotonic() + seconds >= deadline:
+        # The retry this pause precedes could not start before the layer's
+        # deadline; raise now rather than sleep the layer's last seconds.
+        raise FetchDeadlineExceeded(deadline)
     ledger = getattr(_LOCAL, "ledger", None)
     if ledger is None:
         time.sleep(seconds)
@@ -291,6 +352,95 @@ def sleep(seconds: float, helper=None) -> None:
         time.sleep(seconds)
     finally:
         ledger.slept(name, (time.perf_counter() - started) * 1000.0)
+
+
+class FetchDeadlineExceeded(requests.exceptions.Timeout):
+    """
+    The layer's deadline passed before this request could be made, or
+    before a retry it was pausing for could start.
+
+    A requests Timeout, deliberately: every fetch layer already catches
+    requests.exceptions.RequestException and already has a policy for it
+    (hard-fail at Layer 1, degrade at the report layer), so the deadline
+    reaches each caller as exactly the failure type its policy was
+    written for -- the same reasoning as host_breaker.HostCircuitOpenError.
+    """
+
+    def __init__(self, deadline: float):
+        self.deadline = deadline
+        super().__init__(f"the layer's fetch deadline passed {time.monotonic() - deadline:.1f} s ago; "
+                         f"no further request is made for it")
+
+
+@contextlib.contextmanager
+def deadline(seconds: float):
+    """
+    Open a deadline `seconds` from now for every request this thread makes
+    inside the block -- and every worker thread the block carries it to
+    (see carried()/carrying()). Nested inside an outer deadline, the
+    earlier of the two holds; a deadline never extends one already open.
+
+    Opened by a LAYER ENTRY POINT around its requests, so the layer's
+    worst case is this number whatever its requests' budgets sum to.
+    """
+    outer = getattr(_LOCAL, "deadline", None)
+    proposed = time.monotonic() + seconds
+    _LOCAL.deadline = proposed if outer is None else min(outer, proposed)
+    try:
+        yield
+    finally:
+        _LOCAL.deadline = outer
+
+
+def remaining() -> float:
+    """Seconds left on this thread's deadline, or None with none open.
+    Zero or negative means it has passed."""
+    deadline_at = getattr(_LOCAL, "deadline", None)
+    return None if deadline_at is None else deadline_at - time.monotonic()
+
+
+def timeout(seconds: float) -> float:
+    """
+    A per-attempt timeout, clamped to the deadline.
+
+        response = requests.get(url, params=params, timeout=fetch_attempts.timeout(30))
+
+    Returns `seconds` with no deadline open, the time remaining when that
+    is shorter, and raises FetchDeadlineExceeded when none remains -- so
+    an attempt never waits past the layer's deadline, and the deadline is
+    checked at the moment the request is about to be made rather than
+    only when the loop began.
+    """
+    left = remaining()
+    if left is None:
+        return seconds
+    if left <= 0:
+        raise FetchDeadlineExceeded(_LOCAL.deadline)
+    return min(seconds, left)
+
+
+def carried():
+    """What this thread has open, for a worker: (ledger, deadline). Hand
+    it to carrying() on the worker. Either may be None."""
+    return (getattr(_LOCAL, "ledger", None), getattr(_LOCAL, "deadline", None))
+
+
+@contextlib.contextmanager
+def carrying(state):
+    """
+    Install a caller's open ledger and deadline on THIS thread for the
+    block, so a worker's attempts count into the layer's ledger and its
+    requests share the layer's deadline. Restores whatever the thread had
+    afterwards. The ledger is locked for exactly this.
+    """
+    ledger, deadline_at = state
+    previous = (getattr(_LOCAL, "ledger", None), getattr(_LOCAL, "deadline", None))
+    _LOCAL.ledger = ledger
+    _LOCAL.deadline = deadline_at
+    try:
+        yield
+    finally:
+        _LOCAL.ledger, _LOCAL.deadline = previous
 
 
 def _detail(function, ledger, outcome, value) -> dict:

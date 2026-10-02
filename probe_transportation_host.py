@@ -9,11 +9,16 @@ the National Map transportation service, the host behind TWO fetch layers:
     report    context_roads   context_map_data.get_context_roads_for_
                               boundary, bbox + 1 mile, DEGRADABLE
 
-Each is three ArcGIS queries, layers 30, 31 and 32 (ROAD_LAYERS), issued
-one after another. This probe issues those six requests -- the same URL,
-the same parameters, the same bbox arithmetic, taken from farm_roads_data
-rather than re-typed -- once per round, over as long as it is left
-running, and records what the host did with each one.
+Each is three ArcGIS queries, layers 30, 31 and 32 (ROAD_LAYERS). This
+probe issues those six requests -- the same URL, the same parameters,
+the same bbox arithmetic, taken from farm_roads_data rather than
+re-typed -- once per round, over as long as it is left running, and
+records what the host did with each one. The probe issues them one
+after another, two seconds apart, so each request's time is its own;
+production has issued a layer's three at once since this probe's first
+run decided the budgets (farm_roads_data._query_road_layers_at_once),
+so a layer's wall time in production is its slowest query, not the sum
+the "layer wall time" rows below add up.
 
 WHY THIS LIVES IN THE REPOSITORY. The NHD probe that measured
 hydro.nationalmap.gov lived in a session's scratchpad and has been
@@ -279,7 +284,7 @@ def summarize(path: str) -> None:
     # layer, as production issues them, under three candidate budgets.
     print("PER-ROUND LAYER OUTCOME UNDER CANDIDATE BUDGETS (each layer = its three queries, sequential)")
     budgets = {
-        "current 30/60/90 + 2x15 s pause": (30, 60, 90),
+        "three attempts, 30/60/90 + 2x15 s pause": (30, 60, 90),
         "one attempt, 30 s": (30,),
         "two attempts, 30/60": (30, 60),
         "one attempt, 15 s": (15,),

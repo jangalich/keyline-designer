@@ -28,8 +28,12 @@ live for the reference parcel):
 
 THE HOST DROPS CONNECTIONS. In step 0 hazards.fema.gov failed the TLS
 handshake four times in a row once and answered every other time; every
-query here runs in the same progressive-timeout retry loop as
-hydrology_data._query_layer(), attempts published through fetch_attempts.
+query here runs in fetch_attempts' counted retry loop -- two attempts of
+a fixed 30 s, a pause between, the whole fetch under one deadline (see
+the budget note above _get()). A handshake that fails four times in a
+row would now exhaust the budget and degrade the layer, with its one
+statement; that was seen once, and the pause is what a dropped handshake
+needs, not a longer wait.
 
 TERMS, as found. The map service's own item description carries an
 EMPTY licenseInfo and accessInformation (its /info/itemInfo, step 0 /
@@ -85,10 +89,24 @@ def __getattr__(name):
     return fetch_attempts.published(__name__, name)
 
 
-def _get(url: str, params: dict, max_retries: int = 2) -> dict:
+# THE BUDGET: the figure-bearing degradable class, as nwi_data's. Each of
+# the three requests makes up to two attempts of ATTEMPT_TIMEOUT_SECONDS,
+# RETRY_PAUSE_SECONDS apart, no escalation, and the whole fetch is capped
+# at NFHL_DEADLINE_SECONDS (fetch_attempts.deadline) -- 120 s in place of
+# a worst case of 630 s. The report-generation audit measured this fetch
+# at 3.5-14.5 s; the host was not probed, so the class is decided on the
+# two hosts that were (see probe_transportation_host.py and nwi_data's
+# RETRIES note), whose failures were fast 5xx answers a retry recovered
+# and never slow answers a longer attempt would have. CONFIGURABLE.
+ATTEMPT_TIMEOUT_SECONDS = 30.0
+NFHL_MAX_RETRIES = 1
+NFHL_DEADLINE_SECONDS = 120.0
+
+
+def _get(url: str, params: dict, max_retries: int = NFHL_MAX_RETRIES) -> dict:
     last_error = None
     for attempt in fetch_attempts.attempts(max_retries):
-        timeout = 30 + attempt * 30
+        timeout = fetch_attempts.timeout(ATTEMPT_TIMEOUT_SECONDS)
         try:
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
@@ -151,9 +169,10 @@ def get_flood_hazard_for_boundary(boundary_coordinates: list, buffer_meters: flo
     """
     window = dem_window_bounds(boundary_coordinates, buffer_meters=buffer_meters)
     window = {"bbox": window["bbox"], "epsg": window["epsg"], "crs": window["crs"]}
-    availability = _polygon_attribute_query(LAYER_AVAILABILITY, boundary_coordinates, "STUDY_ID")
-    zones = _zone_query(window)
-    panels = _polygon_attribute_query(LAYER_FIRM_PANELS, boundary_coordinates, PANEL_FIELDS)
+    with fetch_attempts.deadline(NFHL_DEADLINE_SECONDS):
+        availability = _polygon_attribute_query(LAYER_AVAILABILITY, boundary_coordinates, "STUDY_ID")
+        zones = _zone_query(window)
+        panels = _polygon_attribute_query(LAYER_FIRM_PANELS, boundary_coordinates, PANEL_FIELDS)
     return {"window": window, "availability": availability, "zones": zones, "panels": panels}
 
 

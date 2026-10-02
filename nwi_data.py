@@ -56,8 +56,17 @@ wording the page does state: mapped by a biological definition, no
 attempt to define jurisdiction, not the presence or absence of wetlands
 covered under law.
 
-RETRIES follow hydrology_data._query_layer(): progressive timeouts,
-attempts published through fetch_attempts.
+RETRIES: the figure-bearing degradable class. Each of the fetch's two
+to four requests makes up to two attempts of ATTEMPT_TIMEOUT_SECONDS,
+RETRY_PAUSE_SECONDS apart, and the whole fetch is capped at NWI_
+DEADLINE_SECONDS (fetch_attempts.deadline). The timeouts do not
+escalate: a side probe of this chain (28 rounds, 110 requests, alongside
+probe_transportation_host.py's run) saw every answer inside 30 s and its
+one failure a 502, the same shape as the transportation host -- a longer
+attempt would have recovered nothing, the retry recovers the 502. The
+deadline replaces a worst case of 840 s (four requests at 30/60/90 s
+with two pauses each) with 120 s, which no measured round approached
+(81.7 s max). Attempts published through fetch_attempts.
 """
 
 import json
@@ -71,6 +80,11 @@ import fetch_attempts
 from dem_data import dem_window_bounds
 
 NWI_BASE = "https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services"
+
+# The budget: see RETRIES in the module docstring. CONFIGURABLE.
+ATTEMPT_TIMEOUT_SECONDS = 30.0
+NWI_MAX_RETRIES = 1
+NWI_DEADLINE_SECONDS = 120.0
 NWI_WETLANDS_QUERY = f"{NWI_BASE}/Wetlands/MapServer/0/query"
 NWI_DATA_SOURCE_QUERY = f"{NWI_BASE}/Data_Source/MapServer/0/query"
 
@@ -115,10 +129,10 @@ def fetch_window(boundary_coordinates: list, buffer_meters: float = NWI_FETCH_BU
     return {"bbox": window["bbox"], "epsg": window["epsg"], "crs": window["crs"]}
 
 
-def _get(url: str, params: dict, max_retries: int = 2) -> dict:
+def _get(url: str, params: dict, max_retries: int = NWI_MAX_RETRIES) -> dict:
     last_error = None
     for attempt in fetch_attempts.attempts(max_retries):
-        timeout = 30 + attempt * 30
+        timeout = fetch_attempts.timeout(ATTEMPT_TIMEOUT_SECONDS)
         try:
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
@@ -196,15 +210,16 @@ def get_wetlands_for_boundary(boundary_coordinates: list, buffer_meters: float =
     the report layer records that as unavailable.
     """
     window = fetch_window(boundary_coordinates, buffer_meters)
-    attributes = _attribute_query(window)
-    small, large = [], []
-    for feature in attributes.get("features", []):
-        row = _strip(feature.get("attributes"))
-        acres = row.get("ACRES")
-        (large if acres is not None and float(acres) >= NWI_LARGE_FEATURE_ACRES else small).append(int(row["OBJECTID"]))
-    fine = _geometry_query(small, window, NWI_FINE_OFFSET_METERS) if small else None
-    coarse = _geometry_query(large, window, NWI_COARSE_OFFSET_METERS) if large else None
-    project = _project_query(boundary_coordinates)
+    with fetch_attempts.deadline(NWI_DEADLINE_SECONDS):
+        attributes = _attribute_query(window)
+        small, large = [], []
+        for feature in attributes.get("features", []):
+            row = _strip(feature.get("attributes"))
+            acres = row.get("ACRES")
+            (large if acres is not None and float(acres) >= NWI_LARGE_FEATURE_ACRES else small).append(int(row["OBJECTID"]))
+        fine = _geometry_query(small, window, NWI_FINE_OFFSET_METERS) if small else None
+        coarse = _geometry_query(large, window, NWI_COARSE_OFFSET_METERS) if large else None
+        project = _project_query(boundary_coordinates)
     return {"window": window, "attributes": attributes, "fine": fine, "coarse": coarse, "project": project}
 
 

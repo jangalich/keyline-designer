@@ -381,22 +381,45 @@ assert _road_detail["helpers"] == {
     "farm_roads_data._query_road_layer": {"calls": 3, "attempts": 3, "sleep_ms": 0.0}
 }, _road_detail["helpers"]
 
-# --- (b) three road layers, the LAST one retrying twice -------------------
+# --- (b) three road layers, ONE of them retrying ---------------------------
 #
-# Induced from the fourth transport call on, so the first two layers
-# answer immediately and the third burns its whole budget. The layer's
-# total is 5 -- 1 + 1 + 3 -- while the helper was CALLED three times.
+# The three queries are issued AT ONCE (farm_roads_data._query_road_
+# layers_at_once), so the failure is induced BY LAYER rather than by call
+# number: the last layer's transport fails once and answers on its second
+# and final attempt (FARM_ROADS_MAX_RETRIES is 1). The layer's total is 4
+# -- 1 + 1 + 2 -- while the helper was CALLED three times, and the three
+# worker threads counted into the ONE ledger the entry point opened
+# (fetch_attempts.carrying), which is what the lock on the ledger is for.
+
+
+class FlakyLayer(Flaky):
+    """Flaky, armed only for requests to one road layer's URL."""
+
+    def __init__(self, layer_id, failures):
+        super().__init__(failures)
+        self.layer_url = f"{farm_roads_data.TRANSPORTATION_BASE}/{layer_id}/query"
+        self._lock = threading.Lock()
+
+    def __call__(self, url, *args, **kwargs):
+        with self._lock:
+            self.calls += 1
+            if url == self.layer_url and self.failed < self.failures:
+                self.failed += 1
+                raise self.error("induced at the request boundary")
+        return self.response
+
+
 fetch_attempts.clear()
-_late_flaky = Flaky(failures=2, only_call=3)
+_late_flaky = FlakyLayer(farm_roads_data.ROAD_LAYERS[-1], failures=1)
 with patch.object(farm_roads_data.requests, "get", _late_flaky):
     farm_roads_data.get_farm_roads_for_boundary(BOUNDARY)
 _late_attempts, _late_sleep, _late_detail = _published(farm_roads_data)
 
-assert _late_flaky.calls == 5, _late_flaky.calls
-assert _late_attempts == 5, _late_attempts
+assert _late_flaky.calls == 4, _late_flaky.calls
+assert _late_attempts == 4, _late_attempts
 assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["calls"] == 3
-assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["attempts"] == 5
-assert _late_sleep >= TWO_PAUSES_MS, _late_sleep
+assert _late_detail["helpers"]["farm_roads_data._query_road_layer"]["attempts"] == 4
+assert _late_sleep >= ONE_PAUSE_MS, _late_sleep
 
 # THE ATTRIBUTION IS TO THE HELPER THAT OWNS THE LOOP, and reported as
 # such. canopy_height_data._search_hag_items declares a max_retries budget
@@ -440,13 +463,19 @@ assert _pass_through == [
     "canopy_height_data._search_hag_items",
     "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
+    # The roads' budget is declared at ITS entry point too, per class
+    # (Layer 1's two attempts; context_map_data passes the cosmetic
+    # class's one), and handed through the at-once dispatcher to the one
+    # loop, _query_road_layer, which counts every attempt.
+    "farm_roads_data._query_road_layers_at_once",
+    "farm_roads_data.get_farm_roads_for_boundary",
 ], _pass_through
 
 print(
     f"4 [test 4]. THE LAYER, NOT THE LAST HELPER: farm_roads queried its 3 ROAD_LAYERS and "
-    f"published attempts=3 over calls=3; with the THIRD layer's transport failing twice it "
+    f"published attempts=3 over calls=3; with the THIRD layer's transport failing once it "
     f"published attempts={_late_attempts} over calls=3 and {_late_sleep:.0f} ms of sleep -- "
-    f"1+1+3, not the 3 the last helper call made. Of the {len(_helpers)} functions a max_retries parameter "
+    f"1+1+2, not the 2 the last helper call made, counted from three worker threads into one ledger. Of the {len(_helpers)} functions a max_retries parameter "
     f"finds, {len(_loops)} own a counting loop and {len(_pass_through)} hand their budget to one "
     f"({', '.join(_pass_through)}) -- so their attempts are counted under the loop, and "
     f"retry_helpers says which is which."
@@ -681,10 +710,14 @@ print(
 # the exception that finally escapes and the length of the pause all have
 # to be what they were.
 
-# THE BUDGETS ARE UNTOUCHED, read off the loaded functions' own defaults.
+# THE BUDGETS ARE WHAT THEIR MODULES DECLARE, read off the loaded
+# functions' own defaults. The roads helper's is the per-class budget the
+# transportation-host probe decided (farm_roads_data.FARM_ROADS_MAX_
+# RETRIES, two attempts); the NHD and soil loops keep their three.
 assert _helpers["soil_data._run_sda_query"]["max_retries_default"] == 2
 assert _helpers["hydrology_data._query_layer"]["max_retries_default"] == 2
-assert _helpers["farm_roads_data._query_road_layer"]["max_retries_default"] == 2
+assert _helpers["farm_roads_data._query_road_layer"]["max_retries_default"] == farm_roads_data.FARM_ROADS_MAX_RETRIES == 1
+assert _helpers["farm_roads_data.get_farm_roads_for_boundary"]["max_retries_default"] == 1
 assert _helpers["canopy_height_data._retry"]["max_retries_default"] == 2
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5

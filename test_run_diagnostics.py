@@ -2272,22 +2272,26 @@ assert _helpers["soil_data._run_sda_query"] == {
 # keeps transparent.
 assert _helpers["canopy_height_data._search_hag_items"]["max_retries_default"] == 5
 assert _helpers["canopy_height_data.get_canopy_height_for_boundary"]["max_retries_default"] == 5
-# AND WHICH OF THEM IS A LOOP. Four of the nine declare a budget and
+# AND WHICH OF THEM IS A LOOP. Six of the eleven declare a budget and
 # hand it straight to a helper that owns the loop, so their attempts are
 # counted under that helper -- reported rather than left for a reader to
 # discover by finding a helper that never appears in any breakdown.
 #
-# ALL FOUR ARE THE CANOPY LAYER'S, because its budget is declared
+# FOUR ARE THE CANOPY LAYER'S, because its budget is declared
 # once at the layer entry point and handed down a chain: get_canopy_
 # height_for_boundary -> _search_hag_items, and, on the no-HAG-coverage
 # path, -> _tree_canopy_cover_fallback -> get_tree_canopy_cover_for_
 # boundary. No loop is owned anywhere along it; every attempt those spend
-# is counted under a `_retry`.
+# is counted under a `_retry`. TWO ARE THE ROADS', whose budget is set per
+# class at the entry point (Layer 1's two attempts; the context map's
+# one) and handed through the at-once dispatcher to _query_road_layer.
 assert sorted(name for name, row in _helpers.items() if not row["counts_attempts"]) == [
     "canopy_cover_data.get_tree_canopy_cover_for_boundary",
     "canopy_height_data._search_hag_items",
     "canopy_height_data._tree_canopy_cover_fallback",
     "canopy_height_data.get_canopy_height_for_boundary",
+    "farm_roads_data._query_road_layers_at_once",
+    "farm_roads_data.get_farm_roads_for_boundary",
 ], sorted(_helpers)
 # The fallback's budget is the CANOPY LAYER's, not a second one: by the
 # time NLCD TCC runs it is the last canopy source there is for the parcel,
@@ -2464,7 +2468,7 @@ print(
     f"number the loop published rather than a threshold this module applied. attempt_detail names "
     f"soil_data._run_sda_query at calls=1/attempts=3. The other nine rows are Mocks and honestly "
     f"report nulls, so attempts_recorded stays false on a MIXED fetch. Of the {len(_helpers)} "
-    f"functions a max_retries parameter finds, 5 own a counting loop and 3 pass their budget on. "
+    f"functions a max_retries parameter finds, 5 own a counting loop and the rest pass their budget on. "
     f"AND A WARM CREATION CARRIES NO STALE COUNT: with soil_data still publishing 3 on this "
     f"thread, the cache-served creation records layers NULL and an absent reason that names "
     f"'no layer ran' rather than a publishing failure."

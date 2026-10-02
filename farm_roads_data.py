@@ -62,6 +62,8 @@ was just asking the wrong layer for it. Fixed two ways, not one:
      silently again, for these layers or any future ones.
 """
 
+import concurrent.futures
+import contextvars
 import json
 import math
 from typing import Optional
@@ -98,6 +100,34 @@ ROAD_LAYERS = [30, 31, 32]
 # classification: the layer a segment came back from IS its functional
 # class in this service, and the row would otherwise forget it.
 ROAD_LAYER_NAMES = {30: "Secondary highway", 31: "Local connecting road", 32: "Local road"}
+
+# THE BUDGET, PER CLASS -- decided on probe_transportation_host.py's
+# measurement of carto.nationalmap.gov (30 rounds, 180 requests, 2026-10-02):
+# 97.8% answered within 30 s, none slowly; the four failures were 502s
+# back inside 2.2 s, and the single retry after RETRY_PAUSE_SECONDS
+# recovered all four. No request that would have failed a 30 s attempt
+# ever answered at 60 or 90, so the progressive 30/60/90 timeouts bought
+# nothing on this host and the pause bought everything.
+#
+#   ATTEMPT_TIMEOUT_SECONDS   every attempt waits 30 s, no escalation.
+#   FARM_ROADS_MAX_RETRIES    Layer 1's farm_roads (bbox + 150 m) is a
+#                             HARD-FAIL layer: two attempts, so the 502
+#                             the probe saw on exactly this query is
+#                             retried once -- 4 of 30 session creations
+#                             would have failed on a single attempt.
+#   FARM_ROADS_DEADLINE_SECONDS  the LAYER's cap, shared by its three
+#                             queries (fetch_attempts.deadline): one
+#                             query's full two-attempt budget, 30 + 15 +
+#                             30, since the three run at once.
+#
+# The context map's roads (context_map_data, bbox + 1 mile) are the
+# cosmetic class and pass max_retries=0 with their own deadline; the
+# layer that loses prints one sentence. The NHD host keeps 30/60/90 in
+# hydrology_data: its probes measured slow answers the longer attempts
+# do recover, a different failure shape from this host's. CONFIGURABLE.
+ATTEMPT_TIMEOUT_SECONDS = 30.0
+FARM_ROADS_MAX_RETRIES = 1
+FARM_ROADS_DEADLINE_SECONDS = 75.0
 
 # THE ATTRIBUTES A ROW KEEPS beside its name and geometry (see
 # get_farm_roads_for_boundary()). Every one is a column the three layers
@@ -224,10 +254,14 @@ def __getattr__(name):
 
 
 def _query_road_layer(
-    layer_id: int, bbox: tuple[float, float, float, float], max_retries: int = 2
+    layer_id: int, bbox: tuple[float, float, float, float], max_retries: int = FARM_ROADS_MAX_RETRIES
 ) -> list[dict]:
-    """Same retry-with-increasing-timeout pattern as hydrology_data.py's
-    _query_layer — USGS's map services are occasionally slow, not down.
+    """One road layer's query, in fetch_attempts' counted retry loop: up
+    to max_retries + 1 attempts of ATTEMPT_TIMEOUT_SECONDS each, a
+    RETRY_PAUSE_SECONDS pause between, every attempt clamped to the
+    layer's deadline when the entry point opened one (see the budget
+    note above ROAD_LAYERS -- the timeouts no longer escalate, because
+    the host probe found nothing for a longer attempt to recover).
 
     Also checks the JSON body itself for an "error" key even when the
     HTTP status is 200 — ArcGIS reports some failures (e.g. querying a
@@ -255,13 +289,13 @@ def _query_road_layer(
     last_error = None
 
     # ATTEMPTS ARE PUBLISHED, NOT SWALLOWED -- fetch_attempts.attempts()
-    # yields exactly what range(max_retries + 1) yielded and counts each
-    # pass into the ledger the calling layer entry point opened, and
-    # fetch_attempts.sleep() pauses for exactly as long as time.sleep(2)
-    # did while recording how long that was. Neither changes the budget,
-    # the backoff or the progressive timeout. See fetch_attempts.py.
+    # yields what range(max_retries + 1) yields and counts each pass into
+    # the ledger the calling layer entry point opened; fetch_attempts.
+    # sleep() pauses and records how long it did. Both stop at the
+    # layer's deadline, and fetch_attempts.timeout() clamps each attempt
+    # to it. See fetch_attempts.py.
     for attempt in fetch_attempts.attempts(max_retries):
-        timeout = 30 + (attempt * 30)
+        timeout = fetch_attempts.timeout(ATTEMPT_TIMEOUT_SECONDS)
         try:
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
@@ -310,9 +344,53 @@ def _deduplicate_road_features(features: list[dict]) -> list[dict]:
     return deduped
 
 
+def _query_road_layers_at_once(bbox: tuple, max_retries: int) -> tuple[list, list]:
+    """
+    ROAD_LAYERS' queries, issued together: (features in ROAD_LAYERS'
+    order, [(layer_id, error)] for the ones that failed).
+
+    AT ONCE, NOT ONE AFTER ANOTHER. The host probe measured each query at
+    about a second and the three in sequence at 3.3 s median, 9.8 s max;
+    issued together the layer takes its slowest query, not their sum --
+    and under the report layer's concurrent fetch the stage takes its
+    slowest layer, so this is the real lever on the roads' cost. Three
+    requests at once is what a browser does to a map service; the
+    report's per-host cap (host_slots) counts LAYERS on the host, and
+    this is the only report layer on it.
+
+    EACH WORKER CARRIES THE CALLER'S CONTEXT. fetch_attempts.carrying()
+    hands it the open ledger and deadline, so the three queries' attempts
+    count into the layer's one published total and share its one
+    deadline; contextvars.copy_context() carries the report job's
+    progress binding and diagnostics probe, as report_data's own pool
+    does.
+    """
+    carried = fetch_attempts.carried()
+
+    def one(layer_id):
+        with fetch_attempts.carrying(carried):
+            return _query_road_layer(layer_id, bbox, max_retries=max_retries)
+
+    features, errors = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(ROAD_LAYERS)) as pool:
+        futures = [(layer_id, pool.submit(contextvars.copy_context().run, one, layer_id)) for layer_id in ROAD_LAYERS]
+        for layer_id, future in futures:
+            try:
+                for feature in future.result():
+                    # The layer a segment came back from is its
+                    # classification in this service; the feature itself
+                    # does not say.
+                    feature["_layer_id"] = layer_id
+                    features.append(feature)
+            except Exception as e:
+                errors.append((layer_id, e))
+    return features, errors
+
+
 @fetch_attempts.publishes
 def get_farm_roads_for_boundary(
-    boundary_coordinates: list[tuple[float, float]], buffer_meters: float = 150
+    boundary_coordinates: list[tuple[float, float]], buffer_meters: float = 150,
+    max_retries: int = FARM_ROADS_MAX_RETRIES, deadline_seconds: float = FARM_ROADS_DEADLINE_SECONDS,
 ) -> list[dict]:
     """
     Returns nearby/intersecting road segments as a list of
@@ -320,7 +398,8 @@ def get_farm_roads_for_boundary(
     MultiLineString in WGS84 (lon/lat) — the same raw shape
     hydrology_data.get_water_features_for_boundary uses for streams.
 
-    Queries every layer in ROAD_LAYERS and merges the results (see module
+    Queries every layer in ROAD_LAYERS -- at once, see
+    _query_road_layers_at_once() -- and merges the results (see module
     docstring for why this is multiple layers, not one). Each layer's
     query degrades independently: a real failure (network or the ArcGIS-
     error-on-HTTP-200 case _query_road_layer() detects) on ONE layer
@@ -329,20 +408,16 @@ def get_farm_roads_for_boundary(
     fetch failed, fall back" handling still triggers on a genuine total
     outage, not on one flaky/misconfigured layer among several working
     ones.
+
+    `max_retries` is each query's retry budget and `deadline_seconds`
+    the whole fetch's cap (fetch_attempts.deadline) -- the defaults are
+    Layer 1's hard-fail class; context_map_data passes the cosmetic
+    class's. See the budget note above ROAD_LAYERS.
     """
     bbox = _bounding_box(boundary_coordinates, buffer_meters=buffer_meters)
 
-    all_features = []
-    layer_errors = []
-    for layer_id in ROAD_LAYERS:
-        try:
-            for feature in _query_road_layer(layer_id, bbox):
-                # The layer a segment came back from is its classification
-                # in this service; the feature itself does not say.
-                feature["_layer_id"] = layer_id
-                all_features.append(feature)
-        except Exception as e:
-            layer_errors.append((layer_id, e))
+    with fetch_attempts.deadline(deadline_seconds):
+        all_features, layer_errors = _query_road_layers_at_once(bbox, max_retries)
 
     if len(layer_errors) == len(ROAD_LAYERS):
         # every layer failed -- a real, total fetch failure, not a

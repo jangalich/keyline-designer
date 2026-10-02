@@ -171,18 +171,41 @@ THE PHYSIOGRAPHIC PROVINCE AND THE LIVESTOCK PREDATOR LINE ARE BUNDLED
 (class E: physiography.py, livestock_predators.py) and, like severe
 weather, have no row in the table; the overview reads them directly.
 
-A DEGRADABLE LAYER RETRIES BEFORE IT DEGRADES, PER REQUEST. Every
-network-backed module this table calls runs each of its requests in the
-bounded, progressive-timeout loop fetch_attempts.py describes: at most
-three attempts, 30/60/90 s timeouts, a RETRY_PAUSE_SECONDS pause between them, the
-attempts published. The three layers the report-generation audit measured
-as the slowest -- fema_nfhl (nfhl_data._get), nwi (nwi_data._get) and
-context_roads (farm_roads_data._query_road_layer) -- are held to it by
-test_report_layer_retry.py: a transient failure recovers and the layer is
-present; an exhausted budget degrades it; and an answer that is EMPTY (no
-mapped wetland) is a success, taken once and never retried. There is
-deliberately no second, layer-level retry around those loops: it would
-multiply the worst case for no failure the inner loop does not cover.
+A DEGRADABLE LAYER RETRIES BEFORE IT DEGRADES, PER REQUEST, UNDER A
+BUDGET SET BY CLASS. Every network-backed module this table calls runs
+each of its requests in the bounded, counted loop fetch_attempts.py
+describes, a RETRY_PAUSE_SECONDS pause between attempts, the attempts
+published. Since the concurrent fetch made the stage equal its slowest
+layer, the budget is no longer one number: probe_transportation_host.py
+measured carto.nationalmap.gov (180 requests) and a side probe measured
+NWI (110), and on both no request that failed a 30 s attempt ever
+answered at 60 or 90 s, while the single retry after the pause recovered
+every failure seen (fast 5xx answers). So:
+
+  the NHD host (hydrology_data, nhdplus_data): UNCHANGED, three attempts
+      at 30/60/90 s -- its probes measured 31.7% of answers arriving at
+      36-121 s, a failure shape the longer attempts genuinely recover;
+  degradable, carrying a figure (nwi, fema_nfhl): two attempts of 30 s,
+      and the whole fetch under a 120 s deadline;
+  degradable, cosmetic (context_roads -- some lines on the context map
+      and its six road labels, one sentence when absent): ONE attempt of
+      30 s per query, the three queries issued at once, the fetch under
+      a 30 s deadline;
+  Layer 1 hard-fail on the same host (farm_roads): two attempts of 30 s,
+      a 75 s deadline -- the probe's 502s landed on exactly that query
+      and the retry recovered all of them.
+
+THE DEADLINE IS THE LAYER'S, NOT THE REQUEST'S (fetch_attempts.
+deadline). A layer is several requests -- NWI up to four, NFHL and roads
+three -- and summing per-request budgets gave the context roads a worst
+case of 630 s and NWI 840 s with nothing to say the layer had already
+waited long enough. One deadline shared by every request the layer
+makes caps it whatever the count, and generalises to a layer added
+later. test_report_layer_retry.py holds the three to this: a transient
+failure recovers and the layer is present; an exhausted budget degrades
+it; an answer that is EMPTY (no mapped wetland) is a success, taken once
+and never retried; and a passed deadline makes no further request. There
+is deliberately no second, layer-level retry around those loops.
 
 THE TWO NHD-HOST FIXES THE PROGRESS BAR MADE PRESSING, both landed with
 the NHD reliability work (the branch 23 log that used to sit here):
@@ -213,10 +236,10 @@ asks for the years Daymet used -- capped PER HOST by host_slots.py (five
 soil queries do not hit Soil Data Access together; see REPORT_LAYER_
 HOSTS), with the progress binding and the diagnostics probe carried into
 each worker as ContextVars and `unavailable` written under a lock. The
-stage then takes roughly its slowest single fetch. The retry loops, the
-budgets, the breaker and what each layer returns are untouched; see
-fetch_report_data()'s docstring for how the breaker reads under
-concurrency.
+stage then takes roughly its slowest single fetch -- which is what made
+the per-class budgets above the remaining lever. The breaker and what
+each layer returns are untouched; see fetch_report_data()'s docstring
+for how the breaker reads under concurrency.
 
 RETRIEVED ON. ReportData.retrieved_on is the date this fetch ran -- the
 retrieval date of every report-layer source, which the back matter's
