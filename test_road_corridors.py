@@ -1141,7 +1141,14 @@ _xdem = _flat_dem()
 _xboundary = box(500000, 4500000, 500205, 4500205)
 _xanchor = _lon_lat_for_cell(_xdem, 38, 2)
 _xblock_a_poly = _cell_box_utm(_xdem, 0, 41, 4, 12)
-_xblock_b_poly = _cell_box_utm(_xdem, 0, 41, 20, 30)
+# Block B runs nearly to the east boundary ON PURPOSE (it was cols 20-30
+# until the router's production-skirting plus a wider service radius
+# started serving a thin band from BOTH sides without ever entering it --
+# correct routing, wrong fixture). At 19 columns wide with almost no
+# margin east of it, B's interior can only be served from inside B, so
+# the "network crosses both blocks" premise holds by geometry rather
+# than by routing luck.
+_xblock_b_poly = _cell_box_utm(_xdem, 0, 41, 20, 38)
 _xnetwork = build_road_network(
     _xdem,
     [
@@ -1155,6 +1162,17 @@ _xnetwork = build_road_network(
     # this route crosses. That is the 0.0-versus-None case, side by side
     # with floodplain, whose union was never supplied at all.
     canopy_mask=np.zeros(_xdem["array"].shape, dtype=bool),
+    # PINNED GEOMETRY, not a tuning assertion -- same reasoning as the
+    # buffered-DEM section's own 1e9 ceiling above. This section is about
+    # crossing-length BOOKKEEPING, and its premise is that the network
+    # physically enters BOTH disjoint blocks. That premise is radius-
+    # dependent: at the shipped 75 m service radius a single road near
+    # block A already serves block B from outside it, so nothing ever
+    # drives through B and crossing_meters["b"] is legitimately 0.0 --
+    # correct routing, wrong fixture. 25 m is thin enough that serving a
+    # band means entering it, which is the shape the sum-across-blocks
+    # assertion needs.
+    service_radius_meters=25.0,
 )
 assert _xnetwork["branches"], "the two-block fixture must route a network or it asserts nothing"
 

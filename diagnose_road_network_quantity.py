@@ -75,8 +75,13 @@ branches post-pruning):
    longer in-field haul and a larger no-road zone around the anchor),
    not a lower ceiling. 25 m doubles road on flat ground AND
    under-serves steep parcels (its thin per-meter coverage cannot pay
-   for the detours), which is why
-   PRODUCTION_SERVICE_RADIUS_METERS stays 50.
+   for the detours). PRODUCTION_SERVICE_RADIUS_METERS has since been
+   moved 50 -> 75 as a product decision riding exactly this trade --
+   see that constant's own comment for the chosen balance and for the
+   measured small-parcel price (on a square 10-acre parcel with a
+   mid-edge access point, 75 m is the practical ceiling; the network
+   is a token stub chain by ~100 m and correctly zero at ~215-220 m,
+   the farthest-demand-cell distance, via "all_demand_served").
 
 RUNTIME. The default matrix (10/25-acre parcels) runs in roughly a
 minute. --full adds the 50/100-acre parcels and takes tens of

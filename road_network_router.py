@@ -258,7 +258,24 @@ from road_cost_path import backtrace_route, cost_distance_field
 # None of the three approaches either clamp, so nothing is being
 # compressed at an end. Re-examine the 10.0 multiplier if a real parcel
 # ever routes a network that clamps at 0.0; this one does not.
-PRODUCTION_SERVICE_RADIUS_METERS = 50.0
+#
+# 50 -> 75, A PRODUCT DECISION ON TOP OF THE MEASURED SWEEP
+# (diagnose_road_network_quantity.py), chosen to thin the skeleton
+# further: the radius, not the per-acre ceiling, is the quantity lever
+# on broad demand (full coverage ~ area / (2 * radius)), and at 75 m
+# the swept parcels serve 88-98% of reachable demand at ~22-54 m of
+# road per served acre versus ~38-73 at 50 m -- roughly a quarter to a
+# third less road for the same ground. The measured price, stated
+# rather than hidden: ground up to 75 m (~250 ft) from a drawn road
+# counts as served, and the anchor's own no-road baseline disc grows
+# by the same factor, so SMALL PARCELS GET THINNER NETWORKS -- on a
+# square 10-acre parcel with a mid-edge access point, 75 m is the
+# measured practical ceiling (a real ~190 m skeleton serving 88%;
+# by ~100 m the network is already a token stub chain, and at
+# ~215-220 m, the farthest-demand-cell distance, it is correctly zero
+# via "all_demand_served"). Push this higher only with that 10-acre
+# taper re-measured.
+PRODUCTION_SERVICE_RADIUS_METERS = 75.0
 
 # Per-candidate qualifying ceiling, in real meters of NEW road
 # construction per newly served acre -- every branch after the

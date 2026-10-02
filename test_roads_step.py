@@ -205,13 +205,14 @@ assert step_registry.get_step("landform").accumulate is None
 assert step_registry.get_step("water").accumulate is None
 
 # THE TWO ROUTING CONSTANTS, asserted against the module that owns them
-# rather than restated here. PRODUCTION_SERVICE_RADIUS_METERS is 50.0
-# now (it was 25.0): a doubled radius QUADRUPLES the ground within range
-# of any road cell, so every served-acreage and network-shape figure in
-# this file moves with it -- see that constant's own comment for the
-# measured before/after on this very parcel.
+# rather than restated here. PRODUCTION_SERVICE_RADIUS_METERS is 75.0
+# now (25.0 -> 50.0 -> 75.0): a wider radius grows the ground within
+# range of any road cell QUADRATICALLY, so every served-acreage and
+# network-shape figure in this file moves with it -- see that
+# constant's own comment for the measured history and the chosen
+# balance.
 assert road_network_router.MAX_ROAD_METERS_PER_SERVED_ACRE == 125.0
-assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 50.0
+assert road_network_router.PRODUCTION_SERVICE_RADIUS_METERS == 75.0
 assert not hasattr(road_corridors, "MIN_CORRIDOR_LENGTH_METERS"), (
     "the network-length floor is deleted, not merely unused: a constant left "
     "behind is one a later caller can pass again"
