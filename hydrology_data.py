@@ -86,6 +86,33 @@ def _cos_degrees(degrees: float) -> float:
     return math.cos(math.radians(degrees))
 
 
+def arcgis_error(data, url: str) -> None:
+    """
+    Raise requests.exceptions.HTTPError when `data` -- a decoded ArcGIS
+    REST answer -- is an error body rather than a result.
+
+    ArcGIS REST reports a failed query as HTTP 200 with a body of the
+    form {"error": {"code": 500, "message": "...", "details": [...]}},
+    so response.raise_for_status() passes it and a reader that does
+    data.get("features", []) sees zero features. Any dict with an
+    "error" key is such a body: a genuine answer never carries one (a
+    GeoJSON answer has "type" and "features", an esri JSON answer
+    "features" and "fields"), and an empty answer is {"features": []}.
+
+    Raised as an HTTPError -- a RequestException -- so the calling retry
+    loop treats it exactly as it treats a 5xx: pause, retry with the
+    longer timeout, and after the budget raise into the layer's own
+    policy. The message carries the code and the message ArcGIS gave,
+    and the URL, so a record of the failure says which layer and why.
+    """
+    if isinstance(data, dict) and "error" in data:
+        error = data["error"] if isinstance(data["error"], dict) else {"message": data["error"]}
+        raise requests.exceptions.HTTPError(
+            f"ArcGIS error on HTTP 200 from {url}: code {error.get('code', 'unknown')}: "
+            f"{error.get('message', error)}"
+        )
+
+
 # --- what a fetch of this module's layers cost, published ---------------
 #
 # PEP 562. Python calls a module's __getattr__ only when a normal
@@ -151,6 +178,25 @@ def _query_layer(
             response = requests.get(url, params=params, timeout=timeout)
             response.raise_for_status()
             data = response.json()
+            # THE ERROR BODY ON HTTP 200. ArcGIS reports a failed query
+            # -- a gateway shedding load ("Error performing query
+            # operation", code 500), a bad parameter, a non-queryable
+            # layer -- as a 200 whose JSON body is {"error": {...}} and
+            # carries no "features" key at all. Read with .get("features",
+            # []) that is INDISTINGUISHABLE from a clean empty answer, and
+            # the report then prints "no mapped stream" for a parcel that
+            # has one, with nothing anywhere recording that the service
+            # failed. Raised INSIDE the try, as an HTTPError, so it takes
+            # the same retry-then-raise path a 5xx does: a shedding
+            # episode gets the pauses and the longer timeouts, and an
+            # exhausted budget opens the host's circuit and reaches the
+            # caller as a RequestException -- hard-fail at Layer 1, degrade
+            # at the report layer -- never as zero features. nhdplus_data,
+            # nwi_data, nfhl_data, structures_data and transmission_lines
+            # make the same check; this loop (the flowline, waterbody and
+            # point layers, and the context map's water through them) was
+            # the one that did not.
+            arcgis_error(data, url)
             host_breaker.record_success(url)
             return data.get("features", [])
         except requests.exceptions.RequestException as e:
