@@ -201,6 +201,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import contextvars
 import threading
 import time
 
@@ -1132,13 +1133,16 @@ def _collect_wire_features(payload, dem) -> tuple:
 # answer: the retired narrated report and layout map called
 # fetch_parcel_data() directly, outside any session, with no session id
 # to file a record under. Their layer timers found no probe and cost one
-# thread-local attribute lookup.
+# context-variable lookup.
 
 # THE CONTRACT A FETCH MODULE MUST MEET FOR ITS ATTEMPT COUNT TO BE
 # RECORDED: publish the attempt count of its most recent call as a
 # module attribute of this name. It is read immediately after that
-# layer's call returns, which for a strictly sequential fetch is
-# unambiguous.
+# layer's call returns, ON THE THREAD THAT MADE THE CALL -- which for
+# Layer 1's strictly sequential fetch is the job's thread, and for the
+# report layer's concurrent fetch (report_data, branch 31) is the worker
+# the layer ran on. fetch_attempts publishes per thread, and the timer
+# that reads sits inside the worker's task, so the two never cross.
 #
 # THE FOUR RETRYING MODULES NOW MEET IT, through the one convention in
 # fetch_attempts.py: soil_data, hydrology_data, farm_roads_data and
@@ -1205,8 +1209,15 @@ _NO_LAYERS_REASON = (
 _RETRY_PARAMETER = "max_retries"
 
 # The thread the fetch runs on carries its own probe. See this group's
-# header for why this is a thread-local and not a parameter.
-_LOCAL = threading.local()
+# header for why this is not a parameter -- and why it is a ContextVar
+# rather than the threading.local it was: a ContextVar behaves exactly
+# like a thread-local for every thread that does not copy its context
+# (begin_fetch sets it on the job's thread, the Layer 1 timers read it
+# there), and it is CARRIED into the report fetch's worker threads by
+# contextvars.copy_context().run(...) in report_data, so a layer timed on
+# a worker still finds the probe its job opened. A thread-local there
+# would be empty and the record would carry no report-layer rows at all.
+_FETCH_PROBE: contextvars.ContextVar = contextvars.ContextVar("run_diagnostics_fetch_probe", default=None)
 
 
 def _module_of(function):
@@ -1472,13 +1483,17 @@ class FetchProbe:
     constant.
     """
 
-    __slots__ = ("session_id", "reason", "cached_before", "layers", "modules", "started")
+    __slots__ = ("session_id", "reason", "cached_before", "layers", "modules", "started", "lock")
 
     def __init__(self, session_id, reason, cached_before):
         self.session_id = session_id
         self.reason = reason
         self.cached_before = cached_before
         self.layers = []
+        # The report layer's timers close on worker threads, several at
+        # once; the row list and the modules table are appended to under
+        # this lock so an `order` is never issued twice.
+        self.lock = threading.Lock()
         # Insertion-ordered {name: module}, the modules the timed layers
         # were defined in -- what _retry_helpers() is scanned over, so
         # the retry report covers exactly the code this run went through.
@@ -1519,14 +1534,17 @@ class _LayerTimer:
             retry_sleep_ms, retry_sleep_source = _published_retry_sleep(self.function)
             attempt_detail, attempt_detail_source = _published_attempt_detail(self.function)
             module = _module_of(self.function)
-            if module is not None:
-                self.probe.modules.setdefault(module.__name__, module)
-            self.probe.layers.append(
+            with self.probe.lock:
+                if module is not None:
+                    self.probe.modules.setdefault(module.__name__, module)
+                self.probe.layers.append(
                 {
                     "layer": self.layer,
-                    # The position this layer was fetched at. The order is
-                    # the pipeline's, not this list's -- recorded on the
-                    # row so one grepped row still says where it sat.
+                    # The position this layer FINISHED at. Layer 1's
+                    # fetch is sequential, so this is the pipeline's
+                    # order; the report layer's runs concurrently, so it
+                    # is completion order. Recorded on the row so one
+                    # grepped row still says where it sat.
                     "order": len(self.probe.layers),
                     "function": _qualified(self.function),
                     "elapsed_ms": elapsed,
@@ -1557,7 +1575,7 @@ class _LayerTimer:
                     "attempt_detail": attempt_detail,
                     "attempt_detail_source": attempt_detail_source,
                 }
-            )
+                )
         except Exception as exc:
             if strict() and exception_type is None:
                 raise
@@ -1568,7 +1586,7 @@ class _LayerTimer:
 class _NoLayer:
     """What time_layer() returns when nothing is being recorded: a
     module-level singleton whose two methods do nothing. The cost of an
-    unrecorded layer is a thread-local lookup and two no-op calls."""
+    unrecorded layer is a context-variable lookup and two no-op calls."""
 
     __slots__ = ()
 
@@ -1785,7 +1803,7 @@ def comparable_body(record: dict) -> dict:
 # WHAT A DISABLED HOOK COSTS. `begin_generate()`, `begin_fetch()` and
 # `record_commit()` test `enabled()` -- one os.environ lookup -- and
 # return. `record_generate()` and `record_fetch()` test their probe for
-# None and return. `time_layer()` reads one thread-local attribute and
+# None and return. `time_layer()` reads one context variable and
 # hands back a do-nothing singleton. No record is built,
 # no geometry is reprojected, no directory is created, no file is
 # opened, and `directory()` is never reached. The whole disabled path is
@@ -2073,7 +2091,7 @@ def begin_fetch(session_id, boundary, fetch_cache, reason) -> "FetchProbe":
     begin_generate()'s reason repeated, and it asks the same predicate,
     so "was this warm" cannot mean two things in one record.
 
-    EVERY PROBE MUST BE CLOSED. record_fetch() clears the thread-local,
+    EVERY PROBE MUST BE CLOSED. record_fetch() clears the probe,
     on the success path and the failure path alike -- which is why
     build_session_context() calls it from an `except` arm before letting
     the raise continue, and not only after a successful return.
@@ -2082,10 +2100,10 @@ def begin_fetch(session_id, boundary, fetch_cache, reason) -> "FetchProbe":
         return None
     try:
         probe = FetchProbe(session_id, reason, bool(fetch_cache.contains(boundary)))
-        _LOCAL.fetch_probe = probe
+        _FETCH_PROBE.set(probe)
         return probe
     except Exception as exc:
-        _LOCAL.fetch_probe = None
+        _FETCH_PROBE.set(None)
         if strict():
             raise
         _report_failure(f"begin_fetch({session_id!r}, {reason!r})", exc)
@@ -2106,12 +2124,12 @@ def time_layer(layer, function=None):
     mapping layer names to modules would be a second copy of
     parcel_data.py's imports and would drift from them silently.
 
-    FREE WITH NO PROBE. One thread-local attribute lookup, then a
+    FREE WITH NO PROBE. One context-variable lookup, then a
     module-level singleton whose __enter__/__exit__ do nothing -- which
     is the disabled case, and also the batch paths that fetch outside any
     session.
     """
-    probe = getattr(_LOCAL, "fetch_probe", None)
+    probe = _FETCH_PROBE.get()
     timer = _NO_LAYER if probe is None else _LayerTimer(probe, layer, function)
     # THE REPORT'S PROGRESS BAR RIDES THE SAME SEAM. Every layer of both
     # fetches a report can run -- the report layer and a rebuild's Layer 1
@@ -2144,7 +2162,7 @@ class _Both:
 def record_fetch(probe, parcel=None, error=None) -> None:
     """
     Group 5 for one fetch, appended to the session's record, and the
-    thread-local probe cleared.
+    probe cleared from the context.
 
     CALLED ON BOTH PATHS, AND THE FAILURE PATH IS THE POINT. Twelve of
     the thirteen layers hard-fail the session: fetch_parcel_data() raises,
@@ -2166,7 +2184,7 @@ def record_fetch(probe, parcel=None, error=None) -> None:
     if probe is None:
         return
     total_ms = (time.perf_counter() - probe.started) * 1000.0
-    _LOCAL.fetch_probe = None
+    _FETCH_PROBE.set(None)
     try:
         append_event(probe.session_id, _fetch_event(probe, total_ms, parcel, error))
     except Exception as exc:
@@ -2254,6 +2272,28 @@ def _timed_callables(parcel_data, declared) -> dict:
     return pairs
 
 
+def _code_names_and_constants(code) -> tuple:
+    """(names, constants) of a code object AND every code object nested
+    in its constants -- the closures a function compiles. Empty sets for
+    None."""
+    import types
+
+    names, constants = set(), set()
+    pending = [code] if code is not None else []
+    while pending:
+        current = pending.pop()
+        names.update(current.co_names)
+        for constant in current.co_consts:
+            if isinstance(constant, types.CodeType):
+                pending.append(constant)
+            else:
+                try:
+                    constants.add(constant)
+                except TypeError:
+                    continue
+    return names, constants
+
+
 def _fetch_hook_sites() -> dict:
     """
     Whether the FETCH instrumentation is wired into the parcel_data and
@@ -2314,6 +2354,14 @@ def _fetch_hook_sites() -> dict:
     # reads "1 of 2" here, exactly as a thirteenth Layer 1 layer would
     # above. Imported inside a guard of its own: a report_data that does
     # not import must not read as Layer 1's instrumentation being unwired.
+    #
+    # READ THROUGH THE CLOSURES IT COMPILES. Since the report fetch went
+    # concurrent, fetch_report_data() lists its layers in a table of
+    # specs and runs each on a worker through one nested function that
+    # holds the time_layer() block -- so the layer names are constants of
+    # the outer code object and the timer call is a name of the inner one.
+    # _code_names_and_constants() unions both over every nested code
+    # object, which is still the LOADED function and nothing on disk.
     try:
         import report_data
     except Exception as exc:  # reported as its own row, never hidden
@@ -2321,11 +2369,11 @@ def _fetch_hook_sites() -> dict:
     else:
         function = getattr(report_data, "fetch_report_data", None)
         code = getattr(function, "__code__", None)
+        report_names, report_constants = _code_names_and_constants(code)
         sites["report_data.fetch_report_data calls time_layer"] = (
-            code is not None and "run_diagnostics" in code.co_names and "time_layer" in code.co_names
+            code is not None and "run_diagnostics" in report_names and "time_layer" in report_names
         )
         report_declared = tuple(getattr(report_data, "REPORT_FETCH_LAYERS", {}) or {})
-        report_constants = set(code.co_consts) if code is not None else set()
         report_timed = [layer for layer in report_declared if layer in report_constants]
         sites[
             f"report_data.fetch_report_data times {len(report_timed)} of "
