@@ -1291,6 +1291,13 @@ with Harness() as h:
         # and a client holding the download link should not also have to
         # hold the session it came from.
         "/api/reports/<report_id>",
+        # THE FREE LANDFORM PAGES (branch 30, landform_pages.py): the user's
+        # own section III, rendered from the data the session already holds,
+        # as a manifest and one page's image. Session-scoped, like the
+        # report, and a GET: a derived view of the session, the same answer
+        # every time, rendered on the first call and kept.
+        "/api/sessions/<session_id>/landform-pages",
+        "/api/sessions/<session_id>/landform-pages/<int:number>",
     }, sorted(served)
 
 print(

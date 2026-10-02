@@ -58,6 +58,10 @@ FULL_ONLY = (
     # start to done -- warm, cold, a 2.5 s stall, two failures. Measured
     # at 29.1 s.
     "test_report_progress.py",
+    # Branch 30: the free Landform pages -- the reference session built
+    # twice, three WeasyPrint renders of the section and the rasterizer.
+    # Measured at 12 s.
+    "test_landform_pages.py",
     # The report-layer retry replay, ending in three whole
     # fetch_report_data() runs. Measured at 10.0 s.
     "test_report_layer_retry.py",

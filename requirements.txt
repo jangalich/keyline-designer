@@ -14,4 +14,10 @@ contourpy>=1.2.0
 # silently. Bump deliberately, re-running test_site_report.py.
 weasyprint==70.0
 jinja2>=3.1.0
+# The free Landform pages' rasterizer (landform_pages.py): the PDF
+# WeasyPrint lays out, to page images. pypdfium2 and not PyMuPDF, which is
+# AGPL -- its network clause is exactly the case a hosted service that
+# charges for a report runs into. BSD/Apache, a wheel that bundles pdfium,
+# no system package and no Dockerfile change.
+pypdfium2>=4.30.0
 gunicorn>=22.0.0
