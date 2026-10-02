@@ -205,6 +205,19 @@ time_layer() block below (run_diagnostics hands it on), and _degrade()
 completes a degraded layer -- a degraded layer is finished work. A
 REQUIRED failure raises before that tick, so the bar stays where it was.
 
+THE FETCH IS CONCURRENT (branch 31). The report-generation audit measured
+the twenty fetches running one after another at 42-55 s, about 80% of a
+53 s warm run. fetch_report_data() now runs them at once on a worker
+pool -- one task per layer, Daymet-then-POWER as one task because POWER
+asks for the years Daymet used -- capped PER HOST by host_slots.py (five
+soil queries do not hit Soil Data Access together; see REPORT_LAYER_
+HOSTS), with the progress binding and the diagnostics probe carried into
+each worker as ContextVars and `unavailable` written under a lock. The
+stage then takes roughly its slowest single fetch. The retry loops, the
+budgets, the breaker and what each layer returns are untouched; see
+fetch_report_data()'s docstring for how the breaker reads under
+concurrency.
+
 RETRIEVED ON. ReportData.retrieved_on is the date this fetch ran -- the
 retrieval date of every report-layer source, which the back matter's
 vintage table prints as data. The Layer 1 sources' date is the Design
@@ -251,6 +264,10 @@ Daymet block actually used (climate['years']), so the wind roses and the
 monthly table describe the same thirty years.
 """
 
+import contextvars
+import functools
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -259,10 +276,18 @@ from xml.etree import ElementTree
 import requests
 from shapely.geometry import Polygon
 
+import host_slots
 import precipitation_normals
 import run_diagnostics
 import report_progress
 import spc_reports
+import atlas14_data
+import daymet_data
+import dem_data
+import farm_roads_data
+import hydrology_data
+import power_wind_data
+import soil_data
 import forest_type_data
 import nfhl_data
 import nhdplus_data
@@ -505,249 +530,291 @@ def station_blocks(centroid) -> tuple:
     )
 
 
+@dataclass(frozen=True)
+class _Spec:
+    """One report layer's fetch, as fetch_report_data() runs it: `function`
+    is the callable the timer names (and whose module publishes the attempt
+    count), `fetch` runs it, `parse` turns its raw answer into the
+    ReportData value INSIDE the layer's own except clause but OUTSIDE its
+    timer, exactly as the sequential loop did, and `errors` is what
+    degrades it."""
+
+    name: str
+    wire_pair: tuple
+    function: object
+    fetch: object
+    parse: object
+    errors: tuple
+
+
+# THE HOST EACH LAYER FETCHES FROM, read off the module constant the
+# fetch uses rather than written here a second time, so a module that
+# moves host moves its slot with it. Keyed exactly like REPORT_FETCH_
+# LAYERS (test_report_fetch_concurrency.py holds the two to the same keys).
+# host_slots caps how many of these run at once PER HOST.
+REPORT_LAYER_HOSTS = {
+    "daymet_daily": host_slots.host_of(daymet_data.DAYMET_SINGLE_PIXEL_ENDPOINT),
+    "atlas14": host_slots.host_of(atlas14_data.PFDS_TEXT_ENDPOINT),
+    "power_wind": host_slots.host_of(power_wind_data.POWER_DAILY_ENDPOINT),
+    "nhdplus_hr": host_slots.host_of(nhdplus_data.NHDPLUS_HR_BASE),
+    "nwi": host_slots.host_of(nwi_data.NWI_BASE),
+    "fema_nfhl": host_slots.host_of(nfhl_data.NFHL_BASE),
+    "nlcd_landcover": host_slots.host_of(nlcd_landcover_data.NLCD_IMAGESERVER),
+    "soil_water_table": host_slots.host_of(soil_data.SDA_ENDPOINT),
+    "soil_road_ratings": host_slots.host_of(soil_data.SDA_ENDPOINT),
+    "forest_type_group": host_slots.host_of(forest_type_data.FOREST_TYPE_IMAGESERVER),
+    "soil_woodland": host_slots.host_of(soil_data.SDA_ENDPOINT),
+    "soil_survey": host_slots.host_of(soil_data.SDA_ENDPOINT),
+    "bedrock_geology": host_slots.host_of(bedrock_geology.SGMC_WFS),
+    "naip_imagery": host_slots.host_of(naip_imagery.STAC_API_URL),
+    "context_dem": host_slots.host_of(dem_data.DEM_EXPORT_ENDPOINT),
+    "context_water": host_slots.host_of(hydrology_data.NHD_BASE),
+    "context_roads": host_slots.host_of(farm_roads_data.TRANSPORTATION_BASE),
+    "county_state": host_slots.host_of(census_geography.GEOGRAPHIES_ENDPOINT),
+    "structures": host_slots.host_of(structures_data.STRUCTURES_QUERY),
+    "transmission_lines": host_slots.host_of(transmission_lines.LINES_QUERY),
+}
+
+
 def fetch_report_data(boundary) -> ReportData:
     """
     Every report-only layer for this boundary, per REPORT_FETCH_LAYERS.
     Raises ReportDataIncompleteError for a REQUIRED layer that fails;
     records a DEGRADABLE one under `unavailable` and continues.
 
+    CONCURRENT, SINCE BRANCH 31. The audit measured the twenty fetches
+    running one after another at 42-55 s, about 80% of a 53 s warm run;
+    run at once the stage takes roughly its slowest single fetch. Every
+    layer is one task on a worker thread, started together; the ONE
+    dependency is kept as one task -- Daymet, then POWER, because POWER
+    is asked for the calendar years the Daymet block used -- and the
+    rest are independent. Three things make it safe, each named where it
+    lives:
+
+      * host_slots.slot(): a per-host cap, so five soil queries do not
+        hit Soil Data Access at once (REPORT_LAYER_HOSTS says which host
+        each layer is on). Acquired OUTSIDE the timer, so a layer's
+        recorded time is its fetch and not its wait for a slot.
+      * contextvars.copy_context().run(task): the job's context --
+        report_progress's bound ReportProgress and run_diagnostics'
+        fetch probe, both ContextVars for exactly this -- is carried
+        into each worker, so every layer ticks the bar and writes its
+        row as it did sequentially. fetch_attempts' ledger is per
+        thread and is opened and read on the same worker, inside the
+        timer, so attempt counts are unchanged.
+      * _degrade() writes `unavailable` under a lock, and ticks the
+        progress unit through report_progress's own lock.
+
+    A REQUIRED failure (Daymet) raises from its task; the fetch sets
+    `abort` so tasks not yet started skip (as the layers after Daymet
+    never ran before), waits for the ones in flight -- each bounded by
+    its own retry budget -- and re-raises. Nothing is cached, as before.
+
+    THE BREAKER UNDER CONCURRENCY (host_breaker). Two report layers share
+    the NHD host and now run side by side rather than in sequence, so an
+    episode that exhausts BOTH budgets costs both -- the breaker opens on
+    the first exhausted budget and refuses the NEXT call to the host,
+    which sequentially was the second layer and concurrently is the
+    second layer's next query (context_water makes three) or the next
+    job. That is the breaker doing what it does; what it no longer buys
+    is the second layer's whole budget, which was ~2 minutes of a serial
+    stage and is now hidden behind the other nineteen fetches anyway.
+
     EVERY LAYER IS TIMED, AND ONLY TIMED -- the time_layer() block names
     the REPORT_FETCH_LAYERS entry and the callable, exactly as
     parcel_data.fetch_parcel_data() does, and changes nothing about what
-    runs.
+    runs. `unavailable` is returned in REPORT_FETCH_LAYERS' order whatever
+    order the layers finished in.
     """
     centroid = boundary_centroid_lat_lon(boundary)
     unavailable = {}
+    results = {}
+    lock = threading.Lock()
+    abort = threading.Event()
 
     def _degrade(field_name, wire_pair, exc):
         error = _failure(field_name, wire_pair, exc)
         if REPORT_FETCH_LAYERS[field_name] == REQUIRED:
+            abort.set()
             raise error from exc
-        unavailable[field_name] = {"label": wire_pair[1], "reason": error.reason, "error": str(exc)}
+        with lock:
+            unavailable[field_name] = {"label": wire_pair[1], "reason": error.reason, "error": str(exc)}
         # A DEGRADED LAYER IS FINISHED WORK: the report will render its
         # "unavailable" statement, and nothing more will be asked of the
         # source. Its progress unit completes here, AFTER the REQUIRED
         # raise above -- a required failure leaves the bar where it was.
         report_progress.tick(report_progress.STAGE_RECORDS, field_name)
 
-    daymet_daily = None
-    try:
-        with run_diagnostics.time_layer("daymet_daily", get_daymet_daily_for_point):
-            daymet_daily = get_daymet_daily_for_point(centroid[0], centroid[1])
-    except (requests.exceptions.RequestException, DaymetIncompleteError) as exc:
-        _degrade("daymet_daily", LAYER_CLIMATE, exc)
+    def _timed(name, function, fetch):
+        """The fetch alone, inside its host slot and its timer."""
+        with host_slots.slot(REPORT_LAYER_HOSTS[name]):
+            with run_diagnostics.time_layer(name, function):
+                return fetch()
 
-    # The precipitation correction and the heavy-rain normals: the nearest
-    # bundled stations for the point, no fetch.
-    correction, heavy_rain = station_blocks(centroid)
-
-    climate = None
-    if daymet_daily is not None:
-        climate = derive_climate(daymet_daily, prcp_factor=correction["factor"])
-
-    atlas14 = storms = None
-    try:
-        with run_diagnostics.time_layer("atlas14", get_atlas14_for_point):
-            atlas14 = get_atlas14_for_point(centroid[0], centroid[1])
-        storms = design_storms(atlas14)
-    except (requests.exceptions.RequestException, Atlas14IncompleteError) as exc:
-        atlas14 = storms = None
-        _degrade("atlas14", LAYER_ATLAS14, exc)
-
-    power_wind = wind = None
-    if climate is not None:
+    def _run(spec: _Spec):
+        if abort.is_set():
+            return
         try:
-            with run_diagnostics.time_layer("power_wind", get_power_wind_for_point):
-                power_wind = get_power_wind_for_point(centroid[0], centroid[1], climate["years"])
+            raw = _timed(spec.name, spec.function, spec.fetch)
+            value = spec.parse(raw)
+        except spec.errors as exc:
+            _degrade(spec.name, spec.wire_pair, exc)
+            return
+        with lock:
+            results[spec.name] = value
+
+    def _climate_chain():
+        """Daymet (REQUIRED), the derived climate, then POWER for the
+        years Daymet used -- the one ordered pair, as one task."""
+        if abort.is_set():
+            return
+        daymet_daily = None
+        try:
+            daymet_daily = _timed("daymet_daily", get_daymet_daily_for_point,
+                                  lambda: get_daymet_daily_for_point(centroid[0], centroid[1]))
+        except (requests.exceptions.RequestException, DaymetIncompleteError) as exc:
+            _degrade("daymet_daily", LAYER_CLIMATE, exc)
+        climate = None
+        if daymet_daily is not None:
+            climate = derive_climate(daymet_daily, prcp_factor=correction["factor"])
+        with lock:
+            results["daymet_daily"] = daymet_daily
+            results["climate"] = climate
+        if climate is None:
+            return
+        try:
+            power_wind = _timed("power_wind", get_power_wind_for_point,
+                                lambda: get_power_wind_for_point(centroid[0], centroid[1], climate["years"]))
             wind = derive_wind(power_wind)
         except (requests.exceptions.RequestException, PowerIncompleteError) as exc:
-            power_wind = wind = None
             _degrade("power_wind", LAYER_POWER_WIND, exc)
+            return
+        with lock:
+            results["power_wind"] = (power_wind, wind)
+
+    # The precipitation correction and the heavy-rain normals: the nearest
+    # bundled stations for the point, no fetch. Before the pool because the
+    # climate chain reads the factor.
+    correction, heavy_rain = station_blocks(centroid)
+
+    # THE TABLE OF INDEPENDENT LAYERS, in REPORT_FETCH_LAYERS' order. Each
+    # name is a literal here so run_diagnostics.self_check() can hold this
+    # function to the declared table; each fetch is the module's own entry
+    # point and each parse the module's own parser, as the sequential loop
+    # called them.
+    specs = (
+        _Spec("atlas14", LAYER_ATLAS14, get_atlas14_for_point,
+              lambda: get_atlas14_for_point(centroid[0], centroid[1]),
+              lambda raw: (raw, design_storms(raw)),
+              (requests.exceptions.RequestException, Atlas14IncompleteError)),
+        _Spec("nhdplus_hr", LAYER_NHDPLUS_HR, nhdplus_data.get_flowline_attributes_for_boundary,
+              lambda: nhdplus_data.get_flowline_attributes_for_boundary(boundary),
+              nhdplus_data.parse_flowline_attributes, _WATER_FETCH_ERRORS),
+        _Spec("nwi", LAYER_NWI, nwi_data.get_wetlands_for_boundary,
+              lambda: nwi_data.get_wetlands_for_boundary(boundary),
+              nwi_data.parse_wetlands, _WATER_FETCH_ERRORS),
+        _Spec("fema_nfhl", LAYER_NFHL, nfhl_data.get_flood_hazard_for_boundary,
+              lambda: nfhl_data.get_flood_hazard_for_boundary(boundary),
+              nfhl_data.parse_flood_hazard, _WATER_FETCH_ERRORS),
+        _Spec("nlcd_landcover", LAYER_NLCD, nlcd_landcover_data.get_land_cover_for_boundary,
+              lambda: nlcd_landcover_data.get_land_cover_for_boundary(boundary),
+              nlcd_landcover_data.parse_land_cover, _WATER_FETCH_ERRORS),
+        _Spec("soil_water_table", LAYER_SOIL_WATER_TABLE, soil_water_table.get_seasonal_water_table_for_boundary,
+              lambda: soil_water_table.get_seasonal_water_table_for_boundary(boundary),
+              soil_water_table.parse_seasonal_water_table, _WATER_FETCH_ERRORS),
+        _Spec("soil_road_ratings", LAYER_SOIL_ROAD_RATINGS, soil_road_ratings.get_road_ratings_for_boundary,
+              lambda: soil_road_ratings.get_road_ratings_for_boundary(boundary),
+              soil_road_ratings.parse_road_ratings, _WATER_FETCH_ERRORS),
+        _Spec("forest_type_group", LAYER_FOREST_TYPE_GROUP, forest_type_data.get_forest_type_for_boundary,
+              lambda: forest_type_data.get_forest_type_for_boundary(boundary),
+              forest_type_data.parse_forest_type, _WATER_FETCH_ERRORS),
+        _Spec("soil_woodland", LAYER_SOIL_WOODLAND, soil_woodland.get_woodland_for_boundary,
+              lambda: soil_woodland.get_woodland_for_boundary(boundary),
+              soil_woodland.parse_woodland, _WATER_FETCH_ERRORS),
+        _Spec("soil_survey", LAYER_SOIL_SURVEY, soil_survey.get_survey_for_boundary,
+              lambda: soil_survey.get_survey_for_boundary(boundary),
+              soil_survey.parse_survey, _WATER_FETCH_ERRORS),
+        _Spec("bedrock_geology", LAYER_BEDROCK_GEOLOGY, bedrock_geology.get_geology_for_boundary,
+              lambda: bedrock_geology.get_geology_for_boundary(boundary),
+              bedrock_geology.parse_geology, _GEOLOGY_FETCH_ERRORS),
+        _Spec("naip_imagery", LAYER_NAIP_IMAGERY, naip_imagery.get_naip_for_boundary,
+              lambda: naip_imagery.get_naip_for_boundary(boundary),
+              naip_imagery.parse_naip, _NAIP_FETCH_ERRORS),
+        # THE SITE OVERVIEW LAYERS. The context map's three are Layer 1's
+        # own fetch functions a mile wider; each degrades on its own.
+        _Spec("context_dem", LAYER_CONTEXT_DEM, context_map_data.get_context_dem_for_boundary,
+              lambda: context_map_data.get_context_dem_for_boundary(boundary),
+              lambda raw: raw, _OVERVIEW_FETCH_ERRORS),
+        _Spec("context_water", LAYER_CONTEXT_WATER, context_map_data.get_context_water_for_boundary,
+              lambda: context_map_data.get_context_water_for_boundary(boundary),
+              lambda raw: raw, _OVERVIEW_FETCH_ERRORS),
+        _Spec("context_roads", LAYER_CONTEXT_ROADS, context_map_data.get_context_roads_for_boundary,
+              lambda: context_map_data.get_context_roads_for_boundary(boundary),
+              lambda raw: raw, _OVERVIEW_FETCH_ERRORS),
+        _Spec("county_state", LAYER_COUNTY_STATE, census_geography.get_county_state_for_point,
+              lambda: census_geography.get_county_state_for_point(centroid[0], centroid[1]),
+              census_geography.parse_county_state, _OVERVIEW_FETCH_ERRORS),
+        _Spec("structures", LAYER_STRUCTURES, structures_data.get_structures_for_boundary,
+              lambda: structures_data.get_structures_for_boundary(boundary),
+              structures_data.parse_structures, _OVERVIEW_FETCH_ERRORS),
+        _Spec("transmission_lines", LAYER_TRANSMISSION, transmission_lines.get_transmission_lines_near_boundary,
+              lambda: transmission_lines.get_transmission_lines_near_boundary(boundary),
+              transmission_lines.parse_transmission_lines, _OVERVIEW_FETCH_ERRORS),
+    )
+    tasks = [_climate_chain] + [functools.partial(_run, spec) for spec in specs]
+
+    # ONE WORKER PER TASK: the per-host slots are the cap that matters,
+    # and a pool smaller than the tasks would only queue fast fetches
+    # behind slow ones on unrelated hosts. Each task runs in a COPY of
+    # this thread's context (the progress binding and the fetch probe).
+    first_error = None
+    with ThreadPoolExecutor(max_workers=len(tasks), thread_name_prefix="keyline-report-fetch") as pool:
+        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
+        for future in futures:
+            try:
+                future.result()
+            except BaseException as exc:  # re-raised below, after every task has returned
+                abort.set()
+                if first_error is None:
+                    first_error = exc
+    if first_error is not None:
+        raise first_error
 
     severe_weather = spc_reports.reports_within(centroid[0], centroid[1])
-
-    # THE WATER LAYERS, in the order the section reads them. Each is one
-    # timed block; each degrades on its own. (Springs and seeps are NOT
-    # fetched here any more: they ride Layer 1's water fetch and the
-    # Water section reads them off the parcel's cache -- see the module
-    # docstring and hydrology_data.get_water_features_for_boundary.)
-    nhdplus_hr = None
-    try:
-        with run_diagnostics.time_layer("nhdplus_hr", nhdplus_data.get_flowline_attributes_for_boundary):
-            nhdplus_hr = nhdplus_data.parse_flowline_attributes(nhdplus_data.get_flowline_attributes_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        nhdplus_hr = None
-        _degrade("nhdplus_hr", LAYER_NHDPLUS_HR, exc)
-
-    nwi = None
-    try:
-        with run_diagnostics.time_layer("nwi", nwi_data.get_wetlands_for_boundary):
-            nwi = nwi_data.parse_wetlands(nwi_data.get_wetlands_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        nwi = None
-        _degrade("nwi", LAYER_NWI, exc)
-
-    fema_nfhl = None
-    try:
-        with run_diagnostics.time_layer("fema_nfhl", nfhl_data.get_flood_hazard_for_boundary):
-            fema_nfhl = nfhl_data.parse_flood_hazard(nfhl_data.get_flood_hazard_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        fema_nfhl = None
-        _degrade("fema_nfhl", LAYER_NFHL, exc)
-
-    nlcd_landcover = None
-    try:
-        with run_diagnostics.time_layer("nlcd_landcover", nlcd_landcover_data.get_land_cover_for_boundary):
-            nlcd_landcover = nlcd_landcover_data.parse_land_cover(nlcd_landcover_data.get_land_cover_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        nlcd_landcover = None
-        _degrade("nlcd_landcover", LAYER_NLCD, exc)
-
-    water_table = None
-    try:
-        with run_diagnostics.time_layer("soil_water_table", soil_water_table.get_seasonal_water_table_for_boundary):
-            water_table = soil_water_table.parse_seasonal_water_table(
-                soil_water_table.get_seasonal_water_table_for_boundary(boundary)
-            )
-    except _WATER_FETCH_ERRORS as exc:
-        water_table = None
-        _degrade("soil_water_table", LAYER_SOIL_WATER_TABLE, exc)
-
-    road_ratings = None
-    try:
-        with run_diagnostics.time_layer("soil_road_ratings", soil_road_ratings.get_road_ratings_for_boundary):
-            road_ratings = soil_road_ratings.parse_road_ratings(soil_road_ratings.get_road_ratings_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        road_ratings = None
-        _degrade("soil_road_ratings", LAYER_SOIL_ROAD_RATINGS, exc)
-
-    forest_type = None
-    try:
-        with run_diagnostics.time_layer("forest_type_group", forest_type_data.get_forest_type_for_boundary):
-            forest_type = forest_type_data.parse_forest_type(forest_type_data.get_forest_type_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        forest_type = None
-        _degrade("forest_type_group", LAYER_FOREST_TYPE_GROUP, exc)
-
-    woodland = None
-    try:
-        with run_diagnostics.time_layer("soil_woodland", soil_woodland.get_woodland_for_boundary):
-            woodland = soil_woodland.parse_woodland(soil_woodland.get_woodland_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        woodland = None
-        _degrade("soil_woodland", LAYER_SOIL_WOODLAND, exc)
-
-    # THE SOILS LAYERS. soil_survey is one query on the service Layer 1
-    # already reached; bedrock_geology is a different service entirely.
-    survey = None
-    try:
-        with run_diagnostics.time_layer("soil_survey", soil_survey.get_survey_for_boundary):
-            survey = soil_survey.parse_survey(soil_survey.get_survey_for_boundary(boundary))
-    except _WATER_FETCH_ERRORS as exc:
-        survey = None
-        _degrade("soil_survey", LAYER_SOIL_SURVEY, exc)
-
-    geology = None
-    try:
-        with run_diagnostics.time_layer("bedrock_geology", bedrock_geology.get_geology_for_boundary):
-            geology = bedrock_geology.parse_geology(bedrock_geology.get_geology_for_boundary(boundary))
-    except _GEOLOGY_FETCH_ERRORS as exc:
-        geology = None
-        _degrade("bedrock_geology", LAYER_BEDROCK_GEOLOGY, exc)
-
-    imagery = None
-    try:
-        with run_diagnostics.time_layer("naip_imagery", naip_imagery.get_naip_for_boundary):
-            imagery = naip_imagery.parse_naip(naip_imagery.get_naip_for_boundary(boundary))
-    except _NAIP_FETCH_ERRORS as exc:
-        imagery = None
-        _degrade("naip_imagery", LAYER_NAIP_IMAGERY, exc)
-
-    # THE SITE OVERVIEW LAYERS. The context map's three are Layer 1's own
-    # fetch functions a mile wider; each degrades on its own.
-    context_dem = None
-    try:
-        with run_diagnostics.time_layer("context_dem", context_map_data.get_context_dem_for_boundary):
-            context_dem = context_map_data.get_context_dem_for_boundary(boundary)
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        context_dem = None
-        _degrade("context_dem", LAYER_CONTEXT_DEM, exc)
-
-    context_water = None
-    try:
-        with run_diagnostics.time_layer("context_water", context_map_data.get_context_water_for_boundary):
-            context_water = context_map_data.get_context_water_for_boundary(boundary)
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        context_water = None
-        _degrade("context_water", LAYER_CONTEXT_WATER, exc)
-
-    context_roads = None
-    try:
-        with run_diagnostics.time_layer("context_roads", context_map_data.get_context_roads_for_boundary):
-            context_roads = context_map_data.get_context_roads_for_boundary(boundary)
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        context_roads = None
-        _degrade("context_roads", LAYER_CONTEXT_ROADS, exc)
-
-    county_state = None
-    try:
-        with run_diagnostics.time_layer("county_state", census_geography.get_county_state_for_point):
-            county_state = census_geography.parse_county_state(
-                census_geography.get_county_state_for_point(centroid[0], centroid[1])
-            )
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        county_state = None
-        _degrade("county_state", LAYER_COUNTY_STATE, exc)
-
-    structures = None
-    try:
-        with run_diagnostics.time_layer("structures", structures_data.get_structures_for_boundary):
-            structures = structures_data.parse_structures(structures_data.get_structures_for_boundary(boundary))
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        structures = None
-        _degrade("structures", LAYER_STRUCTURES, exc)
-
-    lines = None
-    try:
-        with run_diagnostics.time_layer("transmission_lines", transmission_lines.get_transmission_lines_near_boundary):
-            lines = transmission_lines.parse_transmission_lines(
-                transmission_lines.get_transmission_lines_near_boundary(boundary)
-            )
-    except _OVERVIEW_FETCH_ERRORS as exc:
-        lines = None
-        _degrade("transmission_lines", LAYER_TRANSMISSION, exc)
+    atlas14, storms = results.get("atlas14") or (None, None)
+    power_wind, wind = results.get("power_wind") or (None, None)
 
     return ReportData(
         boundary=list(boundary),
         centroid=centroid,
-        daymet_daily=daymet_daily,
+        daymet_daily=results.get("daymet_daily"),
         precipitation_correction=correction,
         heavy_rain_normals=heavy_rain,
-        climate=climate,
+        climate=results.get("climate"),
         atlas14=atlas14,
         design_storms=storms,
         power_wind=power_wind,
         wind=wind,
         severe_weather=severe_weather,
-        nhdplus_hr=nhdplus_hr,
-        nwi=nwi,
-        fema_nfhl=fema_nfhl,
-        nlcd_landcover=nlcd_landcover,
-        soil_water_table=water_table,
-        soil_road_ratings=road_ratings,
-        forest_type_group=forest_type,
-        soil_woodland=woodland,
-        soil_survey=survey,
-        bedrock_geology=geology,
-        naip_imagery=imagery,
-        context_dem=context_dem,
-        context_water=context_water,
-        context_roads=context_roads,
-        county_state=county_state,
-        structures=structures,
-        transmission_lines=lines,
+        nhdplus_hr=results.get("nhdplus_hr"),
+        nwi=results.get("nwi"),
+        fema_nfhl=results.get("fema_nfhl"),
+        nlcd_landcover=results.get("nlcd_landcover"),
+        soil_water_table=results.get("soil_water_table"),
+        soil_road_ratings=results.get("soil_road_ratings"),
+        forest_type_group=results.get("forest_type_group"),
+        soil_woodland=results.get("soil_woodland"),
+        soil_survey=results.get("soil_survey"),
+        bedrock_geology=results.get("bedrock_geology"),
+        naip_imagery=results.get("naip_imagery"),
+        context_dem=results.get("context_dem"),
+        context_water=results.get("context_water"),
+        context_roads=results.get("context_roads"),
+        county_state=results.get("county_state"),
+        structures=results.get("structures"),
+        transmission_lines=results.get("transmission_lines"),
         retrieved_on=date.today(),
-        unavailable=unavailable,
+        unavailable={name: unavailable[name] for name in REPORT_FETCH_LAYERS if name in unavailable},
     )
 
 

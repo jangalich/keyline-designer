@@ -370,6 +370,12 @@ with Harness(), mock_patch.object(report_data, "get_daymet_daily_for_point", fix
     print("   PASS")
 
     print("\n[B3] A STALLED LAYER -- flood maps held for 2.5 s")
+    # THE FETCHES RUN CONCURRENTLY (report_data, branch 31): the other
+    # nineteen finish around the held one, so the bar MOVES while the
+    # flood maps are outstanding -- to 19 of 20 -- and then HOLDS there,
+    # with the label naming the flood maps as the longest-outstanding
+    # unit, for the rest of the hold. What must not happen is the bar
+    # counting the held fetch before it returns, or going backwards.
     real_flood = nfhl_data.get_flood_hazard_for_boundary
     HOLD = 2.5
 
@@ -384,10 +390,14 @@ with Harness(), mock_patch.object(report_data, "get_daymet_daily_for_point", fix
     held = [s for s in snaps if s["detail"] == "flood"]
     span = held[-1]["t"] - held[0]["t"]
     assert span > HOLD * 0.8, f"flood maps were named for only {span:.2f}s"
-    assert len({s["fraction"] for s in held}) == 1, "the bar moved while the flood maps were outstanding"
+    assert all(s["fetches"]["completed"] <= 19 for s in held), "the held fetch was counted before it returned"
     assert all(s["stage"] == STAGE_RECORDS for s in held)
-    print(f"   {len(held)} polls over {span:.2f}s: bar held at {held[0]['percent']}% "
-          f"({held[0]['fetches']['completed']} of 21 fetches), label 'flood' throughout")
+    settled = [s for s in held if s["fetches"]["completed"] == 19]
+    settled_span = settled[-1]["t"] - settled[0]["t"]
+    assert len({s["fraction"] for s in settled}) == 1, "the bar moved after the other nineteen had finished"
+    assert settled, "the other nineteen never all finished while the flood maps were held"
+    print(f"   {len(held)} polls over {span:.2f}s: label 'flood' throughout; the other 19 fetches completed "
+          f"around it and the bar then held at {settled[0]['percent']}% (19 of 20 fetches) for {settled_span:.2f}s")
     print("   PASS")
 
     print("\n[B4] FAILURES -- the bar stays where the run stopped")
@@ -400,8 +410,17 @@ with Harness(), mock_patch.object(report_data, "get_daymet_daily_for_point", fix
     assert body["status"] == job_runner.STATUS_FAILED and "failed_layer" in body["error"], body
     assert_honest(snaps, "required failure")
     last = snaps[-1]
-    assert last["failed"] and last["percent"] == 0 and last["detail"] == "climate", last
-    print(f"   climate required and down: failed at {last['percent']}%, label {last['stage']}/{last['detail']}")
+    # The degradable fetches running beside the required one complete
+    # (degraded) before the job fails, so the bar is not at 0 -- it is
+    # wherever those completions left it, and it STAYS there; the label
+    # names the climate records, the unit that stopped the run, however
+    # many degradable units raised around it (report_progress.abandon).
+    running_max = max(s["fraction"] for s in snaps if s["status"] == job_runner.STATUS_RUNNING)
+    assert last["failed"] and last["fraction"] == running_max and last["percent"] < 100, last
+    assert (last["stage"], last["detail"]) == (STAGE_RECORDS, "climate"), last
+    assert last["fetches"]["completed"] < last["fetches"]["total"], last
+    print(f"   climate required and down: failed at {last['percent']}% ({last['fetches']['completed']} of "
+          f"{last['fetches']['total']} fetches degraded around it), label {last['stage']}/{last['detail']}")
 
     import weasyprint  # noqa: E402
 

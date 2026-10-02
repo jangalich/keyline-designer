@@ -41,29 +41,32 @@ did the work) SETTLES them, since the stage's work is then genuinely done.
 --- COUNTED, NOT SEQUENCED ---------------------------------------------
 
 Every unit has a key, and completion is membership in a set. "Seven of the
-twenty-one report fetches have completed" survives any order the fetches
-run in; "now on layer 7" would not survive them running at once. The
-report-layer fetch becomes concurrent in a later branch, and this module
-is shaped so that branch changes nothing here: tick() and the in-flight
+twenty report fetches have completed" survives any order the fetches run
+in; "now on layer 7" would not survive them running at once. The
+report-layer fetch IS concurrent since branch 31 (report_data.fetch_
+report_data runs its layers on worker threads), and this module was
+shaped so that branch changed nothing here: tick() and the in-flight
 table are under one lock, and the label is read off whatever is still
-outstanding rather than off a position.
+outstanding rather than off a position. The one thing the branch did
+touch is abandon(): it now remembers every unit an exception left, in
+order, so fail() can name the required layer that stopped the run even
+when degradable layers raised (and then completed, degraded) around it.
 
-THE LABEL NAMES THE LONGEST-OUTSTANDING UNIT. Sequentially that is just
+THE LABEL NAMES THE LONGEST-OUTSTANDING UNIT. Sequentially that was just
 the one running; concurrently it is the one everything else is waiting
 behind -- the stall a person is looking at the bar to understand.
 
 --- A CONTEXTVAR, NOT A THREAD-LOCAL, AND THAT IS DELIBERATE ------------
 
-run_diagnostics.time_layer() finds its probe on a threading.local, and
-that would look perfectly adequate here too: the report job runs on one
-pool thread today. It is not adequate for the parallel-fetch branch. A
-worker thread started by a ThreadPoolExecutor sees an EMPTY thread-local,
-so every concurrent fetch would tick nothing and the bar would sit still
-through the whole fetch stage and then jump. A ContextVar can be carried
-into those workers with contextvars.copy_context().run(...), which is the
-one line that branch will add. The same decision this codebase has already
-made once for the same reason: build it so the parallel branch does not
-have to undo it.
+A threading.local would have looked perfectly adequate when the report
+job ran its fetches on one pool thread, and it would have been wrong the
+day they went concurrent: a worker thread started by a ThreadPoolExecutor
+sees an EMPTY thread-local, so every concurrent fetch would tick nothing
+and the bar would sit still through the whole fetch stage and then jump.
+A ContextVar is carried into those workers with contextvars.copy_
+context().run(...), which is the one line report_data added. run_
+diagnostics' fetch probe made the same move for the same reason, so the
+per-layer timing rows ride the same copied context.
 
 --- WIRE SHAPE ---------------------------------------------------------
 
@@ -99,7 +102,7 @@ from typing import Iterable, Optional
 # Stage keys. The frontend owns the words; these are the contract.
 # ---------------------------------------------------------------------
 
-STAGE_RECORDS = "records"   # the 21 report-layer fetches
+STAGE_RECORDS = "records"   # the 20 report-layer fetches
 STAGE_REBUILD = "rebuild"   # a cold session context: Layer 1 + warm-up
 STAGE_TERRAIN = "terrain"   # section inputs and the eight section builders
 STAGE_MAPS = "maps"         # an SVG map or chart is being drawn (a label only)
@@ -262,7 +265,7 @@ class ReportProgress:
         self._stage = None
         self._failed = False
         self._frozen = None          # (stage, detail) at failure
-        self._last_error_key = None  # the unit an exception last left
+        self._abandoned = []         # units an exception left, in order, never completed since
         if units is not None:
             self.set_plan(units)
 
@@ -314,11 +317,19 @@ class ReportProgress:
         """The unit's block raised. It stops being in flight; it is NOT
         complete. A degradable fetch is completed by its caller right
         after (report_data's _degrade); a fatal one leaves the bar where
-        it was and is remembered for the failure label."""
+        it was and is remembered for the failure label.
+
+        REMEMBERED IN ORDER, ALL OF THEM, not only the last: with the
+        report fetches running concurrently, a degradable layer can raise
+        (and then complete, degraded) AFTER the required layer raised,
+        and "the unit an exception last left" would then name a layer the
+        bar had already counted as done. fail() names the first abandoned
+        unit that never completed -- the one that actually stopped the
+        run -- whatever raised around it."""
         with self._lock:
             self._inflight.pop(key, None)
-            if key in self._units:
-                self._last_error_key = key
+            if key in self._units and key not in self._abandoned:
+                self._abandoned.append(key)
 
     def settle(self, stage: str) -> None:
         """
@@ -353,8 +364,8 @@ class ReportProgress:
             if self._failed:
                 return
             self._failed = True
-            key = self._last_error_key
-            if key is not None and key not in self._completed:
+            key = next((k for k in self._abandoned if k not in self._completed), None)
+            if key is not None:
                 unit = self._units[key]
                 self._frozen = (unit.stage, unit.kind)
             else:

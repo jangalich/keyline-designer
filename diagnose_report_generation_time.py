@@ -394,6 +394,9 @@ def summarise(scenario: str, total: float, pdf_bytes: int, pages: int, created: 
         "layers": LAYERS,
         "report_layer_fetch": _sum("stage", "report layer fetch"),
         "report_layer_timed_sum": sum(l["seconds"] for l in LAYERS if l["group"] == "report"),
+        # Concurrent since branch 31: the stage's wall time is bounded by
+        # its longest layer, not by the sum -- both are printed.
+        "report_layer_longest": max((l["seconds"] for l in LAYERS if l["group"] == "report"), default=0.0),
         "inputs": inputs,
         "sections": sections,
         "svg": svg_rows,
@@ -446,7 +449,8 @@ def print_summary(s: dict) -> None:
         print(f"  terrain warm-up   {f(s['terrain_warm_up'])}")
         for name, sec in s["warm_up_parts"].items():
             print(f"    {name:<30}{f(sec)}")
-    print(f"report layer        {f(s['report_layer_fetch'])}  (serial; per-layer sum {s['report_layer_timed_sum']:.2f} s)")
+    print(f"report layer        {f(s['report_layer_fetch'])}  (concurrent; per-layer sum "
+          f"{s['report_layer_timed_sum']:.2f} s, longest layer {s.get('report_layer_longest', 0.0):.2f} s)")
     by_layer = s["http"]["by_layer"]
     for l in s["layers"]:
         if l["group"] == "report":
