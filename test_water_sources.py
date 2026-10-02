@@ -276,17 +276,21 @@ print("   two points, one spring")
 # ======================================================================
 print("7. under the refused network every fetch raises a RequestException at once")
 offline_harness.clear()
-for module, function in ((nwi_data, nwi_data.get_wetlands_for_boundary), (nfhl_data, nfhl_data.get_flood_hazard_for_boundary),
-                         (nlcd_landcover_data, nlcd_landcover_data.get_land_cover_for_boundary),
-                         (nhdplus_data, nhdplus_data.get_flowline_attributes_for_boundary),
-                         (hydrology_data, hydrology_data.get_nhd_points_for_boundary)):
+# Each module's attempts are its class's budget (report_data.py, "A
+# DEGRADABLE LAYER RETRIES BEFORE IT DEGRADES"): two for the figure-
+# bearing NWI and NFHL, three on the NHD host and for NLCD.
+for module, function, budget in ((nwi_data, nwi_data.get_wetlands_for_boundary, nwi_data.NWI_MAX_RETRIES + 1),
+                                 (nfhl_data, nfhl_data.get_flood_hazard_for_boundary, nfhl_data.NFHL_MAX_RETRIES + 1),
+                                 (nlcd_landcover_data, nlcd_landcover_data.get_land_cover_for_boundary, 3),
+                                 (nhdplus_data, nhdplus_data.get_flowline_attributes_for_boundary, 3),
+                                 (hydrology_data, hydrology_data.get_nhd_points_for_boundary, 3)):
     try:
         function(REAL_BOUNDARY)
     except requests.exceptions.RequestException:
         pass
     else:
         raise AssertionError(f"{module.__name__} must raise with no network")
-    assert module.LAST_FETCH_ATTEMPTS == 3, (module.__name__, module.LAST_FETCH_ATTEMPTS)
+    assert module.LAST_FETCH_ATTEMPTS == budget, (module.__name__, module.LAST_FETCH_ATTEMPTS, budget)
 try:
     soil_water_table.get_seasonal_water_table_for_boundary(REAL_BOUNDARY)
 except requests.exceptions.RequestException:

@@ -20,6 +20,17 @@ function with `buffer_meters=CONTEXT_BUFFER_METERS` -- one mile past the
 parcel's bounding box on every side, about two miles across for a small
 farm. No new host, no new query shape.
 
+THE ROADS ARE THE COSMETIC CLASS. Without context_roads the map loses
+its road lines and its six road labels -- the only place names on it --
+and prints one sentence saying so; nothing else in the report reads
+them. The transportation-host probe (probe_transportation_host.py) found
+the one-mile queries answering within 30 s in 90 of 90 requests, so a
+single 30 s attempt per query with no retry, and CONTEXT_ROADS_DEADLINE_
+SECONDS over the whole fetch, cost nothing measured and replace a layer
+worst case of 630 s (three queries, each 30/60/90 s with two pauses)
+with 30 s. The DEM and water keep their modules' own budgets: the NHD
+host's slow answers are real (hydrology_data).
+
 THE GRID THE CAP FORCES. dem_data.MAX_GRID_DIMENSION clamps the grid at
 300 cells a side, so the resolution is whatever the window divides into:
 11.7 x 11.9 m for the reference parcel's 3.5 x 3.56 km window. That is
@@ -40,6 +51,12 @@ import hydrology_data
 
 CONTEXT_BUFFER_METERS = 1609.344  # one mile
 
+# The context roads' budget: one attempt per query, and this many seconds
+# for the whole fetch -- farm_roads_data.ATTEMPT_TIMEOUT_SECONDS, since
+# the three queries run at once. See the module docstring. CONFIGURABLE.
+CONTEXT_ROADS_MAX_RETRIES = 0
+CONTEXT_ROADS_DEADLINE_SECONDS = 30.0
+
 CONTEXT_CITATION = {
     "dem": "USGS 3DEP elevation, resampled onto a 300-cell grid over the parcel's extent plus one mile.",
     "water": "USGS National Hydrography Dataset, flowlines and waterbodies at 1:24,000, the parcel's extent plus one mile.",
@@ -56,4 +73,7 @@ def get_context_water_for_boundary(boundary_coordinates: list) -> dict:
 
 
 def get_context_roads_for_boundary(boundary_coordinates: list) -> list:
-    return farm_roads_data.get_farm_roads_for_boundary(boundary_coordinates, buffer_meters=CONTEXT_BUFFER_METERS)
+    return farm_roads_data.get_farm_roads_for_boundary(
+        boundary_coordinates, buffer_meters=CONTEXT_BUFFER_METERS,
+        max_retries=CONTEXT_ROADS_MAX_RETRIES, deadline_seconds=CONTEXT_ROADS_DEADLINE_SECONDS,
+    )

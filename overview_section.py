@@ -387,9 +387,17 @@ def build_sources(inputs: od.OverviewInputs, derived: od.OverviewDerived) -> lis
     retrieved = format_generated_on(inputs.report_retrieved_on) if inputs.report_retrieved_on else None
     on = f", retrieved {retrieved}" if retrieved else ""
     lines = []
-    if inputs.context_dem is not None:
-        lines.append([f"USGS 3DEP elevation, USGS National Hydrography Dataset and USGS National Map transportation, "
-                      f"over the parcel's extent plus one mile{on}."])
+    # Only the context sources that ANSWERED are cited: a source that did
+    # not answer is named in build_unavailable(), and citing it here
+    # would have the report claim a source it did not use -- the back
+    # matter's vintage table reads this line to list the context sources.
+    answered = [name for name, present in (("USGS 3DEP elevation", inputs.context_dem is not None),
+                                           ("USGS National Hydrography Dataset", inputs.context_water is not None),
+                                           ("USGS National Map transportation", inputs.context_roads is not None))
+                if present]
+    if answered:
+        cited = answered[0] if len(answered) == 1 else ", ".join(answered[:-1]) + " and " + answered[-1]
+        lines.append([f"{cited}, over the parcel's extent plus one mile{on}."])
     lookups = []
     if derived.county_state:
         lookups.append("U.S. Census Bureau geocoder")
