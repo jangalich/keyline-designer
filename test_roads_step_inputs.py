@@ -70,7 +70,7 @@ from reference_fixture import BOUNDARY_POLYGON_UTM, CRS, PARCEL_ACRES, REAL_BOUN
 # them without running this file's tests first.
 from roads_step_fixture import (  # noqa: E402,F401
     _boundary_point,
-    NO_NETWORK_CEILING_METERS_PER_ACRE,
+    NO_NETWORK_SERVICE_RADIUS_METERS,
     ACCESS_A,
     ACCESS_B,
     ACCESS_C,
@@ -454,21 +454,28 @@ with Harness() as h:
 # --- 15 [tests 3, 4, 5]. AN ACCESS POINT THAT ROUTES NOTHING LEAVES NOTHING
 # BEHIND -- and the upstream-failure control that says the narrowing is real.
 #
-# THE WHOLE SECTION RUNS AT THE CEILING NO_NETWORK WAS SURVEYED AT (see the
-# access-point block at the top of this file for the re-survey that made this
-# necessary -- at the shipped 500 this parcel has no refusing point left).
-# road_corridors.build_road_network() binds the shipped default into its own
-# signature at import time, so a module attribute cannot move it; the pin is a
-# wrapper passing the figure explicitly. The REAL function still runs, over the
-# real cost surface and the real exclusions, and still refuses by its own
-# stopping rule -- only the threshold that rule compares against is this
-# section's own. Everything else here (the orchestrator, the document, the cap,
-# the cache) is untouched and is what the section actually asserts about.
+# THE WHOLE SECTION RUNS AT THE SERVICE RADIUS NO_NETWORK WAS MEASURED AT
+# (see NO_NETWORK_SERVICE_RADIUS_METERS in roads_step_fixture.py for the
+# measurement, and for why the old ceiling pin is retired: the router's
+# guaranteed trunk means no ceiling can make an access point with
+# reachable, uncovered demand route nothing any more -- the one refusal
+# that remains REAL is the anchor's own baseline disc already serving
+# every acre of demand, and 255 m makes that true from NO_NETWORK, the
+# parcel's most demand-central edge point, while leaving demand beyond
+# A/B/C/D's own discs so each of those still routes).
+# road_corridors.build_road_network() binds the shipped default into its
+# own signature at import time, so a module attribute cannot move it; the
+# pin is a wrapper passing the figure explicitly. The REAL function still
+# runs, over the real cost surface and the real exclusions, and still
+# refuses by its own rule ("all_demand_served", branches=[]) -- only the
+# radius that rule measures coverage with is this section's own.
+# Everything else here (the orchestrator, the document, the cap, the
+# cache) is untouched and is what the section actually asserts about.
 _real_build_road_network = road_corridors.build_road_network
 
 
 def _build_at_surveyed_ceiling(*args, **kwargs):
-    kwargs["max_meters_per_served_acre"] = NO_NETWORK_CEILING_METERS_PER_ACRE
+    kwargs["service_radius_meters"] = NO_NETWORK_SERVICE_RADIUS_METERS
     return _real_build_road_network(*args, **kwargs)
 
 
@@ -487,9 +494,10 @@ with Harness() as h, mock_patch.object(
     calls_before = h.road_selfcomputes()
     network_before = h.total_network_calls
 
-    # --- THE ROUTER FAILURE. Real terrain, no mock: the cheapest extension
-    # from NO_NETWORK already costs more per acre than the router will pay,
-    # so it accepts no branch at all.
+    # --- THE ROUTER FAILURE. Real terrain, no mock: at this section's
+    # pinned radius, NO_NETWORK's own baseline disc already serves every
+    # acre of production demand, so the router correctly builds no branch
+    # at all ("all_demand_served", branches=[]).
     failed = s.job("roads", {"access_point": list(ACCESS_NO_NETWORK)}).wait(timeout=900)
     assert failed.status == job_runner.STATUS_FAILED, failed.status
     assert isinstance(failed.exception, step_orchestrator.EmptyCandidateError), failed.exception
@@ -610,8 +618,8 @@ with Harness() as h, mock_patch.object(
 
     print(
         f"15 [tests 3, 4, 5]. ROUTER FAILURE LEAVES NOTHING: an access point the "
-        f"router refuses on real terrain (stop_reason 'cost_per_acre_exceeded' before "
-        f"a single branch is accepted, 0 network calls) fails the job with "
+        f"router refuses on real terrain (stop_reason 'all_demand_served' -- its own "
+        f"baseline disc covers every demand acre, 0 network calls) fails the job with "
         f"`no_candidate` naming the input and NO `failed_layer`, and the document is "
         f"byte-identical across it -- same revision, {len(entry_after['inputs']['access_points'])} "
         f"recorded point, {layers_after['summary']['slots_remaining']} slots still free, "

@@ -936,12 +936,14 @@ def build_road_network(
     same branches=[] shape (with its own stop_reason) when demand_mask has
     no True cells at all ("no_demand"), the anchor's own baseline coverage
     already serves every acre of demand ("all_demand_served"), no
-    remaining demand is reachable at all ("no_reachable_demand"), even
-    the first candidate's own cost-per-acre is already too expensive
-    ("cost_per_acre_exceeded"), or its own leaf pruning removed every
-    branch it had grown ("all_branches_below_minimum") -- this function
-    just adds "cells"/"cell_footprint_polygon_utm" on top of that same
-    result.
+    remaining demand is reachable at all ("no_reachable_demand"), or its
+    own leaf pruning removed every branch it had grown
+    ("all_branches_below_minimum") -- this function just adds "cells"/
+    "cell_footprint_polygon_utm" on top of that same result.
+    "cost_per_acre_exceeded" no longer appears on an EMPTY network: the
+    router's guaranteed-trunk rule (see route_road_network()'s own
+    docstring) means the per-acre ceiling can end growth early but can
+    no longer zero a network out while reachable demand exists.
     """
     if slope_pct is None:
         slope_pct, _aspect_deg = compute_slope_and_aspect(dem["array"], dem["resolution_meters"])
@@ -2420,9 +2422,11 @@ def road_network_is_empty(result: dict) -> bool:
     same emptiness build_narrative_data() already publishes, not a second
     opinion assembled here. Every no-network outcome reaches this as
     False: the router's own stop_reason values (no_demand,
-    all_demand_served, no_reachable_demand, cost_per_acre_exceeded on the
-    very first candidate, all_branches_below_minimum once leaf pruning
-    took the last branch) and _empty_road_network()'s two (no_anchor_given,
+    all_demand_served, no_reachable_demand,
+    all_branches_below_minimum once leaf pruning
+    took the last branch -- cost_per_acre_exceeded can no longer arrive
+    empty, see route_road_network()'s guaranteed-trunk rule)
+    and _empty_road_network()'s two (no_anchor_given,
     no_eligible_anchor) alike. They are one answer to the user -- "no road
     comes from here" -- and the access point is the thing they have in
     common, which is why the orchestrator treats them the same.
