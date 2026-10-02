@@ -26,9 +26,12 @@ the pipeline path imports it.
 WHAT IT RECORDS, per request, as one JSON line:
 
     round, when, layer (30/31/32), extent ("parcel" = bbox+150 m,
-    "mile" = bbox+1 mile), outcome, seconds, http status, bytes,
-    feature count, and whether the row is a first request or the single
-    RETRY issued after a failed one.
+    "mile" = bbox+1 mile), outcome, seconds (to the whole body), ttfb
+    (seconds to the response headers -- the server's thinking time, which
+    is what a production attempt's timeout actually bounds, since
+    requests' timeout is between bytes and not a total), http status,
+    bytes, feature count, and whether the row is a first request or the
+    single RETRY issued after a failed one.
 
 OUTCOMES, bucketed the way the NHD probe bucketed them so the two hosts
 read side by side:
@@ -127,12 +130,18 @@ def the_requests(boundary=REFERENCE_PARCEL) -> list:
 def issue(url: str, params: dict, timeout: float) -> dict:
     """One request, one row's worth of facts about what the host did."""
     started = time.monotonic()
-    row = {"status": None, "bytes": 0, "features": None, "error": None}
+    row = {"status": None, "bytes": 0, "features": None, "error": None, "ttfb": None}
     try:
-        response = requests.get(url, params=params, timeout=timeout)
+        # stream=True so the headers' arrival is timed on its own: requests'
+        # `timeout` is a connect-and-between-bytes timeout, not a total, so
+        # the production attempt fails when the SERVER is silent for 30 s,
+        # which is the time to first byte here, not the whole transfer.
+        response = requests.get(url, params=params, timeout=timeout, stream=True)
+        row["ttfb"] = round(time.monotonic() - started, 3)
+        content = response.content
         row["seconds"] = round(time.monotonic() - started, 3)
         row["status"] = response.status_code
-        row["bytes"] = len(response.content)
+        row["bytes"] = len(content)
         if 500 <= response.status_code:
             row["outcome"] = "http_5xx"
         elif 400 <= response.status_code:
@@ -176,7 +185,8 @@ def run(minutes: float, interval: float, timeout: float, out_path: str, retry: b
                     out.write(json.dumps(row) + "\n")
                     out.flush()
                     print(f"  r{rnd:03d} L{layer} {extent:6s} {'retry ' if row['retry'] else ''}"
-                          f"{row['outcome']:10s} {row['seconds']:7.2f}s  {row['bytes']:>7d} B  "
+                          f"{row['outcome']:10s} {row['seconds']:7.2f}s (first byte "
+                          f"{'--' if row['ttfb'] is None else f'{row[chr(116)+chr(116)+chr(102)+chr(98)]:.2f}'} s)  {row['bytes']:>7d} B  "
                           f"{'' if row['features'] is None else row['features']} features", flush=True)
                     failed = row["outcome"] not in ("ok_fast", "ok_slow")
                     if attempt == "first" and failed and retry:
@@ -246,10 +256,11 @@ def summarize(path: str) -> None:
     # What the progressive timeouts would have bought: of the first
     # requests that would have FAILED a 30 s attempt (answered after 30 s,
     # or did not answer), how many answered by 60 s, by 90 s.
-    print("WHAT A LONGER TIMEOUT BUYS (first requests that would have failed at 30 s)")
-    late = [r for r in firsts if r["outcome"] != "ok_fast"]
-    by60 = sum(1 for r in late if r["outcome"] in answered and r["seconds"] <= 60)
-    by90 = sum(1 for r in late if r["outcome"] in answered and r["seconds"] <= 90)
+    print("WHAT A LONGER TIMEOUT BUYS (first requests whose headers took over 30 s, or that never answered)")
+    ttfb = lambda r: r["ttfb"] if r.get("ttfb") is not None else r["seconds"]
+    late = [r for r in firsts if not (r["outcome"] in answered and ttfb(r) <= 30)]
+    by60 = sum(1 for r in late if r["outcome"] in answered and ttfb(r) <= 60)
+    by90 = sum(1 for r in late if r["outcome"] in answered and ttfb(r) <= 90)
     ever = sum(1 for r in late if r["outcome"] in answered)
     print(f"  would fail at 30 s: {len(late)} of {len(firsts)}; of those answered by 60 s: {by60}, "
           f"by 90 s: {by90}, ever (<= {max([r['seconds'] for r in rows]) if rows else 0:.0f} s): {ever}; "
@@ -298,7 +309,10 @@ def summarize(path: str) -> None:
                     spent, ok = 0.0, False
                     for k, t in enumerate(timeouts):
                         obs = chain[min(k, len(chain) - 1)]
-                        if obs["outcome"] in answered and obs["seconds"] <= t:
+                        # The attempt survives its timeout when the server
+                        # answered (headers) inside it; the body then streams.
+                        waited = obs.get("ttfb") if obs.get("ttfb") is not None else obs["seconds"]
+                        if obs["outcome"] in answered and waited <= t:
                             spent += obs["seconds"]
                             ok = True
                             break
