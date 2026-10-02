@@ -1,0 +1,58 @@
+{#- pages.html -- SOME SECTIONS OF THE REPORT, ON THEIR OWN PAGES, WITH NO
+    COVER. landform_pages.py renders the user's own Landform section through
+    this: the same section template, the same stylesheet and the same
+    WeasyPrint pass the full report uses, so what comes off it IS part of
+    their report rather than a demonstration of one.
+
+    WHAT IS DIFFERENT FROM base.html, AND WHY EACH THING IS:
+
+    NO COVER. The cover is the whole document's -- its title, its contents,
+    its acreage. Three pages of one section have no claim to it, and a
+    cover over three pages would say "this is the report".
+
+    THE RUNNING STRINGS STILL RUN, so each page's footer carries the title
+    and the date exactly as the report's pages do. They are the first
+    elements in the body because an element before the first page would
+    otherwise open a page of its own (base.html's own note).
+
+    NO PAGE NUMBER. The report's footer counts its pages; here the counter
+    would read 1, 2, 3 and misstate where Landform sits in a document of
+    twenty-odd pages. The centre margin box is cleared, and NOTHING ELSE ON
+    THE PAGE SAYS HOW MANY PAGES THERE ARE: the eyebrow's numeral (III)
+    says the section has a place in a larger document, and the continuation
+    eyebrows say the pages follow one another.
+
+    THE FIRST SECTION DOES NOT BREAK BEFORE ITSELF. report.css opens every
+    section on a new page, which in the full report puts it after the cover
+    or the previous section; with nothing before it the break would leave a
+    blank first page holding only the running strings. The override is
+    scoped to the first section so a second section, were one ever passed,
+    still opens on a page of its own.
+
+    Autoescape is on (site_report.jinja_environment); the stylesheet is the
+    module's own CSS, marked safe here for the reason base.html gives. -#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ title }}</title>
+<style>
+{{ stylesheet | safe }}
+@page {
+  @bottom-center { content: none; }
+}
+.section-anchor:first-of-type .section {
+  break-before: auto;
+}
+</style>
+</head>
+<body>
+<span class="running running-label">{{ label }}</span>
+<span class="running running-date">{{ generated_on }}</span>
+{% for section in sections -%}
+<div class="section-anchor" id="{{ section.anchor or ('section-' ~ loop.index) }}">
+{% include "sections/" ~ section.template %}
+</div>
+{% endfor %}
+</body>
+</html>

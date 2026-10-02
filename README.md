@@ -825,6 +825,49 @@ five mapped road segments and its SSURGO ratings
 `diagnose_access_section.py` prints every figure and, given an output
 directory, renders the pages and the overflow case to PNG.
 
+## Site data report: the free Landform pages
+
+`landform_pages.py` renders section III of the report -- the user's own
+Landform pages: contours and slope classes, the keyline structure and
+valley profile, the numbers -- for one session, as page images, through
+`GET /api/sessions/<sid>/landform-pages` (the manifest) and
+`GET /api/sessions/<sid>/landform-pages/<n>` (one page's WebP, `?size=thumb`
+for the 480 x 621 thumbnail). The frontend's report page asks for them on
+arrival and shows them free, beside the offer of the rest.
+
+**Why Landform, and why it is free to render.** It is the one section
+built entirely from data the session already holds -- the DEM and its
+derivations, fetched and computed when the boundary was committed. Its
+source line names USGS 3DEP and nothing else. So the path makes **no
+report-layer fetch**, by construction: the renderer takes the session
+caches and nothing else, has no report fetch cache parameter, and never
+imports the report layer. `test_landform_pages.py` asserts that statically
+(the module names none of the report layer's entry points) and at run time
+(a render under the offline harness refuses zero requests).
+
+**Same machinery as the paid pages.** The same section builder, the same
+`sections/landform.html`, the same stylesheet and the same WeasyPrint pass,
+through `templates/report/pages.html` -- sections with no cover, the
+running title and date in the footer, and no page number (1, 2, 3 would
+misstate where Landform sits in the report). The PDF is rasterized by
+`pypdfium2` (BSD/Apache; PyMuPDF is AGPL, which a hosted service that
+charges for the report cannot carry) at 150 dpi, 1275 x 1650, lossless
+WebP, and exists only in memory. Rendered once per session and kept in
+memory (`LandformPageStore`); a restart renders again, identically.
+
+**Time.** About 2 s on a cached context (section 0.35 s, layout 0.5 s,
+PDF 0.2 s, raster 0.07 s, WebP 0.3 s), measured offline on the reference
+parcel; the route is synchronous for that reason -- a job and a poll would
+add a second to a two-second render.
+
+**The one caveat is Layer 1, not the report layer.** A session whose
+context the cache has let go is rebuilt the way every other read rebuilds
+it; with the boundary still in the Layer 1 fetch cache that is under a
+second of compute and no network. If both caches have dropped it -- a
+bookmark opened days later -- the rebuild refetches Layer 1, and a source
+that does not answer makes the route a 502 with one sentence rather than
+a hang. Arriving from the delivery card the context is always live.
+
 ## Running it yourself
 
 Needs internet access (won't run in a fully offline sandbox). Setup:

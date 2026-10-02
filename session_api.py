@@ -86,7 +86,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from flask import Blueprint, current_app, jsonify, request, send_file
+from flask import Blueprint, Response, current_app, jsonify, request, send_file
 
 import canopy_height_data
 import commit_validation
@@ -97,6 +97,7 @@ import parcel_data
 import production_zone_payload
 import session_cache
 import session_manager
+import landform_pages
 import session_report
 import step_orchestrator
 import step_registry
@@ -166,6 +167,9 @@ class Dependencies:
     # boundary). None is report_data.default_report_fetch_cache(), resolved
     # in site_report.generate_session_site_report_pdf().
     report_fetch_cache: Optional[session_cache.FetchCache] = None
+    # The user's own Landform pages, rendered once per session and kept
+    # (landform_pages.py). None is landform_pages.DEFAULT_LANDFORM_PAGE_STORE.
+    landform_page_store: Optional[landform_pages.LandformPageStore] = None
 
     def resolved_store(self) -> document_store.DocumentStore:
         return self.store if self.store is not None else default_store()
@@ -371,6 +375,8 @@ _API_ERRORS = (
     # lost with the process (session_report.py's ephemerality note). One
     # answer -- ask for the report again -- so one status code.
     (session_report.ReportNotFoundError, 404, None),
+    # A Landform page number the section does not have (landform_pages.py).
+    (landform_pages.PageNotFoundError, 404, None),
     # A step id that is not in STEP_ORDER, or a real step with no registry
     # entry yet: both are "this URL names no resource", and get_step()'s
     # message already tells the two apart in prose.
@@ -453,6 +459,11 @@ _API_ERRORS = (
     (production_zone_payload.LayerFetchError, 502, _failed_layer_payload),
     (parcel_data.ParcelDataIncompleteError, 502, _failed_layer_payload),
     (canopy_height_data.CanopyCoverageIncompleteError, 502, _failed_layer_payload),
+    # The free Landform pages' one network failure: a rebuild that had to
+    # refetch Layer 1 and could not (landform_pages.py's caveat). One
+    # sentence, no layer -- the raise site did not name one -- and the
+    # same 502 the session-creation path answers for the same condition.
+    (landform_pages.RebuildFailedError, 502, None),
     # --- 400: the request itself is malformed --------------------------
     (session_manager.BoundaryValidationError, 400, None),
     # Unknown or missing `params` against the step's declared user_inputs,
@@ -996,6 +1007,93 @@ def build_blueprint(deps: Optional[Dependencies] = None, name: str = "sessions")
             as_attachment=True,
             download_name=session_report.DOWNLOAD_FILENAME,
         )
+
+    @blueprint.route(f"/api/sessions/<session_id>/{landform_pages.PAGES_URL_SUFFIX}", methods=["GET"])
+    @_handled
+    def landform_pages_endpoint(session_id):
+        """
+        The user's own Landform pages -- section III of the site data
+        report, generated for this session from the data it already holds
+        -- as a manifest of page images:
+
+            {"session_id", "generated_on", "section": {"number", "name"},
+             "pages": [{"number", "label", "alt", "url", "thumb_url",
+                        "width", "height", "thumb_width", "thumb_height"}]}
+
+        The client fetches each `url` / `thumb_url` (the route below) for
+        the bytes. See landform_pages.py for what these pages are, why they
+        are free, and the one caveat.
+
+        A GET, AND SYNCHRONOUS. The pages are a derived view of the
+        session -- the same answer every time, with no body to send -- and
+        they render in about two seconds on a cached context, which a
+        request can hold: POST /api/sessions already holds one open for
+        far longer. A job and a poll would add a second of overhead to a
+        two-second render (the frontend polls at one second) for a wait
+        that reports no progress. The first call renders; every call after
+        it is served from memory (landform_pages.LandformPageStore), so a
+        refresh or a return to the page is instant.
+
+        NO REPORT-LAYER FETCH, by construction: the renderer takes the
+        session caches and nothing else. A session the caches have let go
+        is rebuilt the way every other read of it is (session_manager.
+        get_session_context); on a rebuild that must refetch Layer 1 and
+        cannot, the error table above answers 502 with failed_layer, as a
+        session creation does -- a graceful failure, not a hang.
+
+        AN UNKNOWN SESSION IS A 404, from the store read.
+
+        `Cache-Control: no-store`: the manifest is cheap and the client
+        should always see the server's current answer; the images are
+        what get cached.
+        """
+        pages = deps.landform_page_store
+        if pages is None:
+            pages = landform_pages.DEFAULT_LANDFORM_PAGE_STORE
+        rendered = pages.get_or_render(
+            session_id, deps.resolved_store(), fetch_cache=deps.fetch_cache, cache=deps.cache
+        )
+        response = jsonify(rendered.manifest())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.route(
+        f"/api/sessions/<session_id>/{landform_pages.PAGES_URL_SUFFIX}/<int:number>", methods=["GET"]
+    )
+    @_handled
+    def landform_page_endpoint(session_id, number):
+        """
+        One Landform page as WebP: the full 1275 x 1650 render, or with
+        `?size=thumb` the 480 x 621 thumbnail. The URLs the manifest hands
+        out, and the only place the bytes are served.
+
+        INLINE, NEVER AN ATTACHMENT. These are page images to look at on
+        the report page -- the artifact is the PDF, which is the report
+        job's -- so nothing here sets Content-Disposition.
+
+        RENDERS IF IT MUST. A page URL fetched directly -- a hard refresh
+        after a restart emptied the store -- renders the session's pages
+        the same way the manifest does rather than answering 404 for a
+        page that exists.
+
+        A page number the section does not have is a 404; a size that is
+        neither full nor thumb is a 400. Cached privately for an hour: the
+        content is fixed for the session's life, and an hour bounds how
+        long a deploy that changes the render is shadowed by a browser.
+        """
+        size = request.args.get("size", landform_pages.SIZE_FULL)
+        if size not in landform_pages.SIZES:
+            return jsonify({"error": f"size must be one of {', '.join(landform_pages.SIZES)}"}), 400
+        pages = deps.landform_page_store
+        if pages is None:
+            pages = landform_pages.DEFAULT_LANDFORM_PAGE_STORE
+        page = pages.get_or_render(
+            session_id, deps.resolved_store(), fetch_cache=deps.fetch_cache, cache=deps.cache
+        ).page(number)
+        response = Response(page.full if size == landform_pages.SIZE_FULL else page.thumb,
+                            mimetype=landform_pages.WEBP_MIME_TYPE)
+        response.headers["Cache-Control"] = "private, max-age=3600"
+        return response
 
     @blueprint.route("/api/jobs/<job_id>", methods=["GET"])
     @_handled
